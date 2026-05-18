@@ -1,0 +1,6 @@
+/target/
+**/*.rs.bk
+data/
+*.trace.jsonl
+*.log
+/spec

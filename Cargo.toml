@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "crates/kaya-core",
+    "crates/kaya-io",
+    "crates/kaya-wal",
+    "crates/kaya-lsm",
+    "crates/kaya-engine",
+    "crates/kaya-sim",
+    "crates/kaya-server",
+    "crates/kayactl",
+    "crates/kaya-raft",
+    "crates/kaya-net",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tunay/KayaDB"
+rust-version = "1.85"
+
+[workspace.dependencies]
+kaya-core = { path = "crates/kaya-core" }
+kaya-io = { path = "crates/kaya-io" }
+kaya-wal = { path = "crates/kaya-wal" }
+kaya-lsm = { path = "crates/kaya-lsm" }
+kaya-engine = { path = "crates/kaya-engine" }
+tokio = { version = "1", features = ["rt"] }
