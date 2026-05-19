@@ -113,7 +113,7 @@ impl ManifestState {
     /// priority ordering.
     pub fn tables_newest_first(&self) -> Vec<&TableMetadata> {
         let mut tables: Vec<&TableMetadata> = self.live_tables.iter().collect();
-        tables.sort_by(|a, b| b.table_id.cmp(&a.table_id));
+        tables.sort_by_key(|b| std::cmp::Reverse(b.table_id));
         tables
     }
 }
