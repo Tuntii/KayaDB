@@ -1,3 +1,8 @@
+pub mod cluster;
+pub mod command;
+
+pub use cluster::{ClusterConfig, ClusterNode};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     pub host: String,

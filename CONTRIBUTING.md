@@ -4,7 +4,7 @@ KayaDB development is spec-first and invariant-driven.
 
 Before opening a PR:
 
-1. Link the relevant spec document or roadmap item.
+1. Link the relevant spec document or roadmap item from [`ROADMAP.md`](ROADMAP.md).
 2. Mention the invariant IDs affected by the change when applicable.
 3. Add or update tests for correctness behavior, especially crash/corruption paths.
 4. Run:

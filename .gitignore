@@ -4,3 +4,4 @@ data/
 *.trace.jsonl
 *.log
 /spec
+ROADMAP.md

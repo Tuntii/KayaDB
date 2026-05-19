@@ -7,7 +7,7 @@ mod sim;
 pub use file::FileDisk;
 use kaya_core::Result;
 pub use path::RelativePath;
-pub use sim::{CrashReport, FaultRule, FaultSchedule, SimDisk, SimDiskEvent, SimSeed};
+pub use sim::{CrashReport, FaultKind, FaultRule, FaultSchedule, SimDisk, SimDiskEvent, SimSeed};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
