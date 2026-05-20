@@ -1,13 +1,19 @@
 [package]
 name = "kaya-io"
+description = "Disk abstraction trait with FileDisk (real fsync) and SimDisk (deterministic fault injection) for KayaDB"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 kaya-core.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
 
 [lib]
 path = "src/lib.rs"

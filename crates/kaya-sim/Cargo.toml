@@ -1,14 +1,20 @@
 [package]
 name = "kaya-sim"
+description = "Deterministic simulation runner, SimDisk fault injection, and linearizability checker for KayaDB"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 kaya-core.workspace = true
 kaya-io.workspace = true
+kaya-engine.workspace = true
+kaya-raft.workspace = true
+tokio.workspace = true
 
 [lib]
 path = "src/lib.rs"

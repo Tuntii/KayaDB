@@ -1,14 +1,20 @@
 [package]
 name = "kaya-wal"
+description = "Write-ahead log: CRC32C-protected record codec, append-only writer, crash-safe recovery, and inspector for KayaDB"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 kaya-core.workspace = true
 kaya-io.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
 
 [lib]
 path = "src/lib.rs"

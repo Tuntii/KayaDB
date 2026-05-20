@@ -4,3 +4,5 @@ data/
 *.trace.jsonl
 *.log
 /spec
+ROADMAP.md
+/fuzz/target
