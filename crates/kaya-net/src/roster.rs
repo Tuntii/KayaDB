@@ -9,22 +9,50 @@ use kaya_raft::NodeId;
 ///
 /// The roster is established at startup and does not change while a node is
 /// running (dynamic membership is a post-M8 concern).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterEntry {
+    pub raft_addr: SocketAddr,
+    pub client_addr: SocketAddr,
+}
+
+/// Static mapping from [`NodeId`] to network addresses.
+///
+/// The roster is established at startup and does not change while a node is
+/// running (dynamic membership is a post-M8 concern).
 #[derive(Debug, Clone)]
 pub struct NodeRoster {
-    entries: HashMap<NodeId, SocketAddr>,
+    entries: HashMap<NodeId, RosterEntry>,
 }
 
 impl NodeRoster {
-    /// Build a roster from an iterator of `(node_id, socket_addr)` pairs.
+    /// Build a roster from an iterator of `(node_id, raft_addr)` pairs (defaults client_addr to raft_addr).
     pub fn new(entries: impl IntoIterator<Item = (NodeId, SocketAddr)>) -> Self {
         Self {
-            entries: entries.into_iter().collect(),
+            entries: entries
+                .into_iter()
+                .map(|(id, raft_addr)| (id, RosterEntry { raft_addr, client_addr: raft_addr }))
+                .collect(),
+        }
+    }
+
+    /// Build a roster from an iterator of `(node_id, raft_addr, client_addr)` tuples.
+    pub fn new_with_client(entries: impl IntoIterator<Item = (NodeId, SocketAddr, SocketAddr)>) -> Self {
+        Self {
+            entries: entries
+                .into_iter()
+                .map(|(id, raft_addr, client_addr)| (id, RosterEntry { raft_addr, client_addr }))
+                .collect(),
         }
     }
 
     /// Look up the Raft network address for `id`.
     pub fn addr(&self, id: NodeId) -> Option<SocketAddr> {
-        self.entries.get(&id).copied()
+        self.entries.get(&id).map(|e| e.raft_addr)
+    }
+
+    /// Look up the Client network address for `id`.
+    pub fn client_addr(&self, id: NodeId) -> Option<SocketAddr> {
+        self.entries.get(&id).map(|e| e.client_addr)
     }
 
     /// All node IDs present in this roster.
@@ -34,9 +62,9 @@ impl NodeRoster {
         ids
     }
 
-    /// All `(id, addr)` pairs in this roster.
+    /// All `(id, raft_addr)` pairs in this roster.
     pub fn all_entries(&self) -> Vec<(NodeId, SocketAddr)> {
-        let mut v: Vec<_> = self.entries.iter().map(|(&id, &addr)| (id, addr)).collect();
+        let mut v: Vec<_> = self.entries.iter().map(|(&id, entry)| (id, entry.raft_addr)).collect();
         v.sort_by_key(|(id, _)| id.0);
         v
     }

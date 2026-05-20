@@ -23,3 +23,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "kayadb-server"
 path = "src/main.rs"
+
+[dev-dependencies]
+kaya-client = { path = "../kaya-client" }
+

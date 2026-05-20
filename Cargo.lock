@@ -202,6 +202,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaya-client"
+version = "0.1.0"
+dependencies = [
+ "kaya-core",
+ "kaya-net",
+ "tokio",
+]
+
+[[package]]
 name = "kaya-core"
 version = "0.1.0"
 
@@ -251,6 +260,7 @@ dependencies = [
 name = "kaya-server"
 version = "0.1.0"
 dependencies = [
+ "kaya-client",
  "kaya-core",
  "kaya-engine",
  "kaya-io",

@@ -147,7 +147,72 @@ cargo run -p kaya-server -- --dir /tmp/kaya-node3 --port 7773 \
   --peers 127.0.0.1:7771,127.0.0.1:7772 --node-id 3
 ```
 
-The cluster runs Raft consensus. Reads and writes are routed through the current leader.
+The cluster runs Raft consensus. Reads and writes are transparently routed through the current leader.
+
+---
+
+## Checking Cluster Status & Metrics
+
+You can remotely inspect the health, role, term, and engine statistics of any node in the cluster:
+
+```bash
+# Get human-readable status from Node 1
+cargo run -p kayactl -- --server 127.0.0.1:7771 status
+
+# Get JSON-formatted status for automation
+cargo run -p kayactl -- --server 127.0.0.1:7771 status --json
+```
+
+**Example output:**
+```text
+role:          leader
+term:          3
+commit_index:  45
+applied_index: 45
+peer_count:    2
+engine.put_count:          100
+engine.get_count:          50
+engine.delete_count:       5
+engine.scan_count:         10
+engine.wal_bytes_written:  2048
+engine.wal_fsync_count:    105
+engine.memtable_entries:   0
+engine.sstable_count:      1
+engine.last_sequence:      105
+```
+
+---
+
+## Using the `kaya-client` Library
+
+For application developers, KayaDB provides an ergonomic, async-native Rust client library (`kaya-client`) featuring automatic leader redirection:
+
+```rust
+use std::net::SocketAddr;
+use kaya_client::KayaClient;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let addr: SocketAddr = "127.0.0.1:7771".parse()?;
+    
+    // Connects to the target node
+    let mut client = KayaClient::connect(addr).await?;
+    
+    // Write value (transparently retries and redirects if Node 1 is a follower)
+    client.put(b"hello", b"world").await?;
+    
+    // Read value
+    if let Some(val) = client.get(b"hello").await? {
+        println!("Value: {}", String::from_utf8_lossy(&val));
+    }
+    
+    // Query statistics
+    let stats = client.stats().await?;
+    println!("Stats: {}", stats);
+    
+    Ok(())
+}
+```
 
 ---
 

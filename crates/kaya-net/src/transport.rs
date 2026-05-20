@@ -15,7 +15,7 @@
 //! request/response exchange used by `kayactl --server`.
 //!
 //! Client request frame:  `frame_len(u32 LE) | opcode(u8) | payload`
-//! Client response frame: `frame_len(u32 LE) | status(u8) | payload`
+//! Client response frame: `frame_len(u32 LE) | status(u16 LE) | payload`
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -32,13 +32,15 @@ use crate::roster::NodeRoster;
 // ── response status codes ─────────────────────────────────────────────────────
 
 /// The request was fulfilled successfully.
-pub const STATUS_OK: u8 = 0;
+pub const STATUS_OK: u16 = 0;
+/// The client request was invalid or malformed.
+pub const STATUS_INVALID_ARGUMENT: u16 = 1;
 /// GET / SCAN: the key was not found.
-pub const STATUS_NOT_FOUND: u8 = 1;
+pub const STATUS_NOT_FOUND: u16 = 2;
 /// The server encountered an error processing the request.
-pub const STATUS_ERROR: u8 = 2;
+pub const STATUS_ERROR: u16 = 9;
 /// This node is not the current Raft leader; the client should retry.
-pub const STATUS_NOT_LEADER: u8 = 3;
+pub const STATUS_NOT_LEADER: u16 = 10;
 
 // ── raft transport ────────────────────────────────────────────────────────────
 
@@ -152,15 +154,15 @@ pub async fn read_client_frame(stream: &mut TcpStream) -> std::io::Result<(u8, V
 
 /// Write one client response frame to `stream`.
 ///
-/// Frame: `frame_len(u32 LE) | status(u8) | payload`.
+/// Frame: `frame_len(u32 LE) | status(u16 LE) | payload`.
 pub async fn write_client_response(
     stream: &mut TcpStream,
-    status: u8,
+    status: u16,
     payload: &[u8],
 ) -> std::io::Result<()> {
-    let frame_len = (1 + payload.len()) as u32;
+    let frame_len = (2 + payload.len()) as u32;
     stream.write_u32_le(frame_len).await?;
-    stream.write_u8(status).await?;
+    stream.write_u16_le(status).await?;
     if !payload.is_empty() {
         stream.write_all(payload).await?;
     }
@@ -187,21 +189,21 @@ pub async fn roundtrip(
     server_addr: SocketAddr,
     opcode: u8,
     payload: &[u8],
-) -> std::io::Result<(u8, Vec<u8>)> {
+) -> std::io::Result<(u16, Vec<u8>)> {
     let mut stream = TcpStream::connect(server_addr).await?;
     let frame = encode_client_frame(opcode, payload);
     stream.write_all(&frame).await?;
     stream.flush().await?;
     // Read response
     let resp_len = stream.read_u32_le().await? as usize;
-    if resp_len == 0 {
+    if resp_len < 2 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "empty response frame",
+            "response frame too short",
         ));
     }
-    let status = stream.read_u8().await?;
-    let body_len = resp_len - 1;
+    let status = stream.read_u16_le().await?;
+    let body_len = resp_len - 2;
     let mut body = vec![0u8; body_len];
     if body_len > 0 {
         stream.read_exact(&mut body).await?;

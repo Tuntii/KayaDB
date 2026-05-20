@@ -53,8 +53,8 @@ fn run() -> Result<(), String> {
 
     let data_dir = take_value(&mut args, "--data").unwrap_or_else(|| "./data".to_owned());
 
-    // --peer <id>=<addr>  (may appear multiple times)
-    let mut peers: Vec<(u64, SocketAddr)> = Vec::new();
+    // --peer <id>=<raft_addr>,<client_addr>  (may appear multiple times)
+    let mut peers: Vec<(u64, SocketAddr, SocketAddr)> = Vec::new();
     loop {
         match take_value(&mut args, "--peer") {
             None => break,
@@ -96,16 +96,28 @@ fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
     }
 }
 
-/// Parse a `<id>=<addr>` peer specification.
-fn parse_peer(spec: &str) -> Result<(u64, SocketAddr), String> {
-    let (id_str, addr_str) = spec
+/// Parse a `<id>=<raft_addr>,<client_addr>` or `<id>=<raft_addr>` peer specification.
+fn parse_peer(spec: &str) -> Result<(u64, SocketAddr, SocketAddr), String> {
+    let (id_str, addrs_str) = spec
         .split_once('=')
         .ok_or_else(|| format!("peer spec must be <id>=<addr>, got: {spec}"))?;
     let id = id_str
         .parse::<u64>()
         .map_err(|e| format!("peer id '{id_str}': {e}"))?;
-    let addr = addr_str
-        .parse::<SocketAddr>()
-        .map_err(|e| format!("peer addr '{addr_str}': {e}"))?;
-    Ok((id, addr))
+
+    let (raft_addr, client_addr) = if let Some((raft_str, client_str)) = addrs_str.split_once(',') {
+        let r_addr = raft_str
+            .parse::<SocketAddr>()
+            .map_err(|e| format!("peer raft addr '{raft_str}': {e}"))?;
+        let c_addr = client_str
+            .parse::<SocketAddr>()
+            .map_err(|e| format!("peer client addr '{client_str}': {e}"))?;
+        (r_addr, c_addr)
+    } else {
+        let r_addr = addrs_str
+            .parse::<SocketAddr>()
+            .map_err(|e| format!("peer addr '{addrs_str}': {e}"))?;
+        (r_addr, r_addr)
+    };
+    Ok((id, raft_addr, client_addr))
 }

@@ -1,6 +1,9 @@
 pub mod cluster;
 pub mod command;
 
+#[cfg(test)]
+mod integration_tests;
+
 pub use cluster::{ClusterConfig, ClusterNode};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

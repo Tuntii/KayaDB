@@ -256,6 +256,30 @@ async fn open_engine(
 
 // ── server-mode dispatch ──────────────────────────────────────────────────────
 
+async fn roundtrip_with_retry(
+    mut addr: SocketAddr,
+    opcode: u8,
+    payload: &[u8],
+) -> Result<(u16, Vec<u8>)> {
+    let mut retries = 0;
+    loop {
+        let (status, body) = roundtrip(addr, opcode, payload)
+            .await
+            .map_err(|e| KayaError::internal(e.to_string()))?;
+        if status == STATUS_NOT_LEADER && retries < 3 && !body.is_empty() {
+                if let Ok(leader_addr_str) = String::from_utf8(body.clone()) {
+                    if let Ok(new_addr) = leader_addr_str.parse::<SocketAddr>() {
+                        eprintln!("Redirecting to leader at {}...", new_addr);
+                        addr = new_addr;
+                        retries += 1;
+                        continue;
+                    }
+                }
+        }
+        return Ok((status, body));
+    }
+}
+
 /// Send commands to a running `kayadb-server` over TCP.
 fn run_server_mode(args: Vec<String>, addr: SocketAddr, json: bool) -> Result<()> {
     block_on(async move { run_server_mode_async(args, addr, json).await })
@@ -272,9 +296,7 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
         )),
         [cmd, key, value] if cmd == "put" => {
             let payload = encode_put_payload(key.as_bytes(), value.as_bytes());
-            let (status, body) = roundtrip(addr, 1, &payload)
-                .await
-                .map_err(|e| KayaError::internal(e.to_string()))?;
+            let (status, body) = roundtrip_with_retry(addr, 1, &payload).await?;
             match status {
                 STATUS_OK => {
                     if json {
@@ -299,9 +321,7 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
         )),
         [cmd, key] if cmd == "get" => {
             let payload = encode_key_payload(key.as_bytes());
-            let (status, body) = roundtrip(addr, 2, &payload)
-                .await
-                .map_err(|e| KayaError::internal(e.to_string()))?;
+            let (status, body) = roundtrip_with_retry(addr, 2, &payload).await?;
             match status {
                 STATUS_OK => {
                     let value = decode_value_payload(&body).map_err(KayaError::internal)?;
@@ -321,6 +341,9 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
                     }
                     Err(KayaError::NotFound)
                 }
+                STATUS_NOT_LEADER => Err(KayaError::internal(
+                    "not leader — retry on a different node",
+                )),
                 STATUS_ERROR => {
                     let msg = decode_error_payload(&body).unwrap_or_else(|_| "unknown".into());
                     Err(KayaError::internal(msg))
@@ -333,9 +356,7 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
         )),
         [cmd, key] if cmd == "delete" => {
             let payload = encode_key_payload(key.as_bytes());
-            let (status, body) = roundtrip(addr, 3, &payload)
-                .await
-                .map_err(|e| KayaError::internal(e.to_string()))?;
+            let (status, body) = roundtrip_with_retry(addr, 3, &payload).await?;
             match status {
                 STATUS_OK => {
                     if json {
@@ -360,9 +381,7 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
         )),
         [cmd, prefix] if cmd == "scan" => {
             let payload = encode_scan_payload(prefix.as_bytes());
-            let (status, body) = roundtrip(addr, 4, &payload)
-                .await
-                .map_err(|e| KayaError::internal(e.to_string()))?;
+            let (status, body) = roundtrip_with_retry(addr, 4, &payload).await?;
             match status {
                 STATUS_OK => {
                     let items = decode_scan_response(&body).map_err(KayaError::internal)?;
@@ -390,6 +409,9 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
                     }
                     Ok(())
                 }
+                STATUS_NOT_LEADER => Err(KayaError::internal(
+                    "not leader — retry on a different node",
+                )),
                 STATUS_ERROR => {
                     let msg = decode_error_payload(&body).unwrap_or_else(|_| "unknown".into());
                     Err(KayaError::internal(msg))
@@ -411,6 +433,23 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
                 Ok(())
             } else {
                 Err(KayaError::internal("health check failed"))
+            }
+        }
+        [cmd] if cmd == "status" => {
+            let (status, body) = roundtrip_with_retry(addr, 6, &[])
+                .await
+                .map_err(|e| KayaError::internal(e.to_string()))?;
+            if status == STATUS_OK {
+                let stats_str = String::from_utf8(body)
+                    .map_err(|e| KayaError::corruption(e.to_string()))?;
+                if json {
+                    println!("{}", stats_str);
+                } else {
+                    print_human_stats_from_json(&stats_str);
+                }
+                Ok(())
+            } else {
+                Err(KayaError::internal("status check failed"))
             }
         }
         _ => Err(KayaError::invalid_argument(
@@ -462,6 +501,7 @@ fn print_usage() {
     println!("  kayactl --server <addr> [--json] delete <key>");
     println!("  kayactl --server <addr> [--json] scan <prefix>");
     println!("  kayactl --server <addr> [--json] health");
+    println!("  kayactl --server <addr> [--json] status");
     println!();
     println!("INSPECT COMMANDS");
     println!("  kayactl [--json] inspect wal <path>");
@@ -471,6 +511,77 @@ fn print_usage() {
     println!("DEFAULTS");
     println!("  --data ./data");
     println!("  --durability strict");
+}
+
+fn print_human_stats_from_json(json: &str) {
+    println!("=== KayaDB Cluster Node Status ===");
+    let extract = |key: &str| -> Option<String> {
+        let pattern = format!("\"{}\":", key);
+        if let Some(pos) = json.find(&pattern) {
+            let start = pos + pattern.len();
+            let mut end = start;
+            let bytes = json.as_bytes();
+            let mut in_quotes = false;
+            while end < bytes.len() {
+                let c = bytes[end] as char;
+                if c == '"' {
+                    in_quotes = !in_quotes;
+                } else if !in_quotes && (c == ',' || c == '}' || c == '{') {
+                    break;
+                }
+                end += 1;
+            }
+            let val = &json[start..end];
+            return Some(val.replace("\"", "").trim().to_string());
+        }
+        None
+    };
+
+    if let Some(role) = extract("role") {
+        println!("Role:           {}", role);
+    }
+    if let Some(term) = extract("term") {
+        println!("Term:           {}", term);
+    }
+    if let Some(commit) = extract("commit_index") {
+        println!("Commit Index:   {}", commit);
+    }
+    if let Some(applied) = extract("applied_index") {
+        println!("Applied Index:  {}", applied);
+    }
+    if let Some(peers) = extract("peer_count") {
+        println!("Peer Count:     {}", peers);
+    }
+    
+    println!("\n--- LSM Storage Engine Metrics ---");
+    if let Some(put) = extract("put_count") {
+        println!("PUT Operations:       {}", put);
+    }
+    if let Some(get) = extract("get_count") {
+        println!("GET Operations:       {}", get);
+    }
+    if let Some(delete) = extract("delete_count") {
+        println!("DELETE Operations:    {}", delete);
+    }
+    if let Some(scan) = extract("scan_count") {
+        println!("SCAN Operations:      {}", scan);
+    }
+    if let Some(wal_bytes) = extract("wal_bytes_written") {
+        println!("WAL Bytes Written:    {} bytes", wal_bytes);
+    }
+    if let Some(wal_fsync) = extract("wal_fsync_count") {
+        println!("WAL Fsync Count:      {}", wal_fsync);
+    }
+    if let Some(mem_entries) = extract("memtable_entries") {
+        println!("Memtable Entries:     {}", mem_entries);
+    }
+    if let Some(sst_count) = extract("sstable_count") {
+        println!("SSTable Count:        {}", sst_count);
+    }
+    if let Some(last_seq) = extract("last_sequence") {
+        println!("Last Sequence Number: {}", last_seq);
+    }
+    println!("==================================");
 }
 
 fn print_stats_human(stats: &EngineStats, recovery: &RecoveryReport) {

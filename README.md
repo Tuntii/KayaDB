@@ -94,12 +94,50 @@ cargo build --workspace
 cargo test --workspace
 
 # Start a single-node server
-cargo run -p kaya-server -- --dir /tmp/kayadb-data
+cargo run -p kaya-server -- --dir /tmp/kayadb-data --port 7771
 
-# Interact via kayactl
-cargo run -p kayactl -- put mykey myvalue
-cargo run -p kayactl -- get mykey
-cargo run -p kayactl -- inspect wal /tmp/kayadb-data/wal-000001.wal
+# Write and read data via CLI
+cargo run -p kayactl -- --server 127.0.0.1:7771 put hello world
+cargo run -p kayactl -- --server 127.0.0.1:7771 get hello
+
+# Check remote cluster node statistics and health
+cargo run -p kayactl -- --server 127.0.0.1:7771 status
+```
+
+### Programmatic Integration with `kaya-client`
+
+Add `kaya-client` as a dependency in your application's `Cargo.toml` and interact async-natively:
+
+```rust
+use std::net::SocketAddr;
+use kaya_client::KayaClient;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let addr: SocketAddr = "127.0.0.1:7771".parse()?;
+    let mut client = KayaClient::connect(addr).await?;
+    
+    client.put(b"foo", b"bar").await?;
+    if let Some(val) = client.get(b"foo").await? {
+        println!("Value: {}", String::from_utf8_lossy(&val));
+    }
+    Ok(())
+}
+```
+
+### Multi-Node Local Raft Cluster (PowerShell/Cmd Concurrent Mode)
+
+Run three terminals to spin up a local 3-node fault-tolerant cluster:
+
+```powershell
+# Terminal 1 (Node 1 - Leader candidate)
+cargo run -p kaya-server -- --dir /tmp/kaya-node1 --port 7771 --peers 127.0.0.1:7772,127.0.0.1:7773 --node-id 1
+
+# Terminal 2 (Node 2)
+cargo run -p kaya-server -- --dir /tmp/kaya-node2 --port 7772 --peers 127.0.0.1:7771,127.0.0.1:7773 --node-id 2
+
+# Terminal 3 (Node 3)
+cargo run -p kaya-server -- --dir /tmp/kaya-node3 --port 7773 --peers 127.0.0.1:7771,127.0.0.1:7772 --node-id 3
 ```
 
 See [docs/getting-started.md](docs/getting-started.md) for the full walkthrough.
@@ -193,7 +231,9 @@ cargo bench -p kaya-bench
 | M2 — LSM (SSTable, manifest, flush, L0 compaction) | ✅ Complete |
 | M3 — Fuzz, recovery idempotence, benchmarks | ✅ Complete |
 | M4 — Raft, cluster TCP, linearizability | ✅ Complete |
-| M5 — Jepsen, eBPF, production hardening | 🔒 Future |
+| M5 — Client API, STATS Metrics & kayactl status (M11) | ✅ Complete |
+| M6 — Jepsen Prep & Observability Hardening (M12) | 🟡 Active |
+| M7 — Linux eBPF, production hardening & Beyond | 🔒 Future |
 
 ---
 

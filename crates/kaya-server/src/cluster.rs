@@ -60,29 +60,29 @@ pub struct ClusterConfig {
 impl ClusterConfig {
     /// Build a config from raw values.
     ///
-    /// `peers` — list of `(peer_id, peer_raft_addr)` for every other node.
+    /// `peers` — list of `(peer_id, peer_raft_addr, peer_client_addr)` for every other node.
     /// Do **not** include the local node in `peers`; it is added automatically.
     pub fn new(
         node_id: u64,
         data_dir: impl Into<PathBuf>,
         raft_addr: SocketAddr,
         client_addr: SocketAddr,
-        peers: Vec<(u64, SocketAddr)>,
+        peers: Vec<(u64, SocketAddr, SocketAddr)>,
     ) -> Self {
         let cluster_size = peers.len() + 1;
         // Stagger election timeouts to avoid tied elections.
         let offset = (node_id.saturating_sub(1) % cluster_size as u64) * 5;
-        let mut roster_entries: Vec<(NodeId, SocketAddr)> = peers
+        let mut roster_entries: Vec<(NodeId, SocketAddr, SocketAddr)> = peers
             .iter()
-            .map(|(id, addr)| (NodeId(*id), *addr))
+            .map(|(id, raft_addr, client_addr)| (NodeId(*id), *raft_addr, *client_addr))
             .collect();
-        roster_entries.push((NodeId(node_id), raft_addr));
+        roster_entries.push((NodeId(node_id), raft_addr, client_addr));
         Self {
             node_id: NodeId(node_id),
             data_dir: data_dir.into(),
             raft_addr,
             client_addr,
-            roster: NodeRoster::new(roster_entries),
+            roster: NodeRoster::new_with_client(roster_entries),
             tick_interval_ms: 10,
             election_timeout_ticks: 15 + offset,
             heartbeat_interval_ticks: 3,
@@ -183,8 +183,9 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         let e = shared_engine.clone();
         let p = shared_pending.clone();
         let tx = propose_tx.clone();
+        let ros = config.roster.clone();
         tokio::spawn(async move {
-            client_accept_loop(client_listener, r, e, p, tx).await;
+            client_accept_loop(client_listener, r, e, p, tx, ros).await;
         });
     }
 
@@ -300,14 +301,16 @@ async fn client_accept_loop(
     engine: SharedEngine,
     pending: SharedPending,
     propose_tx: mpsc::Sender<ProposeReq>,
+    roster: NodeRoster,
 ) {
     while let Ok((stream, _peer)) = listener.accept().await {
         let r = raft.clone();
         let e = engine.clone();
         let p = pending.clone();
         let tx = propose_tx.clone();
+        let ros = roster.clone();
         tokio::spawn(async move {
-            handle_connection(stream, r, e, p, tx).await;
+            handle_connection(stream, r, e, p, tx, ros).await;
         });
     }
 }
@@ -318,13 +321,14 @@ async fn handle_connection(
     engine: SharedEngine,
     _pending: SharedPending,
     propose_tx: mpsc::Sender<ProposeReq>,
+    roster: NodeRoster,
 ) {
     loop {
         let (opcode, payload) = match read_client_frame(&mut stream).await {
             Ok(f) => f,
             Err(_) => break,
         };
-        let (status, body) = dispatch(&raft, &engine, &propose_tx, opcode, payload).await;
+        let (status, body) = dispatch(&raft, &engine, &roster, &propose_tx, opcode, payload).await;
         if write_client_response(&mut stream, status, &body)
             .await
             .is_err()
@@ -336,61 +340,85 @@ async fn handle_connection(
 
 // ── request dispatch ──────────────────────────────────────────────────────────
 
+fn get_leader_hint(raft: &SharedRaft, roster: &NodeRoster) -> Vec<u8> {
+    if let Some(leader_id) = raft.lock().unwrap().status().leader_id {
+        if let Some(addr) = roster.client_addr(leader_id) {
+            return addr.to_string().into_bytes();
+        }
+    }
+    vec![]
+}
+
 async fn dispatch(
     raft: &SharedRaft,
     engine: &SharedEngine,
+    roster: &NodeRoster,
     propose_tx: &mpsc::Sender<ProposeReq>,
     opcode: u8,
     payload: Vec<u8>,
-) -> (u8, Vec<u8>) {
+) -> (u16, Vec<u8>) {
     match opcode {
         // PUT
         1 => match decode_put_payload(&payload) {
             Ok((key, value)) => {
                 let cmd = RaftCommand::Put { key, value }.encode();
-                propose_and_wait(raft, propose_tx, cmd).await
+                propose_and_wait(raft, roster, propose_tx, cmd).await
             }
             Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
         },
 
         // GET
-        2 => match decode_key_payload(&payload) {
-            Ok(key) => match engine.lock().await.get(&key, ReadOptions::default()).await {
-                Ok(Some(v)) => (STATUS_OK, encode_value_payload(&v)),
-                Ok(None) => (STATUS_NOT_FOUND, vec![]),
-                Err(e) => (STATUS_ERROR, encode_error_payload(&e.to_string())),
-            },
-            Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
-        },
+        2 => {
+            if !raft.lock().unwrap().is_leader() {
+                let hint = get_leader_hint(raft, roster);
+                (STATUS_NOT_LEADER, hint)
+            } else {
+                match decode_key_payload(&payload) {
+                    Ok(key) => match engine.lock().await.get(&key, ReadOptions::default()).await {
+                        Ok(Some(v)) => (STATUS_OK, encode_value_payload(&v)),
+                        Ok(None) => (STATUS_NOT_FOUND, vec![]),
+                        Err(e) => (STATUS_ERROR, encode_error_payload(&e.to_string())),
+                    },
+                    Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
+                }
+            }
+        }
 
         // DELETE
         3 => match decode_key_payload(&payload) {
             Ok(key) => {
                 let cmd = RaftCommand::Delete { key }.encode();
-                propose_and_wait(raft, propose_tx, cmd).await
+                propose_and_wait(raft, roster, propose_tx, cmd).await
             }
             Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
         },
 
         // SCAN
-        4 => match decode_scan_payload(&payload) {
-            Ok(prefix) => {
-                match engine
-                    .lock()
-                    .await
-                    .scan_prefix(&prefix, ScanOptions::default())
-                    .await
-                {
-                    Ok(kvs) => {
-                        let items: Vec<(Vec<u8>, Vec<u8>)> =
-                            kvs.into_iter().map(|kv| (kv.key, kv.value)).collect();
-                        (STATUS_OK, encode_scan_response(&items))
+        4 => {
+            if !raft.lock().unwrap().is_leader() {
+                let hint = get_leader_hint(raft, roster);
+                (STATUS_NOT_LEADER, hint)
+            } else {
+                match decode_scan_payload(&payload) {
+                    Ok(prefix) => {
+                        match engine
+                            .lock()
+                            .await
+                            .scan_prefix(&prefix, ScanOptions::default())
+                            .await
+                        {
+                            Ok(kvs) => {
+                                let items: Vec<(Vec<u8>, Vec<u8>)> =
+                                    kvs.into_iter().map(|kv| (kv.key, kv.value)).collect();
+                                (STATUS_OK, encode_scan_response(&items))
+                            }
+                            Err(e) => (STATUS_ERROR, encode_error_payload(&e.to_string())),
+                        }
                     }
-                    Err(e) => (STATUS_ERROR, encode_error_payload(&e.to_string())),
+                    Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
                 }
             }
-            Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
-        },
+        }
 
         // HEALTH
         5 => {
@@ -403,6 +431,33 @@ async fn dispatch(
             (STATUS_OK, body)
         }
 
+        // STATS
+        6 => {
+            let (role, term, commit_idx, applied_idx, peer_count) = {
+                let r = raft.lock().unwrap();
+                let status = r.status();
+                let peer_cnt = roster.all_ids().len().saturating_sub(1);
+                (
+                    format!("{:?}", status.role).to_lowercase(),
+                    status.current_term.0,
+                    status.commit_index.0,
+                    status.last_applied.0,
+                    peer_cnt,
+                )
+            };
+
+            let engine_stats = engine.lock().await.stats();
+
+            let stats_json = format!(
+                "{{\"role\":\"{}\",\"term\":{},\"commit_index\":{},\"applied_index\":{},\"peer_count\":{},\"engine\":{{\"put_count\":{},\"get_count\":{},\"delete_count\":{},\"scan_count\":{},\"wal_bytes_written\":{},\"wal_fsync_count\":{},\"memtable_entries\":{},\"sstable_count\":{},\"last_sequence\":{}}}}}",
+                role, term, commit_idx, applied_idx, peer_count,
+                engine_stats.put_count, engine_stats.get_count, engine_stats.delete_count, engine_stats.scan_count,
+                engine_stats.wal_bytes_written, engine_stats.wal_fsync_count, engine_stats.memtable_entries, engine_stats.sstable_count, engine_stats.last_sequence
+            );
+
+            (STATUS_OK, stats_json.into_bytes())
+        }
+
         other => (
             STATUS_ERROR,
             encode_error_payload(&format!("unknown opcode: {other}")),
@@ -413,11 +468,13 @@ async fn dispatch(
 /// Send a proposal to the Raft loop and wait for it to be committed+applied.
 async fn propose_and_wait(
     raft: &SharedRaft,
+    roster: &NodeRoster,
     propose_tx: &mpsc::Sender<ProposeReq>,
     command: Vec<u8>,
-) -> (u8, Vec<u8>) {
+) -> (u16, Vec<u8>) {
     if !raft.lock().unwrap().is_leader() {
-        return (STATUS_NOT_LEADER, vec![]);
+        let hint = get_leader_hint(raft, roster);
+        return (STATUS_NOT_LEADER, hint);
     }
     let (reply_tx, reply_rx) = oneshot::channel::<Result<(), String>>();
     if propose_tx
@@ -429,7 +486,10 @@ async fn propose_and_wait(
     }
     match reply_rx.await {
         Ok(Ok(())) => (STATUS_OK, vec![]),
-        Ok(Err(e)) if e == "not_leader" => (STATUS_NOT_LEADER, vec![]),
+        Ok(Err(e)) if e == "not_leader" => {
+            let hint = get_leader_hint(raft, roster);
+            (STATUS_NOT_LEADER, hint)
+        }
         Ok(Err(e)) => (STATUS_ERROR, encode_error_payload(&e)),
         Err(_) => (STATUS_ERROR, encode_error_payload("reply channel dropped")),
     }

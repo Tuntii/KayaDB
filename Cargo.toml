@@ -11,6 +11,7 @@ members = [
     "crates/kaya-raft",
     "crates/kaya-net",
     "crates/kaya-bench",
+    "crates/kaya-client",
 ]
 resolver = "2"
 
