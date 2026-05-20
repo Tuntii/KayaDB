@@ -586,7 +586,7 @@ async fn load_manifest_and_sstables<D: Disk>(
         live_sstables.push((meta.clone(), reader));
     }
     // Sort newest-first (highest table_id first).
-    live_sstables.sort_by(|a, b| b.0.table_id.cmp(&a.0.table_id));
+    live_sstables.sort_by_key(|b| std::cmp::Reverse(b.0.table_id));
     Ok((state, live_sstables))
 }
 
