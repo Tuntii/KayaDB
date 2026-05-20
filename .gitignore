@@ -5,3 +5,4 @@ data/
 *.log
 /spec
 ROADMAP.md
+/fuzz/target
