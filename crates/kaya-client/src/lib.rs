@@ -1,10 +1,10 @@
-use std::net::SocketAddr;
 use kaya_core::{KayaError, Result};
 use kaya_net::{
-    roundtrip, encode_put_payload, decode_value_payload, encode_key_payload,
-    encode_scan_payload, decode_scan_response, decode_error_payload,
-    STATUS_OK, STATUS_NOT_FOUND, STATUS_NOT_LEADER
+    decode_error_payload, decode_scan_response, decode_value_payload, encode_key_payload,
+    encode_put_payload, encode_scan_payload, roundtrip, STATUS_NOT_FOUND, STATUS_NOT_LEADER,
+    STATUS_OK,
 };
+use std::net::SocketAddr;
 
 /// An ergonomic async client for interacting with a KayaDB Raft cluster.
 ///
@@ -83,8 +83,7 @@ impl KayaClient {
         if status == STATUS_OK {
             Ok(())
         } else {
-            let msg = decode_error_payload(&body)
-                .unwrap_or_else(|_| "Unknown error".to_string());
+            let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
             Err(KayaError::internal(msg))
         }
     }
@@ -94,14 +93,12 @@ impl KayaClient {
         let payload = encode_key_payload(key);
         let (status, body) = self.send_with_retry(2, &payload).await?;
         if status == STATUS_OK {
-            let val = decode_value_payload(&body)
-                .map_err(KayaError::corruption)?;
+            let val = decode_value_payload(&body).map_err(KayaError::corruption)?;
             Ok(Some(val))
         } else if status == STATUS_NOT_FOUND {
             Ok(None)
         } else {
-            let msg = decode_error_payload(&body)
-                .unwrap_or_else(|_| "Unknown error".to_string());
+            let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
             Err(KayaError::internal(msg))
         }
     }
@@ -113,8 +110,7 @@ impl KayaClient {
         if status == STATUS_OK {
             Ok(())
         } else {
-            let msg = decode_error_payload(&body)
-                .unwrap_or_else(|_| "Unknown error".to_string());
+            let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
             Err(KayaError::internal(msg))
         }
     }
@@ -124,12 +120,10 @@ impl KayaClient {
         let payload = encode_scan_payload(prefix);
         let (status, body) = self.send_with_retry(4, &payload).await?;
         if status == STATUS_OK {
-            let items = decode_scan_response(&body)
-                .map_err(KayaError::corruption)?;
+            let items = decode_scan_response(&body).map_err(KayaError::corruption)?;
             Ok(items)
         } else {
-            let msg = decode_error_payload(&body)
-                .unwrap_or_else(|_| "Unknown error".to_string());
+            let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
             Err(KayaError::internal(msg))
         }
     }
@@ -138,12 +132,10 @@ impl KayaClient {
     pub async fn health(&mut self) -> Result<String> {
         let (status, body) = self.send_with_retry(5, &[]).await?;
         if status == STATUS_OK {
-            let s = String::from_utf8(body)
-                .map_err(|e| KayaError::corruption(e.to_string()))?;
+            let s = String::from_utf8(body).map_err(|e| KayaError::corruption(e.to_string()))?;
             Ok(s)
         } else {
-            let msg = decode_error_payload(&body)
-                .unwrap_or_else(|_| "Unknown error".to_string());
+            let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
             Err(KayaError::internal(msg))
         }
     }
@@ -152,12 +144,10 @@ impl KayaClient {
     pub async fn stats(&mut self) -> Result<String> {
         let (status, body) = self.send_with_retry(6, &[]).await?;
         if status == STATUS_OK {
-            let s = String::from_utf8(body)
-                .map_err(|e| KayaError::corruption(e.to_string()))?;
+            let s = String::from_utf8(body).map_err(|e| KayaError::corruption(e.to_string()))?;
             Ok(s)
         } else {
-            let msg = decode_error_payload(&body)
-                .unwrap_or_else(|_| "Unknown error".to_string());
+            let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
             Err(KayaError::internal(msg))
         }
     }

@@ -1,10 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
     use crate::cluster::{ClusterConfig, ClusterNode};
-    use kaya_net::{
-        decode_value_payload, encode_key_payload, encode_put_payload, roundtrip,
-    };
+    use kaya_net::{decode_value_payload, encode_key_payload, encode_put_payload, roundtrip};
+    use std::net::SocketAddr;
     use tokio::net::TcpListener;
 
     async fn get_free_port() -> u16 {
@@ -45,18 +43,9 @@ mod tests {
         let raft_addr3: SocketAddr = format!("127.0.0.1:{}", r3).parse().unwrap();
         let client_addr3: SocketAddr = format!("127.0.0.1:{}", c3).parse().unwrap();
 
-        let peers1 = vec![
-            (2, raft_addr2, client_addr2),
-            (3, raft_addr3, client_addr3),
-        ];
-        let peers2 = vec![
-            (1, raft_addr1, client_addr1),
-            (3, raft_addr3, client_addr3),
-        ];
-        let peers3 = vec![
-            (1, raft_addr1, client_addr1),
-            (2, raft_addr2, client_addr2),
-        ];
+        let peers1 = vec![(2, raft_addr2, client_addr2), (3, raft_addr3, client_addr3)];
+        let peers2 = vec![(1, raft_addr1, client_addr1), (3, raft_addr3, client_addr3)];
+        let peers3 = vec![(1, raft_addr1, client_addr1), (2, raft_addr2, client_addr2)];
 
         let config1 = ClusterConfig::new(1, &data_dir1, raft_addr1, client_addr1, peers1);
         let config2 = ClusterConfig::new(2, &data_dir2, raft_addr2, client_addr2, peers2);
@@ -110,14 +99,20 @@ mod tests {
         assert_eq!(val, b"myval");
 
         // GET/SCAN on a follower
-        let follower_addr = if leader_id == 1 { client_addr2 } else { client_addr1 };
+        let follower_addr = if leader_id == 1 {
+            client_addr2
+        } else {
+            client_addr1
+        };
         let (status, body) = roundtrip(follower_addr, 2, &get_payload).await.unwrap();
         assert_eq!(status, 10); // STATUS_NOT_LEADER
         let hint = String::from_utf8(body).unwrap();
         assert_eq!(hint, leader_addr.to_string());
 
         // Test KayaClient with auto-redirection on the follower address
-        let mut client = kaya_client::KayaClient::connect(follower_addr).await.unwrap();
+        let mut client = kaya_client::KayaClient::connect(follower_addr)
+            .await
+            .unwrap();
         // Since we pointed to follower_addr, it should automatically redirect to leader_addr on PUT!
         client.put(b"clientkey", b"clientval").await.unwrap();
         // Verify client cached address was updated to leader_addr

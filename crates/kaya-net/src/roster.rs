@@ -30,17 +30,35 @@ impl NodeRoster {
         Self {
             entries: entries
                 .into_iter()
-                .map(|(id, raft_addr)| (id, RosterEntry { raft_addr, client_addr: raft_addr }))
+                .map(|(id, raft_addr)| {
+                    (
+                        id,
+                        RosterEntry {
+                            raft_addr,
+                            client_addr: raft_addr,
+                        },
+                    )
+                })
                 .collect(),
         }
     }
 
     /// Build a roster from an iterator of `(node_id, raft_addr, client_addr)` tuples.
-    pub fn new_with_client(entries: impl IntoIterator<Item = (NodeId, SocketAddr, SocketAddr)>) -> Self {
+    pub fn new_with_client(
+        entries: impl IntoIterator<Item = (NodeId, SocketAddr, SocketAddr)>,
+    ) -> Self {
         Self {
             entries: entries
                 .into_iter()
-                .map(|(id, raft_addr, client_addr)| (id, RosterEntry { raft_addr, client_addr }))
+                .map(|(id, raft_addr, client_addr)| {
+                    (
+                        id,
+                        RosterEntry {
+                            raft_addr,
+                            client_addr,
+                        },
+                    )
+                })
                 .collect(),
         }
     }
@@ -64,7 +82,11 @@ impl NodeRoster {
 
     /// All `(id, raft_addr)` pairs in this roster.
     pub fn all_entries(&self) -> Vec<(NodeId, SocketAddr)> {
-        let mut v: Vec<_> = self.entries.iter().map(|(&id, entry)| (id, entry.raft_addr)).collect();
+        let mut v: Vec<_> = self
+            .entries
+            .iter()
+            .map(|(&id, entry)| (id, entry.raft_addr))
+            .collect();
         v.sort_by_key(|(id, _)| id.0);
         v
     }

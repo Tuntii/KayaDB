@@ -267,14 +267,14 @@ async fn roundtrip_with_retry(
             .await
             .map_err(|e| KayaError::internal(e.to_string()))?;
         if status == STATUS_NOT_LEADER && retries < 3 && !body.is_empty() {
-                if let Ok(leader_addr_str) = String::from_utf8(body.clone()) {
-                    if let Ok(new_addr) = leader_addr_str.parse::<SocketAddr>() {
-                        eprintln!("Redirecting to leader at {}...", new_addr);
-                        addr = new_addr;
-                        retries += 1;
-                        continue;
-                    }
+            if let Ok(leader_addr_str) = String::from_utf8(body.clone()) {
+                if let Ok(new_addr) = leader_addr_str.parse::<SocketAddr>() {
+                    eprintln!("Redirecting to leader at {}...", new_addr);
+                    addr = new_addr;
+                    retries += 1;
+                    continue;
                 }
+            }
         }
         return Ok((status, body));
     }
@@ -440,8 +440,8 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
                 .await
                 .map_err(|e| KayaError::internal(e.to_string()))?;
             if status == STATUS_OK {
-                let stats_str = String::from_utf8(body)
-                    .map_err(|e| KayaError::corruption(e.to_string()))?;
+                let stats_str =
+                    String::from_utf8(body).map_err(|e| KayaError::corruption(e.to_string()))?;
                 if json {
                     println!("{}", stats_str);
                 } else {
@@ -552,7 +552,7 @@ fn print_human_stats_from_json(json: &str) {
     if let Some(peers) = extract("peer_count") {
         println!("Peer Count:     {}", peers);
     }
-    
+
     println!("\n--- LSM Storage Engine Metrics ---");
     if let Some(put) = extract("put_count") {
         println!("PUT Operations:       {}", put);
