@@ -6,11 +6,11 @@ use kaya_core::{
 };
 use kaya_io::{Disk, RelativePath};
 use kaya_lsm::{
-    decode_footer, encode_manifest_edit, replay_manifest, ManifestEdit, ManifestState, Memtable,
-    SstEntry, SstableBuilder, SstableReader, TableMetadata, ValueRecordRef, CURRENT_FILE_NAME,
-    CURRENT_TMP_FILE_NAME, MANIFEST_FILE_NAME, SST_FOOTER_LEN,
+    decode_footer, encode_manifest_edit, replay_manifest, ManifestEdit, ManifestState,
+    ManifestWarning, Memtable, SstEntry, SstableBuilder, SstableReader, TableMetadata,
+    ValueRecordRef, CURRENT_FILE_NAME, CURRENT_TMP_FILE_NAME, MANIFEST_FILE_NAME, SST_FOOTER_LEN,
 };
-use kaya_wal::{recover_wal, WalPayload, WalRecoveryReport, WalWriter};
+use kaya_wal::{recover_wal, WalPayload, WalRecoveryReport, WalWarning, WalWriter};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WriteOptions {
@@ -67,7 +67,30 @@ pub struct EngineStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryWarning {
+    Wal(WalWarning),
+    Manifest(ManifestWarning),
+}
+
+impl std::fmt::Display for RecoveryWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Wal(w) => write!(f, "wal warning: {w}"),
+            Self::Manifest(m) => write!(f, "manifest warning: {m}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryReport {
+    pub manifest_records_replayed: usize,
+    pub live_sstable_count: usize,
+    pub wal_records_replayed: usize,
+    pub wal_truncated_bytes: u64,
+    pub tmp_files_removed: usize,
+    pub last_lsn: Option<Lsn>,
+    pub last_sequence: Option<SequenceNumber>,
+    pub warnings: Vec<RecoveryWarning>,
     pub wal: WalRecoveryReport,
     pub records_replayed: usize,
 }
@@ -85,10 +108,84 @@ pub struct Engine<D: Disk> {
     next_manifest_edit_seq: u64,
     /// Live SSTables sorted newest-first (highest table_id first).
     live_sstables: Vec<(TableMetadata, SstableReader)>,
+    #[allow(dead_code)]
+    lock_file: Option<std::fs::File>,
+}
+
+fn acquire_directory_lock(config: &EngineConfig) -> Result<Option<std::fs::File>> {
+    if config.disable_locking {
+        return Ok(None);
+    }
+
+    #[cfg(test)]
+    {
+        Ok(None)
+    }
+
+    #[cfg(not(test))]
+    {
+        use std::fs::OpenOptions;
+        let data_dir = &config.data_dir;
+
+        // If the data_dir path is empty, skip locking
+        if data_dir.as_os_str().is_empty() {
+            return Ok(None);
+        }
+
+        // Ensure the data directory exists
+        std::fs::create_dir_all(data_dir)?;
+
+        let lock_path = data_dir.join("KAYA_LOCK");
+
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // share_mode(0) opens the file with exclusive access, preventing other processes from opening it
+            options.share_mode(0);
+        }
+
+        let file = match options.open(&lock_path) {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(KayaError::internal(format!(
+                    "Could not acquire exclusive directory lock on KAYA_LOCK: {}. Is another instance of KayaDB running on this directory?",
+                    e
+                )));
+            }
+        };
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = file.as_raw_fd();
+            let res = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+            if res != 0 {
+                return Err(KayaError::internal("Could not acquire exclusive directory lock on KAYA_LOCK. Is another instance of KayaDB running on this directory?"));
+            }
+        }
+
+        Ok(Some(file))
+    }
 }
 
 impl<D: Disk> Engine<D> {
     pub async fn open(config: EngineConfig, disk: Arc<D>) -> Result<Self> {
+        let lock_file = acquire_directory_lock(&config)?;
+
+        eprintln!(
+            "[engine] open data_dir={:?} durability={:?}",
+            config.data_dir, config.durability.mode
+        );
+        // Clean up leftover temporary files.
+        let temp_files = scan_temp_files(&disk).await?;
+        let tmp_files_removed = temp_files.len();
+        for path in &temp_files {
+            disk.remove_file(path).await?;
+        }
+
         let wal_report = recover_wal(config.wal.clone(), disk.clone()).await?;
         let mut memtable = Memtable::new();
 
@@ -111,7 +208,8 @@ impl<D: Disk> Engine<D> {
             WalWriter::open_at(config.wal.clone(), disk.clone(), next_lsn, next_sequence).await?;
 
         // Load manifest + live SSTables.
-        let (manifest_state, live_sstables) = load_manifest_and_sstables(disk.clone()).await?;
+        let (manifest_state, live_sstables, manifest_records_replayed, manifest_warnings) =
+            load_manifest_and_sstables(disk.clone()).await?;
         let next_table_id = manifest_state
             .live_tables
             .iter()
@@ -126,9 +224,31 @@ impl<D: Disk> Engine<D> {
             last_sequence: next_sequence.get().saturating_sub(1),
             ..EngineStats::default()
         };
+
+        let mut warnings = Vec::new();
+        for w in &wal_report.warnings {
+            warnings.push(RecoveryWarning::Wal(w.clone()));
+        }
+        for mw in &manifest_warnings {
+            warnings.push(RecoveryWarning::Manifest(mw.clone()));
+        }
+
+        let wal_records_replayed = wal_report.records.len();
         let last_recovery = RecoveryReport {
-            records_replayed: wal_report.records.len(),
+            manifest_records_replayed,
+            live_sstable_count: live_sstables.len(),
+            wal_records_replayed,
+            wal_truncated_bytes: wal_report.truncated_bytes,
+            tmp_files_removed,
+            last_lsn: wal_report.last_lsn,
+            last_sequence: if next_sequence > SequenceNumber::FIRST {
+                Some(SequenceNumber::new(next_sequence.get().saturating_sub(1)))
+            } else {
+                None
+            },
+            warnings,
             wal: wal_report,
+            records_replayed: wal_records_replayed,
         };
 
         Ok(Self {
@@ -142,6 +262,7 @@ impl<D: Disk> Engine<D> {
             next_table_id,
             next_manifest_edit_seq,
             live_sstables,
+            lock_file,
         })
     }
 
@@ -539,26 +660,90 @@ impl<D: Disk> Engine<D> {
 }
 
 pub async fn recover<D: Disk>(config: EngineConfig, disk: Arc<D>) -> Result<RecoveryReport> {
-    let wal = recover_wal(config.wal, disk).await?;
+    // Scan (but DO NOT delete) leftover temporary files.
+    let temp_files = scan_temp_files(&disk).await?;
+    let tmp_files_removed = temp_files.len();
+
+    let wal_report = recover_wal(config.wal.clone(), disk.clone()).await?;
+
+    let next_sequence = wal_report
+        .records
+        .last()
+        .map_or(SequenceNumber::FIRST, |record| {
+            record.record.sequence.next()
+        });
+
+    // Replay manifest (without opening SSTable readers to be fast and safe during dry run)
+    let current_rel = RelativePath::new(CURRENT_FILE_NAME)?;
+    let (manifest_records_replayed, live_sstable_count, manifest_warnings) =
+        match disk.file_len(&current_rel).await {
+            Ok(len) if len > 0 => {
+                let mut current_buf = vec![0u8; len as usize];
+                disk.read_at(&current_rel, 0, &mut current_buf).await?;
+                let manifest_name = std::str::from_utf8(&current_buf)
+                    .map_err(|_| KayaError::corruption("CURRENT file is not valid UTF-8"))?
+                    .trim();
+                let manifest_rel = RelativePath::new(manifest_name)?;
+                match disk.file_len(&manifest_rel).await {
+                    Ok(m_len) if m_len > 0 => {
+                        let mut manifest_buf = vec![0u8; m_len as usize];
+                        disk.read_at(&manifest_rel, 0, &mut manifest_buf).await?;
+                        let (state, replayed_count, warnings) = replay_manifest(&manifest_buf);
+                        (replayed_count, state.live_tables.len(), warnings)
+                    }
+                    _ => (0, 0, Vec::new()),
+                }
+            }
+            _ => (0, 0, Vec::new()),
+        };
+
+    let mut warnings = Vec::new();
+    for w in &wal_report.warnings {
+        warnings.push(RecoveryWarning::Wal(w.clone()));
+    }
+    for mw in &manifest_warnings {
+        warnings.push(RecoveryWarning::Manifest(mw.clone()));
+    }
+
+    let wal_records_replayed = wal_report.records.len();
     Ok(RecoveryReport {
-        records_replayed: wal.records.len(),
-        wal,
+        manifest_records_replayed,
+        live_sstable_count,
+        wal_records_replayed,
+        wal_truncated_bytes: wal_report.truncated_bytes,
+        tmp_files_removed,
+        last_lsn: wal_report.last_lsn,
+        last_sequence: if next_sequence > SequenceNumber::FIRST {
+            Some(SequenceNumber::new(next_sequence.get().saturating_sub(1)))
+        } else {
+            None
+        },
+        warnings,
+        wal: wal_report,
+        records_replayed: wal_records_replayed,
     })
 }
 
 /// Read the CURRENT file → manifest → live SSTables from disk.
-/// Returns `(ManifestState, live_sstables sorted newest-first)`.
+/// Returns `(ManifestState, live_sstables sorted newest-first, manifest_records_replayed, manifest_warnings)`.
 async fn load_manifest_and_sstables<D: Disk>(
     disk: Arc<D>,
-) -> Result<(ManifestState, Vec<(TableMetadata, SstableReader)>)> {
+) -> Result<(
+    ManifestState,
+    Vec<(TableMetadata, SstableReader)>,
+    usize,
+    Vec<ManifestWarning>,
+)> {
     let current_rel = RelativePath::new(CURRENT_FILE_NAME)?;
     let current_len = match disk.file_len(&current_rel).await {
         Ok(len) => len,
-        Err(KayaError::NotFound) => return Ok((ManifestState::default(), Vec::new())),
+        Err(KayaError::NotFound) => {
+            return Ok((ManifestState::default(), Vec::new(), 0, Vec::new()))
+        }
         Err(e) => return Err(e),
     };
     if current_len == 0 {
-        return Ok((ManifestState::default(), Vec::new()));
+        return Ok((ManifestState::default(), Vec::new(), 0, Vec::new()));
     }
     let mut current_buf = vec![0u8; current_len as usize];
     disk.read_at(&current_rel, 0, &mut current_buf).await?;
@@ -568,12 +753,14 @@ async fn load_manifest_and_sstables<D: Disk>(
     let manifest_rel = RelativePath::new(manifest_name)?;
     let manifest_len = match disk.file_len(&manifest_rel).await {
         Ok(len) => len,
-        Err(KayaError::NotFound) => return Ok((ManifestState::default(), Vec::new())),
+        Err(KayaError::NotFound) => {
+            return Ok((ManifestState::default(), Vec::new(), 0, Vec::new()))
+        }
         Err(e) => return Err(e),
     };
     let mut manifest_buf = vec![0u8; manifest_len as usize];
     disk.read_at(&manifest_rel, 0, &mut manifest_buf).await?;
-    let (state, _warnings) = replay_manifest(&manifest_buf);
+    let (state, replayed_count, warnings) = replay_manifest(&manifest_buf);
 
     // Load each live SSTable into memory.
     let mut live_sstables: Vec<(TableMetadata, SstableReader)> = Vec::new();
@@ -587,7 +774,7 @@ async fn load_manifest_and_sstables<D: Disk>(
     }
     // Sort newest-first (highest table_id first).
     live_sstables.sort_by_key(|b| std::cmp::Reverse(b.0.table_id));
-    Ok((state, live_sstables))
+    Ok((state, live_sstables, replayed_count, warnings))
 }
 
 fn apply_payload(
@@ -601,6 +788,32 @@ fn apply_payload(
         WalPayload::Noop => {}
     }
     Ok(())
+}
+
+async fn scan_temp_files<D: Disk>(disk: &Arc<D>) -> Result<Vec<RelativePath>> {
+    let mut temps = Vec::new();
+
+    // Check CURRENT.tmp in root.
+    let current_tmp = RelativePath::new(CURRENT_TMP_FILE_NAME)?;
+    if disk.file_len(&current_tmp).await.is_ok() {
+        temps.push(current_tmp);
+    }
+
+    // Check for *.tmp in sst/ directory.
+    let sst_dir = RelativePath::new("sst")?;
+    match disk.list_dir(&sst_dir).await {
+        Ok(entries) => {
+            for entry in entries {
+                if !entry.is_dir && entry.path.as_str().ends_with(".tmp") {
+                    temps.push(entry.path);
+                }
+            }
+        }
+        Err(KayaError::NotFound) => {}
+        Err(e) => return Err(e),
+    }
+
+    Ok(temps)
 }
 
 #[cfg(test)]
@@ -1033,6 +1246,166 @@ mod tests {
             assert_eq!(items.len(), 3, "must return SSTable + memtable entries");
             assert_eq!(items[0].key, b"u:1");
             assert_eq!(items[2].key, b"u:3");
+        });
+    }
+
+    #[test]
+    fn test_engine_temp_file_cleanup_on_open() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = EngineConfig::default();
+
+            let current_tmp = RelativePath::new(CURRENT_TMP_FILE_NAME).unwrap();
+            let sst_tmp = RelativePath::new("sst/0000000000000001.tmp").unwrap();
+
+            disk.write_at(&current_tmp, 0, b"some content")
+                .await
+                .unwrap();
+            disk.write_at(&sst_tmp, 0, b"some other content")
+                .await
+                .unwrap();
+
+            assert!(disk.file_len(&current_tmp).await.is_ok());
+            assert!(disk.file_len(&sst_tmp).await.is_ok());
+
+            let engine = Engine::open(config, disk.clone()).await.unwrap();
+
+            assert_eq!(engine.last_recovery().tmp_files_removed, 2);
+
+            assert!(disk.file_len(&current_tmp).await.is_err());
+            assert!(disk.file_len(&sst_tmp).await.is_err());
+        });
+    }
+
+    #[test]
+    fn test_engine_recover_temp_file_scan_dry_run() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = EngineConfig::default();
+
+            let current_tmp = RelativePath::new(CURRENT_TMP_FILE_NAME).unwrap();
+            let sst_tmp = RelativePath::new("sst/0000000000000001.tmp").unwrap();
+
+            disk.write_at(&current_tmp, 0, b"some content")
+                .await
+                .unwrap();
+            disk.write_at(&sst_tmp, 0, b"some other content")
+                .await
+                .unwrap();
+
+            assert!(disk.file_len(&current_tmp).await.is_ok());
+            assert!(disk.file_len(&sst_tmp).await.is_ok());
+
+            let report = recover(config, disk.clone()).await.unwrap();
+
+            assert_eq!(report.tmp_files_removed, 2);
+
+            assert!(disk.file_len(&current_tmp).await.is_ok());
+            assert!(disk.file_len(&sst_tmp).await.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_stable_warning_enums() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = EngineConfig::default();
+
+            {
+                let mut engine = Engine::open(config.clone(), disk.clone()).await.unwrap();
+                engine
+                    .put(b"key1".to_vec(), b"val1".to_vec(), strict_opts())
+                    .await
+                    .unwrap();
+                engine.flush().await.unwrap();
+            }
+
+            // Let's corrupt both WAL and Manifest.
+            let wal_rel = RelativePath::new("wal/0000000000000001.wal").unwrap();
+            disk.append(&wal_rel, b"partial_corrupt_wal_bytes")
+                .await
+                .unwrap();
+
+            let manifest_rel = RelativePath::new(MANIFEST_FILE_NAME).unwrap();
+            disk.append(&manifest_rel, b"corrupted_manifest_tail_bytes")
+                .await
+                .unwrap();
+
+            // Reopen engine and inspect warning enums.
+            let engine = Engine::open(config, disk).await.unwrap();
+            let warnings = &engine.last_recovery().warnings;
+
+            let mut has_wal_warning = false;
+            let mut has_manifest_warning = false;
+
+            for warning in warnings {
+                match warning {
+                    RecoveryWarning::Wal(WalWarning::PartialHeader { .. })
+                    | RecoveryWarning::Wal(WalWarning::BadMagic { .. })
+                    | RecoveryWarning::Wal(WalWarning::PartialPayload { .. }) => {
+                        has_wal_warning = true;
+                    }
+                    RecoveryWarning::Manifest(ManifestWarning::Truncated { .. })
+                    | RecoveryWarning::Manifest(ManifestWarning::Invalid { .. }) => {
+                        has_manifest_warning = true;
+                    }
+                    _ => {}
+                }
+            }
+
+            assert!(has_wal_warning, "Should have WAL warning");
+            assert!(has_manifest_warning, "Should have Manifest warning");
+        });
+    }
+
+    #[test]
+    fn engine_disk_full_resilience() {
+        block_on(async {
+            use kaya_io::{FaultKind, FaultRule, FaultSchedule, SimSeed};
+
+            // Inject DiskFull fault at operation index 3 (which will be the SSTable write_at during flush)
+            let schedule = FaultSchedule {
+                seed: SimSeed(42),
+                rules: vec![FaultRule {
+                    operation_index: 3,
+                    kind: FaultKind::DiskFull,
+                }],
+            };
+
+            let disk = Arc::new(SimDisk::with_faults(schedule));
+            let config = EngineConfig::default();
+
+            let mut engine = Engine::open(config.clone(), disk.clone()).await.unwrap();
+            engine
+                .put(b"key1".to_vec(), b"val1".to_vec(), strict_opts())
+                .await
+                .unwrap();
+
+            // Flush should fail due to simulated DiskFull
+            let flush_res = engine.flush().await;
+            assert!(
+                matches!(flush_res, Err(KayaError::DiskFull)),
+                "flush must fail with DiskFull, got: {:?}",
+                flush_res
+            );
+
+            // Verify that in-memory stats are still intact and key1 is still readable from memtable
+            assert_eq!(
+                engine.stats().sstable_count,
+                0,
+                "no SSTables should be committed"
+            );
+            assert_eq!(
+                engine.stats().memtable_entries,
+                1,
+                "memtable should retain the entry"
+            );
+
+            assert_eq!(
+                engine.get(b"key1", ReadOptions::default()).await.unwrap(),
+                Some(b"val1".to_vec()),
+                "data must still be readable from memtable"
+            );
         });
     }
 }

@@ -2,6 +2,7 @@
 mod tests {
     use crate::cluster::{ClusterConfig, ClusterNode};
     use kaya_net::{decode_value_payload, encode_key_payload, encode_put_payload, roundtrip};
+    use kaya_sim::{LinearizabilityChecker, Op, OpResult};
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
 
@@ -179,6 +180,311 @@ mod tests {
         assert_eq!(status, 0); // STATUS_OK
         let val2 = decode_value_payload(&body).unwrap();
         assert_eq!(val2, b"newval");
+
+        // Clean up spawns
+        handle1.abort();
+        handle2.abort();
+        handle3.abort();
+
+        // Clean up temp directories
+        let _ = std::fs::remove_dir_all(&data_dir1);
+        let _ = std::fs::remove_dir_all(&data_dir2);
+        let _ = std::fs::remove_dir_all(&data_dir3);
+    }
+
+    #[tokio::test]
+    async fn test_cluster_linearizability_history() {
+        eprintln!("[test] Starting linearizability integration test");
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir1 = std::env::temp_dir().join(format!("kayadb_lin_n1_{}", test_id));
+        let data_dir2 = std::env::temp_dir().join(format!("kayadb_lin_n2_{}", test_id));
+        let data_dir3 = std::env::temp_dir().join(format!("kayadb_lin_n3_{}", test_id));
+
+        let r1 = get_free_port().await;
+        let c1 = get_free_port().await;
+        let r2 = get_free_port().await;
+        let c2 = get_free_port().await;
+        let r3 = get_free_port().await;
+        let c3 = get_free_port().await;
+
+        let raft_addr1: SocketAddr = format!("127.0.0.1:{}", r1).parse().unwrap();
+        let client_addr1: SocketAddr = format!("127.0.0.1:{}", c1).parse().unwrap();
+        let raft_addr2: SocketAddr = format!("127.0.0.1:{}", r2).parse().unwrap();
+        let client_addr2: SocketAddr = format!("127.0.0.1:{}", c2).parse().unwrap();
+        let raft_addr3: SocketAddr = format!("127.0.0.1:{}", r3).parse().unwrap();
+        let client_addr3: SocketAddr = format!("127.0.0.1:{}", c3).parse().unwrap();
+
+        let peers1 = vec![(2, raft_addr2, client_addr2), (3, raft_addr3, client_addr3)];
+        let peers2 = vec![(1, raft_addr1, client_addr1), (3, raft_addr3, client_addr3)];
+        let peers3 = vec![(1, raft_addr1, client_addr1), (2, raft_addr2, client_addr2)];
+
+        let config1 = ClusterConfig::new(1, &data_dir1, raft_addr1, client_addr1, peers1);
+        let config2 = ClusterConfig::new(2, &data_dir2, raft_addr2, client_addr2, peers2);
+        let config3 = ClusterConfig::new(3, &data_dir3, raft_addr3, client_addr3, peers3);
+
+        eprintln!("[test] Spawning 3 nodes...");
+        let handle1 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config1).run().await;
+        });
+        let mut handle2 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config2).run().await;
+        });
+        let mut handle3 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config3).run().await;
+        });
+
+        // Wait for election convergence (at least one leader elected)
+        eprintln!("[test] Waiting for election convergence...");
+        let mut leader_addr = None;
+        let mut leader_id = None;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr1).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr1);
+                leader_id = Some(1);
+                break;
+            }
+            if check_health(client_addr2).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr2);
+                leader_id = Some(2);
+                break;
+            }
+            if check_health(client_addr3).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr3);
+                leader_id = Some(3);
+                break;
+            }
+        }
+
+        let leader_addr = leader_addr.expect("No leader elected in 10 seconds");
+        let leader_id = leader_id.unwrap();
+        eprintln!(
+            "[test] Leader elected: Node {} at {}",
+            leader_id, leader_addr
+        );
+
+        // Connect the client to a follower, allowing auto-redirection
+        let follower_addr = if leader_id == 1 {
+            client_addr2
+        } else {
+            client_addr1
+        };
+        eprintln!(
+            "[test] Connecting client to follower at {}...",
+            follower_addr
+        );
+        let mut client = kaya_client::KayaClient::connect(follower_addr)
+            .await
+            .unwrap();
+
+        let mut checker = LinearizabilityChecker::new();
+
+        // 1. PUT key1
+        eprintln!("[test] Step 1: PUT key1=val1");
+        client.put(b"key1", b"val1").await.unwrap();
+        checker.record_next(
+            Op::Put {
+                key: b"key1".to_vec(),
+                value: b"val1".to_vec(),
+            },
+            OpResult::Ok,
+        );
+
+        // 2. GET key1
+        eprintln!("[test] Step 2: GET key1");
+        let val1 = client.get(b"key1").await.unwrap();
+        checker.record_next(
+            Op::Get {
+                key: b"key1".to_vec(),
+            },
+            OpResult::Value(val1),
+        );
+
+        // 3. SCAN prefix "key"
+        eprintln!("[test] Step 3: SCAN key");
+        let scan1 = client.scan(b"key").await.unwrap();
+        checker.record_next(
+            Op::Scan {
+                prefix: b"key".to_vec(),
+            },
+            OpResult::Scan(scan1),
+        );
+
+        // 4. Crash a follower node
+        let follower_node_id = if leader_id == 3 { 2 } else { 3 };
+        eprintln!(
+            "[test] Step 4: Crashing follower node {}...",
+            follower_node_id
+        );
+        let follower_to_crash_handle = if follower_node_id == 2 {
+            &handle2
+        } else {
+            &handle3
+        };
+        follower_to_crash_handle.abort();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // 5. PUT key2
+        eprintln!("[test] Step 5: PUT key2=val2");
+        client.put(b"key2", b"val2").await.unwrap();
+        checker.record_next(
+            Op::Put {
+                key: b"key2".to_vec(),
+                value: b"val2".to_vec(),
+            },
+            OpResult::Ok,
+        );
+
+        // 6. GET key2
+        eprintln!("[test] Step 6: GET key2");
+        let val2 = client.get(b"key2").await.unwrap();
+        checker.record_next(
+            Op::Get {
+                key: b"key2".to_vec(),
+            },
+            OpResult::Value(val2),
+        );
+
+        // 7. Restart the crashed follower node
+        eprintln!(
+            "[test] Step 7: Restarting follower node {}...",
+            follower_node_id
+        );
+        if follower_node_id == 2 {
+            let config2_restart = ClusterConfig::new(
+                2,
+                &data_dir2,
+                raft_addr2,
+                client_addr2,
+                vec![(1, raft_addr1, client_addr1), (3, raft_addr3, client_addr3)],
+            );
+            handle2 = tokio::spawn(async move {
+                let _ = ClusterNode::new(config2_restart).run().await;
+            });
+        } else {
+            let config3_restart = ClusterConfig::new(
+                3,
+                &data_dir3,
+                raft_addr3,
+                client_addr3,
+                vec![(1, raft_addr1, client_addr1), (2, raft_addr2, client_addr2)],
+            );
+            handle3 = tokio::spawn(async move {
+                let _ = ClusterNode::new(config3_restart).run().await;
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // 8. DELETE key1
+        eprintln!("[test] Step 8: DELETE key1");
+        client.delete(b"key1").await.unwrap();
+        checker.record_next(
+            Op::Delete {
+                key: b"key1".to_vec(),
+            },
+            OpResult::Ok,
+        );
+
+        // 9. GET key1 (should be None)
+        eprintln!("[test] Step 9: GET key1");
+        let val1_after = client.get(b"key1").await.unwrap();
+        checker.record_next(
+            Op::Get {
+                key: b"key1".to_vec(),
+            },
+            OpResult::Value(val1_after),
+        );
+
+        // 10. Crash the leader node!
+        eprintln!("[test] Step 10: Crashing leader node {}...", leader_id);
+        let leader_handle = if leader_id == 1 {
+            &handle1
+        } else if leader_id == 2 {
+            &handle2
+        } else {
+            &handle3
+        };
+        leader_handle.abort();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Retry and perform GET key2 on the new leader
+        eprintln!("[test] Step 10b: Waiting for new leader election...");
+        let mut new_leader_addr = None;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr1).await.as_deref() == Some("leader") {
+                new_leader_addr = Some(client_addr1);
+                break;
+            }
+            if check_health(client_addr2).await.as_deref() == Some("leader") {
+                new_leader_addr = Some(client_addr2);
+                break;
+            }
+            if check_health(client_addr3).await.as_deref() == Some("leader") {
+                new_leader_addr = Some(client_addr3);
+                break;
+            }
+        }
+
+        let new_leader_addr = new_leader_addr.expect("No new leader elected after leader crash");
+        eprintln!("[test] Step 10c: New leader elected at {}", new_leader_addr);
+
+        // Reconnect client to the new leader
+        eprintln!(
+            "[test] Connecting client to new leader at {}...",
+            new_leader_addr
+        );
+        let mut new_client = kaya_client::KayaClient::connect(new_leader_addr)
+            .await
+            .unwrap();
+
+        // 11. PUT key3
+        eprintln!("[test] Step 11: PUT key3=val3");
+        new_client.put(b"key3", b"val3").await.unwrap();
+        checker.record_next(
+            Op::Put {
+                key: b"key3".to_vec(),
+                value: b"val3".to_vec(),
+            },
+            OpResult::Ok,
+        );
+
+        // 12. GET key3
+        eprintln!("[test] Step 12: GET key3");
+        let val3 = new_client.get(b"key3").await.unwrap();
+        checker.record_next(
+            Op::Get {
+                key: b"key3".to_vec(),
+            },
+            OpResult::Value(val3),
+        );
+
+        // 13. SCAN prefix "key" (should have key2 and key3)
+        eprintln!("[test] Step 13: SCAN key");
+        let scan2 = new_client.scan(b"key").await.unwrap();
+        checker.record_next(
+            Op::Scan {
+                prefix: b"key".to_vec(),
+            },
+            OpResult::Scan(scan2),
+        );
+
+        // Verify the entire recorded history against sequential linearizability checker!
+        eprintln!("[test] Step 14: Verifying history sequential linearizability...");
+        let verification = checker.check_sequential();
+        assert!(
+            verification.is_ok(),
+            "Linearizability violation: {:?}",
+            verification.unwrap_err()
+        );
+        eprintln!("[test] History sequential linearizability verified successfully!");
+
+        // Serialize and log history trace JSONL
+        let trace_str = checker.to_trace_string(0xdead_beef);
+        eprintln!("[test] Generated History Trace JSONL:\n{}", trace_str);
 
         // Clean up spawns
         handle1.abort();

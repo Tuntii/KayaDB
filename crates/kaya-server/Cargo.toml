@@ -26,4 +26,5 @@ path = "src/main.rs"
 
 [dev-dependencies]
 kaya-client = { path = "../kaya-client" }
+kaya-sim = { path = "../kaya-sim" }
 

@@ -61,3 +61,29 @@ pub fn validate_frame_len(frame_len: u32, max_frame_len: u32) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fuzz_codec_no_panic() {
+        let cases: &[&[u8]] = &[
+            b"",
+            &[0u8; 1],
+            &[0u8; 8],
+            &[0u8; 17],
+            &[0xffu8; 100],
+            b"\x00\x00\x00\x00\x00\x00\x00\x00garbage",
+            b"\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        ];
+        for input in cases {
+            let _ = decode_envelope(input);
+            let _ = decode_put_payload(input);
+            let _ = decode_key_payload(input);
+            let _ = decode_scan_response(input);
+            let _ = decode_error_payload(input);
+            let _ = decode_value_payload(input);
+        }
+    }
+}

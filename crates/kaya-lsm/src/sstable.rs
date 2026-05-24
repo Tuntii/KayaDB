@@ -602,6 +602,16 @@ pub fn inspect_sstable_path(path: impl AsRef<Path>) -> Result<SstInspection> {
     }
 }
 
+/// Expose decode_data_block for fuzzing.
+pub fn fuzz_decode_data_block(bytes: &[u8]) {
+    let _ = decode_data_block(bytes);
+}
+
+/// Expose decode_index_block for fuzzing.
+pub fn fuzz_decode_index_block(bytes: &[u8]) {
+    let _ = decode_index_block(bytes);
+}
+
 // ---- Tests ----
 
 #[cfg(test)]
