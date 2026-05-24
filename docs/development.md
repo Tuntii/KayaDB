@@ -151,14 +151,25 @@ Benchmark results are not committed to the repository. Run them locally for rela
 
 ---
 
-## Spec-first development
+## Design-note driven development
 
-KayaDB is spec-driven. The workflow for a new feature is:
+KayaDB is design-first and invariant-driven. Public contributions should explain the behavior being changed before the implementation lands.
 
-1. **Find or write the spec** — locate the relevant document in `spec/docs/` or create a new one.
-2. **Add an invariant** — if your feature has a correctness property (e.g., "after restart, all committed writes are visible"), add it to `spec/docs/testing-and-invariants-spec.md` with an `INV-XXX` identifier.
-3. **Open the PR** — link the spec section and the invariant IDs in the PR description.
-4. **Write a deterministic test first** — for any crash/recovery path, write the test before the implementation.
+For a new feature or bug fix:
+
+1. **State the behavior** — what should users, operators, or recovery code observe?
+2. **Name the invariant** — for example: "after restart, acknowledged strict writes are visible".
+3. **Identify the failure modes** — crash, partial write, bad checksum, follower read, network partition, oversized frame, and so on.
+4. **Write a deterministic test first when possible** — especially for crash/recovery and parser behavior.
+5. **Update public docs or CLI output** if users can see the new behavior.
+
+Good PR descriptions usually include:
+
+- the user-visible behavior,
+- the affected crate(s),
+- the invariant being protected,
+- the deterministic test or seed that proves the behavior,
+- any known limitations or follow-up work.
 
 ---
 
@@ -183,6 +194,38 @@ KayaDB is spec-driven. The workflow for a new feature is:
 
 ---
 
+## Debugging correctness failures
+
+When a correctness test fails, try to reduce it into one of these durable artifacts:
+
+| Failure type | Useful artifact |
+|---|---|
+| WAL/parser bug | Minimal byte fixture or fuzz artifact |
+| Crash/recovery bug | `SimDisk` fault schedule or simulation seed |
+| Engine visibility bug | Operation sequence compared with a `BTreeMap` model |
+| Cluster bug | Raft seed, message history, node status snapshots |
+| CLI regression | Before/after command output, ideally with `--json` |
+
+Avoid fixing only the symptom. KayaDB prefers a small failing seed or fixture over a long explanation that nobody can replay.
+
+---
+
+## Public documentation checklist
+
+Update user-facing docs when a change affects:
+
+- CLI flags or output,
+- server startup commands,
+- data directory layout,
+- recovery warnings,
+- security/deployment guidance,
+- public crate examples,
+- benchmark interpretation.
+
+Documentation examples should be copy-paste friendly and should not depend on hidden local setup.
+
+---
+
 ## PR checklist
 
 Before opening a pull request:
@@ -190,7 +233,7 @@ Before opening a pull request:
 - [ ] `cargo fmt --all` passes (no diff)
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes
 - [ ] `cargo test --workspace` passes
-- [ ] PR description links the relevant spec document or roadmap item
+- [ ] PR description links the relevant roadmap item or explains the design context
 - [ ] New crash/recovery paths have a deterministic regression test
 - [ ] New persistent format fields are added to the inspector output
 
@@ -200,7 +243,5 @@ Before opening a pull request:
 
 - [Architecture overview](architecture.md)
 - [Getting started](getting-started.md)
-- [spec/docs/testing-and-invariants-spec.md](../spec/docs/testing-and-invariants-spec.md)
-- [spec/docs/simulation-spec.md](../spec/docs/simulation-spec.md)
 - [ROADMAP.md](../ROADMAP.md)
 - [CONTRIBUTING.md](../CONTRIBUTING.md)

@@ -2,6 +2,8 @@
 
 <div align="center">
 
+<img src="docs/kaya-logo.png" alt="KayaDB logo" width="520">
+
 [![CI](https://github.com/Tuntii/KayaDB/actions/workflows/ci.yml/badge.svg)](https://github.com/Tuntii/KayaDB/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](Cargo.toml)
@@ -11,7 +13,7 @@
 
 _KayaDB is the database project for people who believe crashes should be test cases, not horror stories._
 
-[Getting started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [CLI reference](docs/cli-reference.md) · [Roadmap](ROADMAP.md) · [Spec index](spec/docs/00-spec-index.md)
+[Docs](docs/README.md) · [Getting started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [CLI reference](docs/cli-reference.md) · [Security](docs/security.md) · [Roadmap](ROADMAP.md)
 
 </div>
 
@@ -62,9 +64,9 @@ KayaDB treats every byte written to disk as something operators and contributors
 
 No hidden “trust me bro” file formats. If KayaDB writes it, the project aims to give you a way to inspect it.
 
-### 3. Spec-first development
+### 3. Design-first development
 
-The repository includes a technical specification pack under [`spec/docs/`](spec/docs/). Persistent formats, recovery semantics, testing rules, CLI UX, security boundaries, and roadmap decisions are documented as part of the implementation process.
+Persistent formats, recovery semantics, testing rules, CLI UX, security boundaries, and roadmap decisions are documented before they become hard to change.
 
 The north star is not “ship more code”. It is:
 
@@ -327,7 +329,7 @@ The project uses several layers of validation:
 - seeded simulation in `kaya-sim`,
 - trace replay for reproducibility,
 - fuzz targets for malformed WAL/SSTable/manifest/protocol input,
-- a TLA+ model for WAL crash behavior under [`spec/specs/wal/`](spec/specs/wal/),
+- a small formal model for WAL crash behavior maintained alongside the project,
 - CI for `fmt`, `clippy -D warnings`, and the workspace test suite.
 
 Useful commands:
@@ -340,7 +342,7 @@ cargo +nightly fuzz run fuzz_command_frame_decoder
 cargo bench -p kaya-bench
 ```
 
-See [`docs/development.md`](docs/development.md), [`spec/docs/testing-and-invariants-spec.md`](spec/docs/testing-and-invariants-spec.md), and [`BENCHMARKS.md`](BENCHMARKS.md).
+See [`docs/development.md`](docs/development.md) and [`BENCHMARKS.md`](BENCHMARKS.md).
 
 ---
 
@@ -389,7 +391,7 @@ KayaDB is intentionally honest about what it is not ready for yet.
 - **Leader-routed reads** — followers should redirect or reject client reads instead of serving stale data.
 - **Experimental format evolution** — persistent formats are documented, but compatibility policy is still early.
 
-Read [`docs/security.md`](docs/security.md) and [`spec/docs/security-and-safety-spec.md`](spec/docs/security-and-safety-spec.md) before any deployment experiment.
+Read [`docs/security.md`](docs/security.md) before any deployment experiment.
 
 ---
 
@@ -405,7 +407,7 @@ The short version:
 6. **Readiness hardening** — stronger cluster tests, recovery diagnostics, status UX. 🚧
 7. **Future systems work** — Jepsen prep, Raft snapshots, dynamic membership, Linux eBPF observability, production security boundaries. 🔒
 
-See [`ROADMAP.md`](ROADMAP.md) and [`spec/issues/expanded-implementation-roadmap.md`](spec/issues/expanded-implementation-roadmap.md).
+See [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
@@ -415,7 +417,7 @@ KayaDB is open source and contributor-friendly, but it has a strong correctness 
 
 Good contributions usually include:
 
-- a linked spec section or roadmap item,
+- a linked roadmap item or clear design note,
 - a test for the behavior being changed,
 - deterministic crash/recovery coverage when persistence is involved,
 - inspector output updates when persistent formats change,

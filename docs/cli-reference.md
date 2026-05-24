@@ -5,6 +5,8 @@
 - **Embedded mode** — opens the data directory directly (no server required)
 - **Server mode** — connects to a running `kayadb-server` over TCP (`--server`)
 
+Use embedded mode when inspecting or repairing a local data directory. Use server mode when interacting with a running node or cluster.
+
 ---
 
 ## Global flags
@@ -18,6 +20,45 @@
 
 ---
 
+## Common workflows
+
+### Local smoke test
+
+```bash
+kayactl --data ./data put hello world
+kayactl --data ./data get hello
+kayactl --data ./data scan he
+kayactl --data ./data stats
+```
+
+### Check a data directory after a crash
+
+```bash
+kayactl --data ./data recover --dry-run
+kayactl inspect wal ./data/wal-000001.wal
+kayactl inspect manifest ./data/MANIFEST
+```
+
+### Talk to a running node
+
+```bash
+kayactl --server 127.0.0.1:7379 health
+kayactl --server 127.0.0.1:7379 put user:1 ada
+kayactl --server 127.0.0.1:7379 get user:1
+kayactl --server 127.0.0.1:7379 status --json
+```
+
+### Automation-friendly output
+
+Use `--json` when a command feeds scripts, dashboards, or CI checks:
+
+```bash
+kayactl --json --data ./data stats
+kayactl --json --server 127.0.0.1:7379 status
+```
+
+---
+
 ## Key-value commands
 
 ### `put <key> <value>`
@@ -27,7 +68,7 @@ Write a key-value pair.
 ```bash
 kayactl put hello world
 kayactl --data /tmp/db put hello world
-kayactl --server 127.0.0.1:7777 put hello world
+kayactl --server 127.0.0.1:7379 put hello world
 ```
 
 **Output (default):**
@@ -48,7 +89,7 @@ Read a value by key. Exits with a non-zero code if the key is not found.
 
 ```bash
 kayactl get hello
-kayactl --server 127.0.0.1:7777 get hello
+kayactl --server 127.0.0.1:7379 get hello
 ```
 
 **Output (default):**
@@ -75,7 +116,7 @@ Write a tombstone for the key.
 
 ```bash
 kayactl delete hello
-kayactl --server 127.0.0.1:7777 delete hello
+kayactl --server 127.0.0.1:7379 delete hello
 ```
 
 **Output:**
@@ -91,7 +132,7 @@ Scan all keys that start with the given prefix, ordered lexicographically.
 
 ```bash
 kayactl scan user:
-kayactl --server 127.0.0.1:7777 scan user:
+kayactl --server 127.0.0.1:7379 scan user:
 ```
 
 **Output (default):**
@@ -217,6 +258,49 @@ Recovery report:
 ```
 
 A non-zero exit code is emitted if recovery would fail.
+
+---
+
+## Server health and status
+
+These commands require `--server <addr>`.
+
+### `health`
+
+Check whether a node is reachable and what role it currently reports.
+
+```bash
+kayactl --server 127.0.0.1:7379 health
+kayactl --server 127.0.0.1:7379 health --json
+```
+
+Typical human output:
+
+```text
+OK role=leader
+```
+
+### `status`
+
+Print Raft and storage metrics for a node.
+
+```bash
+kayactl --server 127.0.0.1:7379 status
+kayactl --server 127.0.0.1:7379 status --json
+```
+
+The status payload includes:
+
+| Field | Meaning |
+|---|---|
+| `role` | Current Raft role: leader, follower, or candidate |
+| `term` | Current Raft term |
+| `commit_index` | Highest committed Raft log index known to the node |
+| `applied_index` | Highest committed entry applied to the local engine |
+| `peer_count` | Number of configured peers excluding the local node |
+| `engine.*` | Storage counters such as puts, gets, WAL bytes, fsync count, SSTable count |
+
+Followers may return `NOT_LEADER` for some client operations. When a leader hint is available, `kayactl` retries a limited number of times against the hinted address.
 
 ---
 

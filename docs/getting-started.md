@@ -45,14 +45,26 @@ cargo test --workspace
 # Create a data directory
 mkdir -p /tmp/kayadb-data
 
-# Start the server on the default port (7777)
-cargo run -p kaya-server -- --dir /tmp/kayadb-data
+# Start the server on the default localhost addresses
+cargo run -p kaya-server --bin kayadb-server -- --data /tmp/kayadb-data
 
-# Or specify a custom port
-cargo run -p kaya-server -- --dir /tmp/kayadb-data --port 7777
+# Or specify explicit Raft and client addresses
+cargo run -p kaya-server --bin kayadb-server -- \
+  --data /tmp/kayadb-data \
+  --raft-addr 127.0.0.1:7481 \
+  --client-addr 127.0.0.1:7379
 ```
 
-The server writes its WAL, SSTables, and manifest under `--dir`.
+The server writes its WAL, SSTables, and manifest under `--data`.
+
+Default addresses:
+
+| Address | Default | Used for |
+|---|---|---|
+| `--raft-addr` | `127.0.0.1:7481` | Raft peer traffic between nodes |
+| `--client-addr` | `127.0.0.1:7379` | Client traffic from `kayactl` or `kaya-client` |
+
+The default bind address is localhost. Keep it that way unless you have read the [security guide](security.md) and placed the node behind private networking.
 
 ---
 
@@ -66,24 +78,24 @@ The server writes its WAL, SSTables, and manifest under `--dir`.
 DATA=/tmp/kayadb-data
 
 # Write a key
-cargo run -p kayactl -- --dir $DATA put hello world
+cargo run -p kayactl -- --data $DATA put hello world
 
 # Read it back
-cargo run -p kayactl -- --dir $DATA get hello
+cargo run -p kayactl -- --data $DATA get hello
 
 # Delete it
-cargo run -p kayactl -- --dir $DATA delete hello
+cargo run -p kayactl -- --data $DATA delete hello
 
 # Scan a range
-cargo run -p kayactl -- --dir $DATA scan --from a --to z
+cargo run -p kayactl -- --data $DATA scan he
 ```
 
 ### Server mode
 
 ```bash
 # Connect to a running server
-cargo run -p kayactl -- --server 127.0.0.1:7777 put hello world
-cargo run -p kayactl -- --server 127.0.0.1:7777 get hello
+cargo run -p kayactl -- --server 127.0.0.1:7379 put hello world
+cargo run -p kayactl -- --server 127.0.0.1:7379 get hello
 ```
 
 ---
@@ -112,7 +124,7 @@ Each command prints records in human-readable format including offsets, CRC stat
 ## Database stats
 
 ```bash
-cargo run -p kayactl -- --dir $DATA stats
+cargo run -p kayactl -- --data $DATA stats
 ```
 
 Reports memtable size, WAL segment count, SSTable count per level, and compaction state.
@@ -124,7 +136,7 @@ Reports memtable size, WAL segment count, SSTable count per level, and compactio
 Run the recovery path without writing anything to disk:
 
 ```bash
-cargo run -p kayactl -- --dir $DATA recover --dry-run
+cargo run -p kayactl -- --data $DATA recover --dry-run
 ```
 
 Useful for verifying a data directory is consistent before starting a node.
@@ -135,19 +147,34 @@ Useful for verifying a data directory is consistent before starting a node.
 
 ```bash
 # Node 1
-cargo run -p kaya-server -- --dir /tmp/kaya-node1 --port 7771 \
-  --peers 127.0.0.1:7772,127.0.0.1:7773 --node-id 1
+cargo run -p kaya-server --bin kayadb-server -- \
+  --node-id 1 \
+  --raft-addr 127.0.0.1:7481 \
+  --client-addr 127.0.0.1:7379 \
+  --peer 2=127.0.0.1:7482,127.0.0.1:7380 \
+  --peer 3=127.0.0.1:7483,127.0.0.1:7381 \
+  --data /tmp/kaya-node1
 
 # Node 2
-cargo run -p kaya-server -- --dir /tmp/kaya-node2 --port 7772 \
-  --peers 127.0.0.1:7771,127.0.0.1:7773 --node-id 2
+cargo run -p kaya-server --bin kayadb-server -- \
+  --node-id 2 \
+  --raft-addr 127.0.0.1:7482 \
+  --client-addr 127.0.0.1:7380 \
+  --peer 1=127.0.0.1:7481,127.0.0.1:7379 \
+  --peer 3=127.0.0.1:7483,127.0.0.1:7381 \
+  --data /tmp/kaya-node2
 
 # Node 3
-cargo run -p kaya-server -- --dir /tmp/kaya-node3 --port 7773 \
-  --peers 127.0.0.1:7771,127.0.0.1:7772 --node-id 3
+cargo run -p kaya-server --bin kayadb-server -- \
+  --node-id 3 \
+  --raft-addr 127.0.0.1:7483 \
+  --client-addr 127.0.0.1:7381 \
+  --peer 1=127.0.0.1:7481,127.0.0.1:7379 \
+  --peer 2=127.0.0.1:7482,127.0.0.1:7380 \
+  --data /tmp/kaya-node3
 ```
 
-The cluster runs Raft consensus. Reads and writes are transparently routed through the current leader.
+The cluster runs Raft consensus. Writes are proposed through the leader, and followers can return leader hints so clients can retry on the correct node.
 
 ---
 
@@ -157,10 +184,10 @@ You can remotely inspect the health, role, term, and engine statistics of any no
 
 ```bash
 # Get human-readable status from Node 1
-cargo run -p kayactl -- --server 127.0.0.1:7771 status
+cargo run -p kayactl -- --server 127.0.0.1:7379 status
 
 # Get JSON-formatted status for automation
-cargo run -p kayactl -- --server 127.0.0.1:7771 status --json
+cargo run -p kayactl -- --server 127.0.0.1:7379 status --json
 ```
 
 **Example output:**
@@ -193,7 +220,7 @@ use kaya_client::KayaClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr: SocketAddr = "127.0.0.1:7771".parse()?;
+    let addr: SocketAddr = "127.0.0.1:7379".parse()?;
     
     // Connects to the target node
     let mut client = KayaClient::connect(addr).await?;
@@ -216,9 +243,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
+## What files should I expect?
+
+After local writes, the data directory may contain files like:
+
+```text
+<data-dir>/
+  wal-000001.wal       append-only write-ahead log segment
+  sst-000001.sst       immutable sorted table created after flush
+  MANIFEST             append-only live-table metadata log
+  CURRENT              pointer to the active manifest
+```
+
+The exact set depends on whether the memtable has flushed yet. WAL files usually appear first; SSTables and manifest entries appear after flush/compaction paths run.
+
+Use `kayactl inspect ...` and `kayactl recover --dry-run` to understand a data directory before deleting or reusing it.
+
+---
+
+## Cleanup
+
+For local experiments, stop all running `kayadb-server` processes and remove the data directories you created:
+
+```bash
+rm -rf /tmp/kayadb-data /tmp/kaya-node1 /tmp/kaya-node2 /tmp/kaya-node3
+```
+
+On Windows PowerShell:
+
+```powershell
+Remove-Item -Recurse -Force $env:TEMP\kayadb-data,$env:TEMP\kaya-node1,$env:TEMP\kaya-node2,$env:TEMP\kaya-node3
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| `address already in use` | Another node is still running on the same `--raft-addr` or `--client-addr`. Stop it or choose different ports. |
+| `not leader` | Send the command to the hinted leader, or let `kayactl`/`kaya-client` retry when a leader address is returned. |
+| `NOT_FOUND` | The key does not exist in the current logical view, or you are reading a different data directory/cluster. |
+| Recovery warning | Run `kayactl --data <dir> recover --dry-run --json` and inspect WAL/manifest files before continuing. |
+| Public network exposure | Do not expose KayaDB ports directly; read [Security](security.md). |
+
+---
+
 ## Next steps
 
+- [Documentation index](README.md) — choose the next guide based on your goal
 - [Architecture overview](architecture.md) — understand crate boundaries and data flow
 - [CLI reference](cli-reference.md) — full `kayactl` command reference
 - [Development guide](development.md) — writing tests, running simulations, fuzz testing
-- [spec/](../spec/README.md) — full technical specification

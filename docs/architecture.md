@@ -200,14 +200,78 @@ kaya-lsm::flush_memtable_to_sstable
 
 ---
 
-## Spec references
+## Durability and recovery model
 
-The technical specifications that govern this implementation live in [`spec/docs/`](../spec/docs/):
+KayaDB uses a conservative storage model: a write is acknowledged only after the configured durability path has completed.
 
-- [`architecture-spec.md`](../spec/docs/architecture-spec.md)
-- [`disk-and-io-spec.md`](../spec/docs/disk-and-io-spec.md)
-- [`wal-spec.md`](../spec/docs/wal-spec.md)
-- [`lsm-storage-format-spec.md`](../spec/docs/lsm-storage-format-spec.md)
-- [`engine-api-spec.md`](../spec/docs/engine-api-spec.md)
-- [`simulation-spec.md`](../spec/docs/simulation-spec.md)
-- [`raft-and-distributed-roadmap-spec.md`](../spec/docs/raft-and-distributed-roadmap-spec.md)
+### Strict durability
+
+In strict mode, a write follows this sequence:
+
+```text
+client request
+   → encode WAL record
+   → append WAL bytes
+   → sync WAL segment
+   → apply to memtable
+   → return success
+```
+
+If a crash happens after the WAL sync but before the memtable update, reopening the engine replays the WAL and reconstructs the visible state.
+
+### Relaxed durability
+
+Relaxed mode allows the engine to acknowledge before a durable sync. This can improve throughput during experiments, but a process or machine crash may lose the most recent unsynced writes.
+
+### Durable-prefix recovery
+
+WAL recovery accepts only the longest valid prefix of records. A partial or corrupted tail is treated as a normal crash artifact and is truncated from the recovered view. A corrupted middle record is not silently ignored because that could hide data loss.
+
+### Manifest-defined live state
+
+SSTable file existence alone does not make a table live. The manifest decides which tables belong to the current logical database state. This lets flush and compaction publish new files atomically and ignore orphaned files after crashes.
+
+---
+
+## Cluster request flow
+
+In cluster mode, `kaya-server` hosts both the local storage engine and the Raft state machine.
+
+```text
+client PUT/DELETE
+   → kaya-net client frame
+   → kaya-server client handler
+   → Raft proposal on leader
+   → replicated log entry
+   → committed entry
+   → apply command to kaya-engine
+   → client response
+```
+
+Reads are currently leader-routed. Followers should either redirect clients with a leader hint or reject the request rather than serving potentially stale local state.
+
+Cluster membership is static in the current prototype. Each node is started with explicit `--peer` entries, and changing the roster requires coordinated restarts.
+
+---
+
+## Operational design promises
+
+KayaDB's public design is built around a few promises that should stay visible in code review and documentation:
+
+| Promise | Practical meaning |
+|---|---|
+| Same code under test | `FileDisk` and `SimDisk` sit behind the same `Disk` trait |
+| Failures are inputs | Partial writes, failed syncs, and crashes are expected test cases |
+| Bytes are inspectable | WAL, SSTable, and manifest files can be inspected with `kayactl` |
+| Recovery is repeatable | Running recovery multiple times should not change the logical result |
+| Server does not bypass storage | Network writes still flow through `kaya-engine` and the WAL |
+| Localhost first | Network defaults should be safe for local development, not public exposure |
+
+---
+
+## Related user docs
+
+- [Getting started](getting-started.md)
+- [CLI reference](cli-reference.md)
+- [Development guide](development.md)
+- [Security guide](security.md)

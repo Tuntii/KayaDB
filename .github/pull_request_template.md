@@ -2,9 +2,9 @@
 
 -
 
-## Relevant specs / roadmap IDs
+## Relevant roadmap IDs / design context
 
-- See `ROADMAP.md` and `spec/issues/expanded-implementation-roadmap.md`.
+- See `ROADMAP.md`, or briefly explain the design context.
 -
 
 ## Invariants touched
