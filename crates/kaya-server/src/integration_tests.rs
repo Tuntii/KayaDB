@@ -261,12 +261,24 @@ mod tests {
 
         let leader_addr = leader_addr.expect("No leader elected in 10 seconds");
         let leader_id = leader_id.unwrap();
-        eprintln!("[test] Leader elected: Node {} at {}", leader_id, leader_addr);
+        eprintln!(
+            "[test] Leader elected: Node {} at {}",
+            leader_id, leader_addr
+        );
 
         // Connect the client to a follower, allowing auto-redirection
-        let follower_addr = if leader_id == 1 { client_addr2 } else { client_addr1 };
-        eprintln!("[test] Connecting client to follower at {}...", follower_addr);
-        let mut client = kaya_client::KayaClient::connect(follower_addr).await.unwrap();
+        let follower_addr = if leader_id == 1 {
+            client_addr2
+        } else {
+            client_addr1
+        };
+        eprintln!(
+            "[test] Connecting client to follower at {}...",
+            follower_addr
+        );
+        let mut client = kaya_client::KayaClient::connect(follower_addr)
+            .await
+            .unwrap();
 
         let mut checker = LinearizabilityChecker::new();
 
@@ -303,8 +315,15 @@ mod tests {
 
         // 4. Crash a follower node
         let follower_node_id = if leader_id == 3 { 2 } else { 3 };
-        eprintln!("[test] Step 4: Crashing follower node {}...", follower_node_id);
-        let follower_to_crash_handle = if follower_node_id == 2 { &handle2 } else { &handle3 };
+        eprintln!(
+            "[test] Step 4: Crashing follower node {}...",
+            follower_node_id
+        );
+        let follower_to_crash_handle = if follower_node_id == 2 {
+            &handle2
+        } else {
+            &handle3
+        };
         follower_to_crash_handle.abort();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -330,20 +349,29 @@ mod tests {
         );
 
         // 7. Restart the crashed follower node
-        eprintln!("[test] Step 7: Restarting follower node {}...", follower_node_id);
+        eprintln!(
+            "[test] Step 7: Restarting follower node {}...",
+            follower_node_id
+        );
         if follower_node_id == 2 {
-            let config2_restart = ClusterConfig::new(2, &data_dir2, raft_addr2, client_addr2, vec![
-                (1, raft_addr1, client_addr1),
-                (3, raft_addr3, client_addr3),
-            ]);
+            let config2_restart = ClusterConfig::new(
+                2,
+                &data_dir2,
+                raft_addr2,
+                client_addr2,
+                vec![(1, raft_addr1, client_addr1), (3, raft_addr3, client_addr3)],
+            );
             handle2 = tokio::spawn(async move {
                 let _ = ClusterNode::new(config2_restart).run().await;
             });
         } else {
-            let config3_restart = ClusterConfig::new(3, &data_dir3, raft_addr3, client_addr3, vec![
-                (1, raft_addr1, client_addr1),
-                (2, raft_addr2, client_addr2),
-            ]);
+            let config3_restart = ClusterConfig::new(
+                3,
+                &data_dir3,
+                raft_addr3,
+                client_addr3,
+                vec![(1, raft_addr1, client_addr1), (2, raft_addr2, client_addr2)],
+            );
             handle3 = tokio::spawn(async move {
                 let _ = ClusterNode::new(config3_restart).run().await;
             });
@@ -405,8 +433,13 @@ mod tests {
         eprintln!("[test] Step 10c: New leader elected at {}", new_leader_addr);
 
         // Reconnect client to the new leader
-        eprintln!("[test] Connecting client to new leader at {}...", new_leader_addr);
-        let mut new_client = kaya_client::KayaClient::connect(new_leader_addr).await.unwrap();
+        eprintln!(
+            "[test] Connecting client to new leader at {}...",
+            new_leader_addr
+        );
+        let mut new_client = kaya_client::KayaClient::connect(new_leader_addr)
+            .await
+            .unwrap();
 
         // 11. PUT key3
         eprintln!("[test] Step 11: PUT key3=val3");

@@ -19,15 +19,20 @@ impl NodeController {
         peers: &[(u64, String, String)],
     ) -> std::io::Result<Self> {
         let mut cmd = Command::new(binary_path);
-        cmd.arg("--node-id").arg(node_id.to_string())
-            .arg("--raft-addr").arg(format!("127.0.0.1:{}", raft_port))
-            .arg("--client-addr").arg(format!("127.0.0.1:{}", client_port))
-            .arg("--data").arg(data_dir.as_os_str())
+        cmd.arg("--node-id")
+            .arg(node_id.to_string())
+            .arg("--raft-addr")
+            .arg(format!("127.0.0.1:{}", raft_port))
+            .arg("--client-addr")
+            .arg(format!("127.0.0.1:{}", client_port))
+            .arg("--data")
+            .arg(data_dir.as_os_str())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
         for (peer_id, peer_raft, peer_client) in peers {
-            cmd.arg("--peer").arg(format!("{}={},{}", peer_id, peer_raft, peer_client));
+            cmd.arg("--peer")
+                .arg(format!("{}={},{}", peer_id, peer_raft, peer_client));
         }
 
         let child = cmd.spawn()?;
@@ -85,13 +90,13 @@ impl Drop for NodeController {
 #[cfg(target_os = "windows")]
 fn change_process_threads_state(pid: u32, suspend: bool) -> std::io::Result<()> {
     use std::io::Error;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
     };
     use windows_sys::Win32::System::Threading::{
         OpenThread, ResumeThread, SuspendThread, THREAD_SUSPEND_RESUME,
     };
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
 
     unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
@@ -132,7 +137,11 @@ fn change_process_threads_state(pid: u32, suspend: bool) -> std::io::Result<()> 
 
 #[cfg(not(target_os = "windows"))]
 fn change_process_threads_state(pid: u32, suspend: bool) -> std::io::Result<()> {
-    let sig = if suspend { libc::SIGSTOP } else { libc::SIGCONT };
+    let sig = if suspend {
+        libc::SIGSTOP
+    } else {
+        libc::SIGCONT
+    };
     let res = unsafe { libc::kill(pid as libc::pid_t, sig) };
     if res != 0 {
         Err(std::io::Error::last_os_error())

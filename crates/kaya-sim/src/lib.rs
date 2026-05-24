@@ -10,7 +10,6 @@ pub use cluster::{ClusterSim, ClusterSimReport, SimNetwork, SimNetworkConfig};
 pub use control::NodeController;
 pub use linear::{HistoryEntry, LinearizabilityChecker, Op, OpResult};
 
-
 pub use kaya_io::{FaultKind, FaultRule, FaultSchedule, SimDisk, SimSeed};
 
 /// Configuration for a single deterministic simulation run.
@@ -147,7 +146,6 @@ mod tests {
         assert!(result.is_ok(), "replay diverged: {}", result.unwrap_err());
     }
 
-
     fn find_server_binary() -> std::path::PathBuf {
         let mut exe = std::env::current_exe().expect("failed to get current exe path");
         exe.pop(); // remove exe filename
@@ -158,7 +156,7 @@ mod tests {
         let bin_name = "kayadb-server.exe";
         #[cfg(not(target_os = "windows"))]
         let bin_name = "kayadb-server";
-        
+
         exe.join(bin_name)
     }
 
@@ -176,10 +174,14 @@ mod tests {
         if !binary_path.exists() {
             // Run cargo build -p kaya-server --bin kayadb-server to ensure it is built
             let mut build_cmd = std::process::Command::new("cargo");
-            build_cmd.arg("build").arg("-p").arg("kaya-server").arg("--bin").arg("kayadb-server");
+            build_cmd
+                .arg("build")
+                .arg("-p")
+                .arg("kaya-server")
+                .arg("--bin")
+                .arg("kayadb-server");
             let status = build_cmd.status().expect("failed to execute cargo build");
             assert!(status.success(), "failed to build kayadb-server binary");
-
         }
 
         let test_id = std::time::SystemTime::now()
@@ -192,14 +194,9 @@ mod tests {
         let raft_port = get_free_port();
 
         // Spawn node controller
-        let mut node = NodeController::spawn(
-            1,
-            &binary_path,
-            &data_dir,
-            client_port,
-            raft_port,
-            &[],
-        ).expect("failed to spawn node");
+        let mut node =
+            NodeController::spawn(1, &binary_path, &data_dir, client_port, raft_port, &[])
+                .expect("failed to spawn node");
 
         let client_addr = format!("127.0.0.1:{}", client_port);
 
@@ -260,7 +257,7 @@ mod tests {
     fn sim_large_seed_burn_in() {
         println!("[burn-in] starting 100-seed burn-in stress test (10,000 operations per seed)...");
         let start = std::time::Instant::now();
-        
+
         // Run 100 seeds. We can generate deterministic seeds using a simple linear congruential generator or simple sequence.
         for i in 1..=100 {
             let seed = 0xf00d_0000_u64 + (i * 1337);
@@ -269,26 +266,25 @@ mod tests {
                 max_operations: 10_000,
                 ..SimulationConfig::default()
             };
-            
+
             let seed_start = std::time::Instant::now();
             let report = SimRunner::new(config).run();
-            
+
             assert!(
                 report.invariant_failures.is_empty(),
                 "seed 0x{seed:x} (run #{i}) failed with invariant violations:\n{}",
                 report.invariant_failures.join("\n")
             );
-            
+
             println!(
                 "[burn-in] seed 0x{seed:x} (run #{i}/100) completed successfully in {:?}",
                 seed_start.elapsed()
             );
         }
-        
+
         println!(
             "[burn-in] success! All 100 seeds completed with zero invariant violations in {:?}",
             start.elapsed()
         );
     }
 }
-

@@ -119,7 +119,7 @@ fn acquire_directory_lock(config: &EngineConfig) -> Result<Option<std::fs::File>
 
     #[cfg(test)]
     {
-        return Ok(None);
+        Ok(None)
     }
 
     #[cfg(not(test))]
@@ -170,7 +170,6 @@ fn acquire_directory_lock(config: &EngineConfig) -> Result<Option<std::fs::File>
         Ok(Some(file))
     }
 }
-
 
 impl<D: Disk> Engine<D> {
     pub async fn open(config: EngineConfig, disk: Arc<D>) -> Result<Self> {
@@ -676,29 +675,27 @@ pub async fn recover<D: Disk>(config: EngineConfig, disk: Arc<D>) -> Result<Reco
 
     // Replay manifest (without opening SSTable readers to be fast and safe during dry run)
     let current_rel = RelativePath::new(CURRENT_FILE_NAME)?;
-    let (manifest_records_replayed, live_sstable_count, manifest_warnings) = match disk
-        .file_len(&current_rel)
-        .await
-    {
-        Ok(len) if len > 0 => {
-            let mut current_buf = vec![0u8; len as usize];
-            disk.read_at(&current_rel, 0, &mut current_buf).await?;
-            let manifest_name = std::str::from_utf8(&current_buf)
-                .map_err(|_| KayaError::corruption("CURRENT file is not valid UTF-8"))?
-                .trim();
-            let manifest_rel = RelativePath::new(manifest_name)?;
-            match disk.file_len(&manifest_rel).await {
-                Ok(m_len) if m_len > 0 => {
-                    let mut manifest_buf = vec![0u8; m_len as usize];
-                    disk.read_at(&manifest_rel, 0, &mut manifest_buf).await?;
-                    let (state, replayed_count, warnings) = replay_manifest(&manifest_buf);
-                    (replayed_count, state.live_tables.len(), warnings)
+    let (manifest_records_replayed, live_sstable_count, manifest_warnings) =
+        match disk.file_len(&current_rel).await {
+            Ok(len) if len > 0 => {
+                let mut current_buf = vec![0u8; len as usize];
+                disk.read_at(&current_rel, 0, &mut current_buf).await?;
+                let manifest_name = std::str::from_utf8(&current_buf)
+                    .map_err(|_| KayaError::corruption("CURRENT file is not valid UTF-8"))?
+                    .trim();
+                let manifest_rel = RelativePath::new(manifest_name)?;
+                match disk.file_len(&manifest_rel).await {
+                    Ok(m_len) if m_len > 0 => {
+                        let mut manifest_buf = vec![0u8; m_len as usize];
+                        disk.read_at(&manifest_rel, 0, &mut manifest_buf).await?;
+                        let (state, replayed_count, warnings) = replay_manifest(&manifest_buf);
+                        (replayed_count, state.live_tables.len(), warnings)
+                    }
+                    _ => (0, 0, Vec::new()),
                 }
-                _ => (0, 0, Vec::new()),
             }
-        }
-        _ => (0, 0, Vec::new()),
-    };
+            _ => (0, 0, Vec::new()),
+        };
 
     let mut warnings = Vec::new();
     for w in &wal_report.warnings {
@@ -1261,8 +1258,12 @@ mod tests {
             let current_tmp = RelativePath::new(CURRENT_TMP_FILE_NAME).unwrap();
             let sst_tmp = RelativePath::new("sst/0000000000000001.tmp").unwrap();
 
-            disk.write_at(&current_tmp, 0, b"some content").await.unwrap();
-            disk.write_at(&sst_tmp, 0, b"some other content").await.unwrap();
+            disk.write_at(&current_tmp, 0, b"some content")
+                .await
+                .unwrap();
+            disk.write_at(&sst_tmp, 0, b"some other content")
+                .await
+                .unwrap();
 
             assert!(disk.file_len(&current_tmp).await.is_ok());
             assert!(disk.file_len(&sst_tmp).await.is_ok());
@@ -1285,8 +1286,12 @@ mod tests {
             let current_tmp = RelativePath::new(CURRENT_TMP_FILE_NAME).unwrap();
             let sst_tmp = RelativePath::new("sst/0000000000000001.tmp").unwrap();
 
-            disk.write_at(&current_tmp, 0, b"some content").await.unwrap();
-            disk.write_at(&sst_tmp, 0, b"some other content").await.unwrap();
+            disk.write_at(&current_tmp, 0, b"some content")
+                .await
+                .unwrap();
+            disk.write_at(&sst_tmp, 0, b"some other content")
+                .await
+                .unwrap();
 
             assert!(disk.file_len(&current_tmp).await.is_ok());
             assert!(disk.file_len(&sst_tmp).await.is_ok());
@@ -1317,10 +1322,14 @@ mod tests {
 
             // Let's corrupt both WAL and Manifest.
             let wal_rel = RelativePath::new("wal/0000000000000001.wal").unwrap();
-            disk.append(&wal_rel, b"partial_corrupt_wal_bytes").await.unwrap();
+            disk.append(&wal_rel, b"partial_corrupt_wal_bytes")
+                .await
+                .unwrap();
 
             let manifest_rel = RelativePath::new(MANIFEST_FILE_NAME).unwrap();
-            disk.append(&manifest_rel, b"corrupted_manifest_tail_bytes").await.unwrap();
+            disk.append(&manifest_rel, b"corrupted_manifest_tail_bytes")
+                .await
+                .unwrap();
 
             // Reopen engine and inspect warning enums.
             let engine = Engine::open(config, disk).await.unwrap();
@@ -1352,7 +1361,7 @@ mod tests {
     #[test]
     fn engine_disk_full_resilience() {
         block_on(async {
-            use kaya_io::{FaultSchedule, FaultRule, FaultKind, SimSeed};
+            use kaya_io::{FaultKind, FaultRule, FaultSchedule, SimSeed};
 
             // Inject DiskFull fault at operation index 3 (which will be the SSTable write_at during flush)
             let schedule = FaultSchedule {
@@ -1381,8 +1390,16 @@ mod tests {
             );
 
             // Verify that in-memory stats are still intact and key1 is still readable from memtable
-            assert_eq!(engine.stats().sstable_count, 0, "no SSTables should be committed");
-            assert_eq!(engine.stats().memtable_entries, 1, "memtable should retain the entry");
+            assert_eq!(
+                engine.stats().sstable_count,
+                0,
+                "no SSTables should be committed"
+            );
+            assert_eq!(
+                engine.stats().memtable_entries,
+                1,
+                "memtable should retain the entry"
+            );
 
             assert_eq!(
                 engine.get(b"key1", ReadOptions::default()).await.unwrap(),

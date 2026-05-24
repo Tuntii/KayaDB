@@ -122,14 +122,8 @@ impl ManifestState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestWarning {
-    Truncated {
-        offset: u64,
-        trailing_bytes: usize,
-    },
-    Invalid {
-        offset: u64,
-        message: String,
-    },
+    Truncated { offset: u64, trailing_bytes: usize },
+    Invalid { offset: u64, message: String },
 }
 
 impl std::fmt::Display for ManifestWarning {

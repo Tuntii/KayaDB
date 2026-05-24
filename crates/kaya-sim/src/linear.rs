@@ -258,21 +258,19 @@ impl LinearizabilityChecker {
                         r#"{{"eid":{eid},"kind":"op_result","oid":{oid},"ok":true}}"#
                     ));
                 }
-                OpResult::Value(val) => {
-                    match val {
-                        Some(v) => {
-                            let vh = hex_enc(v);
-                            lines.push(format!(
+                OpResult::Value(val) => match val {
+                    Some(v) => {
+                        let vh = hex_enc(v);
+                        lines.push(format!(
                                 r#"{{"eid":{eid},"kind":"op_result","oid":{oid},"ok":true,"val":"{vh}"}}"#
                             ));
-                        }
-                        None => {
-                            lines.push(format!(
-                                r#"{{"eid":{eid},"kind":"op_result","oid":{oid},"ok":true,"val":null}}"#
-                            ));
-                        }
                     }
-                }
+                    None => {
+                        lines.push(format!(
+                            r#"{{"eid":{eid},"kind":"op_result","oid":{oid},"ok":true,"val":null}}"#
+                        ));
+                    }
+                },
                 OpResult::Scan(items) => {
                     lines.push(format!(
                         r#"{{"eid":{eid},"kind":"op_result","oid":{oid},"ok":true,"count":{}}}"#,

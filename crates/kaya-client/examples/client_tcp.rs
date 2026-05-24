@@ -1,5 +1,5 @@
-use std::net::SocketAddr;
 use kaya_client::KayaClient;
+use std::net::SocketAddr;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -7,12 +7,15 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = addr_str.parse()?;
 
     println!("Attempting to connect to KayaDB server at: {}", addr);
-    
+
     // Attempt connection
     let mut client = match KayaClient::connect(addr).await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("\n[!] Connection Error: Could not connect to KayaDB at {}", addr_str);
+            eprintln!(
+                "\n[!] Connection Error: Could not connect to KayaDB at {}",
+                addr_str
+            );
             eprintln!("    To start a local server first, run:");
             eprintln!("    cargo run -p kaya-server --bin kayadb-server\n");
             return Err(e.into());
@@ -26,7 +29,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
         Err(e) => {
             eprintln!("\n[!] Handshake Error: Server did not respond to health check.");
-            eprintln!("    Verify that a kayadb-server is running on port {}\n", addr.port());
+            eprintln!(
+                "    Verify that a kayadb-server is running on port {}\n",
+                addr.port()
+            );
             return Err(e.into());
         }
     }
@@ -49,7 +55,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Verify deletion
     println!("Re-reading 'my_key'...");
-    if let Some(_) = client.get(b"my_key").await? {
+    if client.get(b"my_key").await?.is_some() {
         println!("Error: Key should have been deleted!");
     } else {
         println!("Verified: Key was deleted successfully.");

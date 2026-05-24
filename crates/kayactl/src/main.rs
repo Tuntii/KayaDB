@@ -595,14 +595,38 @@ fn print_stats_human(stats: &EngineStats, recovery: &RecoveryReport) {
     println!("sstable_count:     {}", stats.sstable_count);
     println!("last_sequence:     {}", stats.last_sequence);
     println!();
-    println!("recovery.manifest_records_replayed: {}", recovery.manifest_records_replayed);
-    println!("recovery.live_sstable_count:        {}", recovery.live_sstable_count);
-    println!("recovery.wal_records_replayed:      {}", recovery.wal_records_replayed);
-    println!("recovery.wal_truncated_bytes:       {}", recovery.wal_truncated_bytes);
-    println!("recovery.tmp_files_removed:         {}", recovery.tmp_files_removed);
-    println!("recovery.last_lsn:                  {}", recovery.last_lsn.map_or(0, |l| l.get()));
-    println!("recovery.last_sequence:             {}", recovery.last_sequence.map_or(0, |s| s.get()));
-    println!("recovery.records_replayed:          {}", recovery.records_replayed);
+    println!(
+        "recovery.manifest_records_replayed: {}",
+        recovery.manifest_records_replayed
+    );
+    println!(
+        "recovery.live_sstable_count:        {}",
+        recovery.live_sstable_count
+    );
+    println!(
+        "recovery.wal_records_replayed:      {}",
+        recovery.wal_records_replayed
+    );
+    println!(
+        "recovery.wal_truncated_bytes:       {}",
+        recovery.wal_truncated_bytes
+    );
+    println!(
+        "recovery.tmp_files_removed:         {}",
+        recovery.tmp_files_removed
+    );
+    println!(
+        "recovery.last_lsn:                  {}",
+        recovery.last_lsn.map_or(0, |l| l.get())
+    );
+    println!(
+        "recovery.last_sequence:             {}",
+        recovery.last_sequence.map_or(0, |s| s.get())
+    );
+    println!(
+        "recovery.records_replayed:          {}",
+        recovery.records_replayed
+    );
     for w in &recovery.warnings {
         println!("recovery.warning: {w}");
     }
@@ -638,13 +662,28 @@ fn print_stats_json(stats: &EngineStats, recovery: &RecoveryReport) {
 }
 
 fn print_recovery_human(recovery: &RecoveryReport) {
-    println!("manifest_records_replayed: {}", recovery.manifest_records_replayed);
+    println!(
+        "manifest_records_replayed: {}",
+        recovery.manifest_records_replayed
+    );
     println!("live_sstable_count:        {}", recovery.live_sstable_count);
-    println!("wal_records_replayed:      {}", recovery.wal_records_replayed);
-    println!("wal_truncated_bytes:       {}", recovery.wal_truncated_bytes);
+    println!(
+        "wal_records_replayed:      {}",
+        recovery.wal_records_replayed
+    );
+    println!(
+        "wal_truncated_bytes:       {}",
+        recovery.wal_truncated_bytes
+    );
     println!("tmp_files_removed:         {}", recovery.tmp_files_removed);
-    println!("last_lsn:                  {}", recovery.last_lsn.map_or(0, |l| l.get()));
-    println!("last_sequence:             {}", recovery.last_sequence.map_or(0, |s| s.get()));
+    println!(
+        "last_lsn:                  {}",
+        recovery.last_lsn.map_or(0, |l| l.get())
+    );
+    println!(
+        "last_sequence:             {}",
+        recovery.last_sequence.map_or(0, |s| s.get())
+    );
     println!("records_replayed:          {}", recovery.records_replayed);
     for w in &recovery.warnings {
         println!("warning: {w}");

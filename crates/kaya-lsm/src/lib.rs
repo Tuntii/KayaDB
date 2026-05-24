@@ -8,8 +8,9 @@ pub use manifest::{
     MANIFEST_HEADER_LEN, MANIFEST_MAGIC, MANIFEST_VERSION,
 };
 pub use sstable::{
-    decode_footer, inspect_sstable_path, SstEntry, SstFooter, SstInspection, SstableBuilder,
-    SstableReader, SST_FOOTER_LEN, SST_MAGIC, SST_VERSION, fuzz_decode_data_block, fuzz_decode_index_block,
+    decode_footer, fuzz_decode_data_block, fuzz_decode_index_block, inspect_sstable_path, SstEntry,
+    SstFooter, SstInspection, SstableBuilder, SstableReader, SST_FOOTER_LEN, SST_MAGIC,
+    SST_VERSION,
 };
 
 use std::collections::BTreeMap;
@@ -255,8 +256,8 @@ mod tests {
             b"\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
         ];
         for input in cases {
-            let _ = fuzz_decode_data_block(input);
-            let _ = fuzz_decode_index_block(input);
+            fuzz_decode_data_block(input);
+            fuzz_decode_index_block(input);
         }
     }
 }

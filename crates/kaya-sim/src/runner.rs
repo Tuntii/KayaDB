@@ -15,8 +15,10 @@ use crate::{
 
 pub(crate) async fn run_async(config: SimulationConfig) -> SimulationReport {
     let disk = Arc::new(SimDisk::new());
-    let mut engine_cfg = EngineConfig::default();
-    engine_cfg.disable_locking = true;
+    let engine_cfg = EngineConfig {
+        disable_locking: true,
+        ..Default::default()
+    };
     let mut engine = Engine::open(engine_cfg.clone(), disk.clone())
         .await
         .expect("engine open");
@@ -220,8 +222,10 @@ pub(crate) async fn replay_async(trace_jsonl: &str) -> Result<(), String> {
     let lines = parse_trace(trace_jsonl);
 
     let disk = Arc::new(SimDisk::new());
-    let mut engine_cfg = EngineConfig::default();
-    engine_cfg.disable_locking = true;
+    let engine_cfg = EngineConfig {
+        disable_locking: true,
+        ..Default::default()
+    };
     let mut engine = Engine::open(engine_cfg.clone(), disk.clone())
         .await
         .map_err(|e| e.to_string())?;
