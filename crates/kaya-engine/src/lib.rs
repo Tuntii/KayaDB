@@ -174,11 +174,6 @@ fn acquire_directory_lock(config: &EngineConfig) -> Result<Option<std::fs::File>
 impl<D: Disk> Engine<D> {
     pub async fn open(config: EngineConfig, disk: Arc<D>) -> Result<Self> {
         let lock_file = acquire_directory_lock(&config)?;
-
-        eprintln!(
-            "[engine] open data_dir={:?} durability={:?}",
-            config.data_dir, config.durability.mode
-        );
         // Clean up leftover temporary files.
         let temp_files = scan_temp_files(&disk).await?;
         let tmp_files_removed = temp_files.len();

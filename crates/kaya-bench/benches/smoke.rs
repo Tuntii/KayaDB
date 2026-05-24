@@ -6,8 +6,15 @@ use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use kaya_core::{DurabilityMode, EngineConfig};
 use kaya_engine::{Engine, ReadOptions, WriteOptions};
 use kaya_io::SimDisk;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{path::PathBuf, sync::Arc, time::Duration};
+
+fn sim_engine_config() -> EngineConfig {
+    EngineConfig {
+        data_dir: PathBuf::new(),
+        disable_locking: true,
+        ..EngineConfig::default()
+    }
+}
 
 fn smoke_benchmarks(c: &mut Criterion) {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -29,7 +36,7 @@ fn smoke_benchmarks(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let disk = Arc::new(SimDisk::new());
-                let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+                let mut engine = Engine::open(sim_engine_config(), disk).await.unwrap();
                 for i in 0u16..10 {
                     let key = format!("k{i:04}").into_bytes();
                     engine
