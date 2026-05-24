@@ -212,6 +212,82 @@ impl LinearizabilityChecker {
             Err(violations)
         }
     }
+
+    /// Convert the recorded history into a JSONL trace string compatible with simulation replayer.
+    pub fn to_trace_string(&self, seed: u64) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!(
+            r#"{{"eid":1,"kind":"sim_start","seed":"0x{seed:016x}","max_ops":{}}}"#,
+            self.history.len()
+        ));
+        let mut eid = 2;
+        for entry in &self.history {
+            let oid = eid / 2;
+            match &entry.op {
+                Op::Put { key, value } => {
+                    let k = hex_enc(key);
+                    let v = hex_enc(value);
+                    lines.push(format!(
+                        r#"{{"eid":{eid},"kind":"op","oid":{oid},"cmd":"put","key":"{k}","val":"{v}"}}"#
+                    ));
+                }
+                Op::Get { key } => {
+                    let k = hex_enc(key);
+                    lines.push(format!(
+                        r#"{{"eid":{eid},"kind":"op","oid":{oid},"cmd":"get","key":"{k}"}}"#
+                    ));
+                }
+                Op::Delete { key } => {
+                    let k = hex_enc(key);
+                    lines.push(format!(
+                        r#"{{"eid":{eid},"kind":"op","oid":{oid},"cmd":"delete","key":"{k}"}}"#
+                    ));
+                }
+                Op::Scan { prefix } => {
+                    let p = hex_enc(prefix);
+                    lines.push(format!(
+                        r#"{{"eid":{eid},"kind":"op","oid":{oid},"cmd":"scan","prefix":"{p}"}}"#
+                    ));
+                }
+            }
+            eid += 1;
+
+            match &entry.result {
+                OpResult::Ok => {
+                    lines.push(format!(
+                        r#"{{"eid":{eid},"kind":"op_result","oid":{oid},"ok":true}}"#
+                    ));
+                }
+                OpResult::Value(val) => match val {
+                    Some(v) => {
+                        let vh = hex_enc(v);
+                        lines.push(format!(
+                                r#"{{"eid":{eid},"kind":"op_result","oid":{oid},"ok":true,"val":"{vh}"}}"#
+                            ));
+                    }
+                    None => {
+                        lines.push(format!(
+                            r#"{{"eid":{eid},"kind":"op_result","oid":{oid},"ok":true,"val":null}}"#
+                        ));
+                    }
+                },
+                OpResult::Scan(items) => {
+                    lines.push(format!(
+                        r#"{{"eid":{eid},"kind":"op_result","oid":{oid},"ok":true,"count":{}}}"#,
+                        items.len()
+                    ));
+                }
+                OpResult::Error(err) => {
+                    let safe = err.replace('"', "'");
+                    lines.push(format!(
+                        r#"{{"eid":{eid},"kind":"op_result","oid":{oid},"ok":false,"error":"{safe}"}}"#
+                    ));
+                }
+            }
+            eid += 1;
+        }
+        lines.join("\n")
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -250,6 +250,7 @@ pub struct EngineConfig {
     pub memtable: MemtableConfig,
     pub sstable: SstableConfig,
     pub limits: LimitsConfig,
+    pub disable_locking: bool,
 }
 
 impl Default for EngineConfig {
@@ -261,6 +262,7 @@ impl Default for EngineConfig {
             memtable: MemtableConfig::default(),
             sstable: SstableConfig::default(),
             limits: LimitsConfig::default(),
+            disable_locking: false,
         }
     }
 }

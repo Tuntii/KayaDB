@@ -4,12 +4,13 @@ mod sstable;
 pub use manifest::{
     decode_manifest_edit, encode_manifest_edit, inspect_manifest_path, replay_manifest,
     DecodeEditResult, ManifestEdit, ManifestEditType, ManifestInspection, ManifestState,
-    TableMetadata, CURRENT_FILE_NAME, CURRENT_TMP_FILE_NAME, MANIFEST_FILE_NAME,
+    ManifestWarning, TableMetadata, CURRENT_FILE_NAME, CURRENT_TMP_FILE_NAME, MANIFEST_FILE_NAME,
     MANIFEST_HEADER_LEN, MANIFEST_MAGIC, MANIFEST_VERSION,
 };
 pub use sstable::{
-    decode_footer, inspect_sstable_path, SstEntry, SstFooter, SstInspection, SstableBuilder,
-    SstableReader, SST_FOOTER_LEN, SST_MAGIC, SST_VERSION,
+    decode_footer, fuzz_decode_data_block, fuzz_decode_index_block, inspect_sstable_path, SstEntry,
+    SstFooter, SstInspection, SstableBuilder, SstableReader, SST_FOOTER_LEN, SST_MAGIC,
+    SST_VERSION,
 };
 
 use std::collections::BTreeMap;
@@ -237,6 +238,26 @@ mod tests {
         ];
         for input in cases {
             let _ = decode_manifest_edit(input); // must not panic
+        }
+    }
+
+    // Fuzz data/index block decoder input must not panic.
+    #[test]
+    fn fuzz_sstable_block_no_panic() {
+        let cases: &[&[u8]] = &[
+            b"",
+            &[0u8; 1],
+            &[0u8; 11],
+            &[0u8; 12],
+            &[0xffu8; 12],
+            &[0u8; 100],
+            &[0xffu8; 100],
+            b"\x00\x01\x02\x03\x04\x05\x06\x07garbage",
+            b"\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        ];
+        for input in cases {
+            fuzz_decode_data_block(input);
+            fuzz_decode_index_block(input);
         }
     }
 }

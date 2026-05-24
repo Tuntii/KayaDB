@@ -232,8 +232,22 @@ cargo bench -p kaya-bench
 | M3 — Fuzz, recovery idempotence, benchmarks | ✅ Complete |
 | M4 — Raft, cluster TCP, linearizability | ✅ Complete |
 | M5 — Client API, STATS Metrics & kayactl status (M11) | ✅ Complete |
-| M6 — Jepsen Prep & Observability Hardening (M12) | 🟡 Active |
+| M6 — Jepsen Prep & Observability Hardening (M12) | ✅ Complete |
 | M7 — Linux eBPF, production hardening & Beyond | 🔒 Future |
+
+---
+
+## Honest Limitations & Production Warnings
+
+KayaDB is an experimental, correctness-first research database and is **not yet production-ready**. Before deploying or using it, please note the following architectural constraints:
+
+1. **Static Membership**: Dynamic member addition or removal is not supported in the Raft consensus layer. Changing the cluster roster requires manual configuration updates and coordinated cluster rolling restarts.
+2. **Plain TCP Communication**: The replication protocol (`kaya-net`) runs over raw, unencrypted TCP sockets. You **must** restrict cluster and client ports behind a private firewall/VPC or wrap them inside an encrypted tunnel (like IPsec, WireGuard, or ghostunnel).
+3. **No Built-in Authentication**: Authentication and role-based access control are not implemented inside the protocol layer. Network-level authorization and private subnet isolation are mandatory.
+4. **Single-Core Engine Focus**: The local storage engine is optimized for high-speed, thread-safe sequential LSM write/read execution paths. It is not designed to replace heavy multi-threaded concurrent compaction engines suitable for multi-terabyte cloud scale.
+5. **Leader-Routed Reads**: Linearizability in v1.0.0 is guaranteed by routing all client read queries strictly to the active cluster leader. Followers redirect clients to the leader. If a network partition isolates a node, clients querying that partitioned node will receive `NOT_LEADER` errors or request timeouts instead of stale data. (Future versions will implement `ReadIndex` or leader leases for follower local reads).
+6. **No Raft Log Compaction**: The Raft replication log currently grows sequentially without automated state machine checkpoint snapshotting or log truncation. In highly active clusters, disk space usage will grow continuously over time. Automated snapshots are planned for v1.1.0.
+
 
 ---
 
