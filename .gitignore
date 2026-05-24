@@ -6,3 +6,4 @@ data/
 /spec
 ROADMAP.md
 /fuzz/target
+/scripts
