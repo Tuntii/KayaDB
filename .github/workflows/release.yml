@@ -57,8 +57,8 @@ jobs:
           cargo build --release --workspace --target ${{ matrix.target }}
 
       - name: Packaging (Unix)
-          if: matrix.os != 'windows-latest'
-          run: |
+        if: matrix.os != 'windows-latest'
+        run: |
             mkdir -p release-pkg
             cp target/${{ matrix.target }}/release/kaya-server release-pkg/${{ matrix.bin_name }}
             cp target/${{ matrix.target }}/release/kayactl release-pkg/${{ matrix.ctl_name }}
@@ -77,7 +77,7 @@ jobs:
           Copy-Item target/${{ matrix.target }}/release/kayactl.exe release-pkg/${{ matrix.ctl_name }}
           Copy-Item README.md release-pkg/
           if (Test-Path docs/security.md) { Copy-Item docs/security.md release-pkg/ }
-          Compress-Archive -Path release-pkg/* -DestinationPath kayadb-${{ github.ref_name }}-${{ matrix.target }.zip
+          Compress-Archive -Path release-pkg/* -DestinationPath kayadb-${{ github.ref_name }}-${{ matrix.target }}.zip
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
