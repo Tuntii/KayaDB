@@ -118,13 +118,46 @@ impl ManifestState {
     }
 }
 
+// ---- Manifest Recovery Warning Enum ----
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManifestWarning {
+    Truncated {
+        offset: u64,
+        trailing_bytes: usize,
+    },
+    Invalid {
+        offset: u64,
+        message: String,
+    },
+}
+
+impl std::fmt::Display for ManifestWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Truncated {
+                offset,
+                trailing_bytes,
+            } => {
+                write!(
+                    f,
+                    "manifest truncated at offset {offset}: {trailing_bytes} trailing bytes"
+                )
+            }
+            Self::Invalid { offset, message } => {
+                write!(f, "manifest invalid at offset {offset}: {message}")
+            }
+        }
+    }
+}
+
 // ---- Inspect output ----
 
 #[derive(Debug, Clone)]
 pub struct ManifestInspection {
     pub path: String,
     pub state: ManifestState,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<ManifestWarning>,
 }
 
 // ---- Encoding helpers ----
@@ -408,10 +441,11 @@ pub fn decode_manifest_edit(bytes: &[u8]) -> DecodeEditResult {
 
 // ---- Replay ----
 
-pub fn replay_manifest(bytes: &[u8]) -> (ManifestState, Vec<String>) {
+pub fn replay_manifest(bytes: &[u8]) -> (ManifestState, usize, Vec<ManifestWarning>) {
     let mut state = ManifestState::default();
     let mut warnings = Vec::new();
     let mut offset = 0;
+    let mut replayed_count = 0;
     while offset < bytes.len() {
         match decode_manifest_edit(&bytes[offset..]) {
             DecodeEditResult::Complete {
@@ -421,23 +455,27 @@ pub fn replay_manifest(bytes: &[u8]) -> (ManifestState, Vec<String>) {
             } => {
                 state.apply(&edit, edit_seq);
                 offset += bytes_read;
+                replayed_count += 1;
             }
             DecodeEditResult::Incomplete => {
                 if offset < bytes.len() {
-                    warnings.push(format!(
-                        "manifest truncated at offset {offset}: {} trailing bytes",
-                        bytes.len() - offset
-                    ));
+                    warnings.push(ManifestWarning::Truncated {
+                        offset: offset as u64,
+                        trailing_bytes: bytes.len() - offset,
+                    });
                 }
                 break;
             }
             DecodeEditResult::Invalid { message } => {
-                warnings.push(format!("manifest invalid at offset {offset}: {message}"));
+                warnings.push(ManifestWarning::Invalid {
+                    offset: offset as u64,
+                    message,
+                });
                 break;
             }
         }
     }
-    (state, warnings)
+    (state, replayed_count, warnings)
 }
 
 // ---- Inspect helper (for kayactl) ----
@@ -447,7 +485,7 @@ pub fn inspect_manifest_path(path: impl AsRef<Path>) -> Result<ManifestInspectio
         message: e.to_string(),
     })?;
     let path_str = path.as_ref().display().to_string();
-    let (state, warnings) = replay_manifest(&bytes);
+    let (state, _count, warnings) = replay_manifest(&bytes);
     Ok(ManifestInspection {
         path: path_str,
         state,
@@ -529,7 +567,7 @@ mod tests {
             3,
         ));
 
-        let (state, warnings) = replay_manifest(&buf);
+        let (state, _count, warnings) = replay_manifest(&buf);
         assert!(warnings.is_empty());
         assert_eq!(state.live_tables.len(), 1);
         assert_eq!(state.live_tables[0].table_id, 2);
@@ -542,7 +580,7 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend(encode_manifest_edit(&ManifestEdit::CreateTable(meta(1)), 0));
         buf.extend(b"garbagebytes"); // corrupt tail
-        let (state, warnings) = replay_manifest(&buf);
+        let (state, _count, warnings) = replay_manifest(&buf);
         assert!(!warnings.is_empty());
         assert_eq!(state.live_tables.len(), 1);
     }

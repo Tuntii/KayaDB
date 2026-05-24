@@ -177,20 +177,15 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     // ── proposal channel ──────────────────────────────────────────────────────
     let (propose_tx, propose_rx) = mpsc::channel::<ProposeReq>(256);
 
-    // ── client accept task ────────────────────────────────────────────────────
-    {
-        let r = shared_raft.clone();
-        let e = shared_engine.clone();
-        let p = shared_pending.clone();
-        let tx = propose_tx.clone();
-        let ros = config.roster.clone();
-        tokio::spawn(async move {
-            client_accept_loop(client_listener, r, e, p, tx, ros).await;
-        });
-    }
+    // ── client accept and raft loops ──────────────────────────────────────────
+    let r = shared_raft.clone();
+    let e = shared_engine.clone();
+    let p = shared_pending.clone();
+    let tx = propose_tx.clone();
+    let ros = config.roster.clone();
 
-    // ── raft event loop (runs on this task) ───────────────────────────────────
-    raft_event_loop(
+    let accept_fut = client_accept_loop(client_listener, r, e, p, tx, ros);
+    let raft_fut = raft_event_loop(
         shared_raft,
         shared_engine,
         config.roster,
@@ -198,8 +193,12 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         propose_rx,
         shared_pending,
         config.tick_interval_ms,
-    )
-    .await;
+    );
+
+    tokio::select! {
+        _ = accept_fut => {}
+        _ = raft_fut => {}
+    }
 
     Ok(())
 }
@@ -229,6 +228,10 @@ async fn raft_event_loop(
 
             // ── incoming raft message ─────────────────────────────────────────
             Some(env) = incoming_rx.recv() => {
+                if !roster.contains(env.from) {
+                    eprintln!("[server] warning: received Raft message from unrecognized node id={:?}. Message ignored.", env.from);
+                    continue;
+                }
                 let out = raft.lock().unwrap().handle(env);
                 send_envelopes(out, &roster).await;
                 drain_and_apply(&raft, &engine, &pending).await;

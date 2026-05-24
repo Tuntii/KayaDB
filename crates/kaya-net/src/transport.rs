@@ -96,15 +96,29 @@ pub async fn start_raft_listener(
 }
 
 async fn accept_raft_loop(listener: TcpListener, tx: mpsc::Sender<Envelope>) {
-    while let Ok((mut stream, _peer_addr)) = listener.accept().await {
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            while let Ok(env) = read_raft_envelope(&mut stream).await {
-                if tx.send(env).await.is_err() {
-                    break; // receiver dropped → shut down
+    loop {
+        tokio::select! {
+            _ = tx.closed() => {
+                break;
+            }
+            incoming = listener.accept() => {
+                match incoming {
+                    Ok((mut stream, _peer_addr)) => {
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            while let Ok(env) = read_raft_envelope(&mut stream).await {
+                                if tx.send(env).await.is_err() {
+                                    break; // receiver dropped → shut down
+                                }
+                            }
+                        });
+                    }
+                    Err(_) => {
+                        break;
+                    }
                 }
             }
-        });
+        }
     }
 }
 

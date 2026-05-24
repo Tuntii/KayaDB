@@ -68,6 +68,11 @@ impl NodeRoster {
         self.entries.get(&id).map(|e| e.raft_addr)
     }
 
+    /// Check if a NodeId exists in this roster.
+    pub fn contains(&self, id: NodeId) -> bool {
+        self.entries.contains_key(&id)
+    }
+
     /// Look up the Client network address for `id`.
     pub fn client_addr(&self, id: NodeId) -> Option<SocketAddr> {
         self.entries.get(&id).map(|e| e.client_addr)

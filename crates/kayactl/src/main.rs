@@ -595,12 +595,15 @@ fn print_stats_human(stats: &EngineStats, recovery: &RecoveryReport) {
     println!("sstable_count:     {}", stats.sstable_count);
     println!("last_sequence:     {}", stats.last_sequence);
     println!();
-    println!("recovery.records_replayed: {}", recovery.records_replayed);
-    println!(
-        "recovery.wal_truncated_bytes: {}",
-        recovery.wal.truncated_bytes
-    );
-    for w in &recovery.wal.warnings {
+    println!("recovery.manifest_records_replayed: {}", recovery.manifest_records_replayed);
+    println!("recovery.live_sstable_count:        {}", recovery.live_sstable_count);
+    println!("recovery.wal_records_replayed:      {}", recovery.wal_records_replayed);
+    println!("recovery.wal_truncated_bytes:       {}", recovery.wal_truncated_bytes);
+    println!("recovery.tmp_files_removed:         {}", recovery.tmp_files_removed);
+    println!("recovery.last_lsn:                  {}", recovery.last_lsn.map_or(0, |l| l.get()));
+    println!("recovery.last_sequence:             {}", recovery.last_sequence.map_or(0, |s| s.get()));
+    println!("recovery.records_replayed:          {}", recovery.records_replayed);
+    for w in &recovery.warnings {
         println!("recovery.warning: {w}");
     }
 }
@@ -615,10 +618,17 @@ fn print_stats_json(stats: &EngineStats, recovery: &RecoveryReport) {
         stats.wal_bytes_written, stats.wal_fsync_count, stats.memtable_entries, stats.sstable_count, stats.last_sequence
     );
     print!(
-        "\"recovery\":{{\"records_replayed\":{},\"wal_truncated_bytes\":{},\"warnings\":[",
-        recovery.records_replayed, recovery.wal.truncated_bytes
+        "\"recovery\":{{\"manifest_records_replayed\":{},\"live_sstable_count\":{},\"wal_records_replayed\":{},\"wal_truncated_bytes\":{},\"tmp_files_removed\":{},\"last_lsn\":{},\"last_sequence\":{},\"records_replayed\":{},\"warnings\":[",
+        recovery.manifest_records_replayed,
+        recovery.live_sstable_count,
+        recovery.wal_records_replayed,
+        recovery.wal_truncated_bytes,
+        recovery.tmp_files_removed,
+        recovery.last_lsn.map_or(0, |l| l.get()),
+        recovery.last_sequence.map_or(0, |s| s.get()),
+        recovery.records_replayed
     );
-    for (i, w) in recovery.wal.warnings.iter().enumerate() {
+    for (i, w) in recovery.warnings.iter().enumerate() {
         if i > 0 {
             print!(",");
         }
@@ -628,28 +638,35 @@ fn print_stats_json(stats: &EngineStats, recovery: &RecoveryReport) {
 }
 
 fn print_recovery_human(recovery: &RecoveryReport) {
-    println!("records_replayed:    {}", recovery.records_replayed);
-    println!("wal_truncated_bytes: {}", recovery.wal.truncated_bytes);
-    println!(
-        "last_lsn:            {}",
-        recovery.wal.last_lsn.map_or(0, |l| l.get())
-    );
-    for w in &recovery.wal.warnings {
+    println!("manifest_records_replayed: {}", recovery.manifest_records_replayed);
+    println!("live_sstable_count:        {}", recovery.live_sstable_count);
+    println!("wal_records_replayed:      {}", recovery.wal_records_replayed);
+    println!("wal_truncated_bytes:       {}", recovery.wal_truncated_bytes);
+    println!("tmp_files_removed:         {}", recovery.tmp_files_removed);
+    println!("last_lsn:                  {}", recovery.last_lsn.map_or(0, |l| l.get()));
+    println!("last_sequence:             {}", recovery.last_sequence.map_or(0, |s| s.get()));
+    println!("records_replayed:          {}", recovery.records_replayed);
+    for w in &recovery.warnings {
         println!("warning: {w}");
     }
-    if recovery.wal.warnings.is_empty() {
+    if recovery.warnings.is_empty() {
         println!("warnings:            none");
     }
 }
 
 fn print_recovery_json(recovery: &RecoveryReport) {
     print!(
-        "{{\"records_replayed\":{},\"wal_truncated_bytes\":{},\"last_lsn\":{},\"warnings\":[",
-        recovery.records_replayed,
-        recovery.wal.truncated_bytes,
-        recovery.wal.last_lsn.map_or(0, |l| l.get())
+        "{{\"manifest_records_replayed\":{},\"live_sstable_count\":{},\"wal_records_replayed\":{},\"wal_truncated_bytes\":{},\"tmp_files_removed\":{},\"last_lsn\":{},\"last_sequence\":{},\"records_replayed\":{},\"warnings\":[",
+        recovery.manifest_records_replayed,
+        recovery.live_sstable_count,
+        recovery.wal_records_replayed,
+        recovery.wal_truncated_bytes,
+        recovery.tmp_files_removed,
+        recovery.last_lsn.map_or(0, |l| l.get()),
+        recovery.last_sequence.map_or(0, |s| s.get()),
+        recovery.records_replayed
     );
-    for (i, w) in recovery.wal.warnings.iter().enumerate() {
+    for (i, w) in recovery.warnings.iter().enumerate() {
         if i > 0 {
             print!(",");
         }
@@ -867,7 +884,7 @@ fn print_manifest_inspection_json(inspection: &ManifestInspection) {
         if i > 0 {
             print!(",");
         }
-        print!("{}", json_string(w));
+        print!("{}", json_string(&w.to_string()));
     }
     println!("]}}");
 }

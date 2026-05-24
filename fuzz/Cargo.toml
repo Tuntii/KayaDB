@@ -11,6 +11,7 @@ edition = "2021"
 libfuzzer-sys = "0.4"
 kaya-lsm = { path = "../crates/kaya-lsm" }
 kaya-wal = { path = "../crates/kaya-wal" }
+kaya-net = { path = "../crates/kaya-net" }
 
 [[bin]]
 name = "fuzz_wal_decoder"
@@ -27,5 +28,17 @@ doc = false
 [[bin]]
 name = "fuzz_manifest_decoder"
 path = "fuzz_targets/fuzz_manifest_decoder.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_sstable_block"
+path = "fuzz_targets/fuzz_sstable_block.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_command_frame_decoder"
+path = "fuzz_targets/fuzz_command_frame_decoder.rs"
 test = false
 doc = false
