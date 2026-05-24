@@ -1,4 +1,4 @@
-# KayaDB
+# KayaDB distributed key-value storage engine
 
 <div align="center">
 
