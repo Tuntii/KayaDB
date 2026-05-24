@@ -3,7 +3,8 @@
 data/
 *.trace.jsonl
 *.log
-/spec
 ROADMAP.md
 /fuzz/target
 /scripts
+spec/KayaDB_PRD.md
+spec/KayaDB_Technical_Spec.md

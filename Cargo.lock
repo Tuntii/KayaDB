@@ -190,7 +190,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "kaya-bench"
-version = "0.1.12"
+version = "0.1.14"
 dependencies = [
  "criterion",
  "kaya-core",
@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-client"
-version = "0.1.12"
+version = "0.1.14"
 dependencies = [
  "kaya-core",
  "kaya-net",
@@ -212,11 +212,11 @@ dependencies = [
 
 [[package]]
 name = "kaya-core"
-version = "0.1.12"
+version = "0.1.14"
 
 [[package]]
 name = "kaya-engine"
-version = "0.1.12"
+version = "0.1.14"
 dependencies = [
  "kaya-core",
  "kaya-io",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-io"
-version = "0.1.12"
+version = "0.1.14"
 dependencies = [
  "kaya-core",
  "tokio",
@@ -236,14 +236,14 @@ dependencies = [
 
 [[package]]
 name = "kaya-lsm"
-version = "0.1.12"
+version = "0.1.14"
 dependencies = [
  "kaya-core",
 ]
 
 [[package]]
 name = "kaya-net"
-version = "0.1.12"
+version = "0.1.14"
 dependencies = [
  "kaya-core",
  "kaya-raft",
@@ -252,14 +252,14 @@ dependencies = [
 
 [[package]]
 name = "kaya-raft"
-version = "0.1.12"
+version = "0.1.14"
 dependencies = [
  "kaya-core",
 ]
 
 [[package]]
 name = "kaya-server"
-version = "0.1.12"
+version = "0.1.14"
 dependencies = [
  "kaya-client",
  "kaya-core",
@@ -273,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-sim"
-version = "0.1.12"
+version = "0.1.14"
 dependencies = [
  "kaya-core",
  "kaya-engine",
@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-wal"
-version = "0.1.12"
+version = "0.1.14"
 dependencies = [
  "kaya-core",
  "kaya-io",
@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "kayactl"
-version = "0.1.12"
+version = "0.1.14"
 dependencies = [
  "kaya-core",
  "kaya-engine",
