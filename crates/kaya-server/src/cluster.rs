@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -116,9 +117,17 @@ type SharedEngine = Arc<tokio::sync::Mutex<Engine<FileDisk>>>;
 type PendingMap = HashMap<LogIndex, oneshot::Sender<Result<(), String>>>;
 type SharedPending = Arc<Mutex<PendingMap>>;
 
+type PendingReadsMap = HashMap<u64, oneshot::Sender<Result<(), String>>>;
+type SharedPendingReads = Arc<Mutex<PendingReadsMap>>;
+
 /// Message sent from a client handler to the Raft loop to propose a write.
 struct ProposeReq {
     command: Vec<u8>,
+    reply_tx: oneshot::Sender<Result<(), String>>,
+}
+
+struct ReadIndexReq {
+    request_id: u64,
     reply_tx: oneshot::Sender<Result<(), String>>,
 }
 
@@ -155,6 +164,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     };
     let shared_raft: SharedRaft = Arc::new(Mutex::new(RaftNode::new(raft_cfg)));
     let shared_pending: SharedPending = Arc::new(Mutex::new(HashMap::new()));
+    let shared_pending_reads: SharedPendingReads = Arc::new(Mutex::new(HashMap::new()));
 
     // ── raft listener ─────────────────────────────────────────────────────────
     let (incoming_tx, incoming_rx) = mpsc::channel::<Envelope>(512);
@@ -174,24 +184,31 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         config.node_id.0
     );
 
-    // ── proposal channel ──────────────────────────────────────────────────────
+    // ── proposal channels ─────────────────────────────────────────────────────
     let (propose_tx, propose_rx) = mpsc::channel::<ProposeReq>(256);
+    let (read_propose_tx, read_propose_rx) = mpsc::channel::<ReadIndexReq>(256);
+    let next_read_req_id = Arc::new(AtomicU64::new(1));
 
     // ── client accept and raft loops ──────────────────────────────────────────
     let r = shared_raft.clone();
     let e = shared_engine.clone();
     let p = shared_pending.clone();
+    let pr = shared_pending_reads.clone();
     let tx = propose_tx.clone();
+    let rtx = read_propose_tx.clone();
+    let next_id = next_read_req_id.clone();
     let ros = config.roster.clone();
 
-    let accept_fut = client_accept_loop(client_listener, r, e, p, tx, ros);
+    let accept_fut = client_accept_loop(client_listener, r, e, p, pr, tx, rtx, next_id, ros);
     let raft_fut = raft_event_loop(
         shared_raft,
         shared_engine,
         config.roster,
         incoming_rx,
         propose_rx,
+        read_propose_rx,
         shared_pending,
+        shared_pending_reads,
         config.tick_interval_ms,
     );
 
@@ -211,19 +228,23 @@ async fn raft_event_loop(
     roster: NodeRoster,
     mut incoming_rx: mpsc::Receiver<Envelope>,
     mut propose_rx: mpsc::Receiver<ProposeReq>,
+    mut read_propose_rx: mpsc::Receiver<ReadIndexReq>,
     pending: SharedPending,
+    pending_reads: SharedPendingReads,
     tick_interval_ms: u64,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(tick_interval_ms));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        let was_leader = raft.lock().unwrap().is_leader();
+
         tokio::select! {
             // ── periodic tick ─────────────────────────────────────────────────
             _ = interval.tick() => {
                 let out = raft.lock().unwrap().tick();
                 send_envelopes(out, &roster).await;
-                drain_and_apply(&raft, &engine, &pending).await;
+                drain_and_apply(&raft, &engine, &pending, &pending_reads).await;
             }
 
             // ── incoming raft message ─────────────────────────────────────────
@@ -234,7 +255,7 @@ async fn raft_event_loop(
                 }
                 let out = raft.lock().unwrap().handle(env);
                 send_envelopes(out, &roster).await;
-                drain_and_apply(&raft, &engine, &pending).await;
+                drain_and_apply(&raft, &engine, &pending, &pending_reads).await;
             }
 
             // ── client write proposal ─────────────────────────────────────────
@@ -247,7 +268,24 @@ async fn raft_event_loop(
                         // waiting for the next heartbeat.
                         let out = raft.lock().unwrap().broadcast();
                         send_envelopes(out, &roster).await;
-                        drain_and_apply(&raft, &engine, &pending).await;
+                        drain_and_apply(&raft, &engine, &pending, &pending_reads).await;
+                    }
+                    None => {
+                        let _ = req.reply_tx.send(Err("not_leader".to_owned()));
+                    }
+                }
+            }
+
+            // ── client read proposal ─────────────────────────────────────────
+            Some(req) = read_propose_rx.recv() => {
+                let commit_idx_opt = raft.lock().unwrap().propose_read(req.request_id);
+                match commit_idx_opt {
+                    Some(_idx) => {
+                        pending_reads.lock().unwrap().insert(req.request_id, req.reply_tx);
+                        // Immediately broadcast heartbeats to confirm leadership
+                        let out = raft.lock().unwrap().broadcast();
+                        send_envelopes(out, &roster).await;
+                        drain_and_apply(&raft, &engine, &pending, &pending_reads).await;
                     }
                     None => {
                         let _ = req.reply_tx.send(Err("not_leader".to_owned()));
@@ -255,11 +293,27 @@ async fn raft_event_loop(
                 }
             }
         }
+
+        let is_leader = raft.lock().unwrap().is_leader();
+        if was_leader && !is_leader {
+            // Cleared leader role: abort all pending writes and reads
+            for (_idx, tx) in pending.lock().unwrap().drain() {
+                let _ = tx.send(Err("not_leader".to_owned()));
+            }
+            for (_req_id, tx) in pending_reads.lock().unwrap().drain() {
+                let _ = tx.send(Err("not_leader".to_owned()));
+            }
+        }
     }
 }
 
 /// Drain freshly-applied Raft entries and execute them against the engine.
-async fn drain_and_apply(raft: &SharedRaft, engine: &SharedEngine, pending: &SharedPending) {
+async fn drain_and_apply(
+    raft: &SharedRaft,
+    engine: &SharedEngine,
+    pending: &SharedPending,
+    pending_reads: &SharedPendingReads,
+) {
     let applied = raft.lock().unwrap().drain_applied();
     for (idx, _term, command) in applied {
         let result = if command.is_empty() {
@@ -271,6 +325,13 @@ async fn drain_and_apply(raft: &SharedRaft, engine: &SharedEngine, pending: &Sha
         };
         if let Some(tx) = pending.lock().unwrap().remove(&idx) {
             let _ = tx.send(result);
+        }
+    }
+
+    let ready_ids = raft.lock().unwrap().drain_ready_reads();
+    for req_id in ready_ids {
+        if let Some(tx) = pending_reads.lock().unwrap().remove(&req_id) {
+            let _ = tx.send(Ok(()));
         }
     }
 }
@@ -303,17 +364,23 @@ async fn client_accept_loop(
     raft: SharedRaft,
     engine: SharedEngine,
     pending: SharedPending,
+    pending_reads: SharedPendingReads,
     propose_tx: mpsc::Sender<ProposeReq>,
+    read_propose_tx: mpsc::Sender<ReadIndexReq>,
+    next_read_req_id: Arc<AtomicU64>,
     roster: NodeRoster,
 ) {
     while let Ok((stream, _peer)) = listener.accept().await {
         let r = raft.clone();
         let e = engine.clone();
         let p = pending.clone();
+        let pr = pending_reads.clone();
         let tx = propose_tx.clone();
+        let rtx = read_propose_tx.clone();
+        let next_id = next_read_req_id.clone();
         let ros = roster.clone();
         tokio::spawn(async move {
-            handle_connection(stream, r, e, p, tx, ros).await;
+            handle_connection(stream, r, e, p, pr, tx, rtx, next_id, ros).await;
         });
     }
 }
@@ -323,7 +390,10 @@ async fn handle_connection(
     raft: SharedRaft,
     engine: SharedEngine,
     _pending: SharedPending,
+    _pending_reads: SharedPendingReads,
     propose_tx: mpsc::Sender<ProposeReq>,
+    read_propose_tx: mpsc::Sender<ReadIndexReq>,
+    next_read_req_id: Arc<AtomicU64>,
     roster: NodeRoster,
 ) {
     loop {
@@ -331,7 +401,17 @@ async fn handle_connection(
             Ok(f) => f,
             Err(_) => break,
         };
-        let (status, body) = dispatch(&raft, &engine, &roster, &propose_tx, opcode, payload).await;
+        let (status, body) = dispatch(
+            &raft,
+            &engine,
+            &roster,
+            &propose_tx,
+            &read_propose_tx,
+            &next_read_req_id,
+            opcode,
+            payload,
+        )
+        .await;
         if write_client_response(&mut stream, status, &body)
             .await
             .is_err()
@@ -357,6 +437,8 @@ async fn dispatch(
     engine: &SharedEngine,
     roster: &NodeRoster,
     propose_tx: &mpsc::Sender<ProposeReq>,
+    read_propose_tx: &mpsc::Sender<ReadIndexReq>,
+    next_read_req_id: &Arc<AtomicU64>,
     opcode: u8,
     payload: Vec<u8>,
 ) -> (u16, Vec<u8>) {
@@ -372,18 +454,21 @@ async fn dispatch(
 
         // GET
         2 => {
-            if !raft.lock().unwrap().is_leader() {
-                let hint = get_leader_hint(raft, roster);
-                (STATUS_NOT_LEADER, hint)
-            } else {
-                match decode_key_payload(&payload) {
+            let req_id = next_read_req_id.fetch_add(1, Ordering::SeqCst);
+            match propose_read_and_wait(raft, roster, read_propose_tx, req_id).await {
+                Ok(()) => match decode_key_payload(&payload) {
                     Ok(key) => match engine.lock().await.get(&key, ReadOptions::default()).await {
                         Ok(Some(v)) => (STATUS_OK, encode_value_payload(&v)),
                         Ok(None) => (STATUS_NOT_FOUND, vec![]),
                         Err(e) => (STATUS_ERROR, encode_error_payload(&e.to_string())),
                     },
                     Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
+                },
+                Err(e) if e == "not_leader" => {
+                    let hint = get_leader_hint(raft, roster);
+                    (STATUS_NOT_LEADER, hint)
                 }
+                Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
             }
         }
 
@@ -398,11 +483,9 @@ async fn dispatch(
 
         // SCAN
         4 => {
-            if !raft.lock().unwrap().is_leader() {
-                let hint = get_leader_hint(raft, roster);
-                (STATUS_NOT_LEADER, hint)
-            } else {
-                match decode_scan_payload(&payload) {
+            let req_id = next_read_req_id.fetch_add(1, Ordering::SeqCst);
+            match propose_read_and_wait(raft, roster, read_propose_tx, req_id).await {
+                Ok(()) => match decode_scan_payload(&payload) {
                     Ok(prefix) => {
                         match engine
                             .lock()
@@ -419,7 +502,12 @@ async fn dispatch(
                         }
                     }
                     Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
+                },
+                Err(e) if e == "not_leader" => {
+                    let hint = get_leader_hint(raft, roster);
+                    (STATUS_NOT_LEADER, hint)
                 }
+                Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
             }
         }
 
@@ -495,5 +583,30 @@ async fn propose_and_wait(
         }
         Ok(Err(e)) => (STATUS_ERROR, encode_error_payload(&e)),
         Err(_) => (STATUS_ERROR, encode_error_payload("reply channel dropped")),
+    }
+}
+
+/// Send a read proposal to the Raft loop and wait for it to be confirmed by a majority.
+async fn propose_read_and_wait(
+    raft: &SharedRaft,
+    roster: &NodeRoster,
+    read_propose_tx: &mpsc::Sender<ReadIndexReq>,
+    request_id: u64,
+) -> Result<(), String> {
+    if !raft.lock().unwrap().is_leader() {
+        return Err("not_leader".to_owned());
+    }
+    let (reply_tx, reply_rx) = oneshot::channel::<Result<(), String>>();
+    if read_propose_tx
+        .send(ReadIndexReq { request_id, reply_tx })
+        .await
+        .is_err()
+    {
+        return Err("raft loop unavailable".to_owned());
+    }
+    match reply_rx.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("reply channel dropped".to_owned()),
     }
 }

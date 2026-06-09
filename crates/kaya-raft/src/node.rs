@@ -38,6 +38,15 @@ pub struct RaftStatus {
     pub leader_id: Option<NodeId>,
 }
 
+#[derive(Debug, Clone)]
+struct PendingRead {
+    request_id: u64,
+    read_index: LogIndex,
+    term: Term,
+    ack_seq: u64,
+    acks: HashSet<NodeId>,
+}
+
 /// A complete Raft state-machine node.
 ///
 /// All I/O is removed from this struct. The caller drives logical time via
@@ -72,6 +81,12 @@ pub struct RaftNode {
     /// Every entry that has been applied to this node's state machine, in order.
     /// Each tuple is `(log_index, term, command)`.
     pub applied_entries: Vec<(LogIndex, Term, Vec<u8>)>,
+
+    // ── ReadIndex state ───────────────────────────────────────────────────────
+    pending_reads: Vec<PendingRead>,
+    current_ack_seq: u64,
+    last_sent_ack_seq: HashMap<NodeId, u64>,
+    ready_reads: Vec<u64>,
 }
 
 impl RaftNode {
@@ -91,6 +106,10 @@ impl RaftNode {
             match_index: HashMap::new(),
             heartbeat_ticks: 0,
             applied_entries: Vec::new(),
+            pending_reads: Vec::new(),
+            current_ack_seq: 0,
+            last_sent_ack_seq: HashMap::new(),
+            ready_reads: Vec::new(),
         }
     }
 
@@ -131,6 +150,35 @@ impl RaftNode {
         self.next_index
             .insert(self.config.id, LogIndex(index.0 + 1));
         Some(index)
+    }
+
+    /// Propose a read query. Only valid when this node is the leader.
+    ///
+    /// Returns the commit index at the time of proposal (ReadIndex), or `None` if not the leader.
+    pub fn propose_read(&mut self, request_id: u64) -> Option<LogIndex> {
+        if self.role != Role::Leader {
+            return None;
+        }
+        self.current_ack_seq += 1;
+
+        let mut acks = HashSet::new();
+        acks.insert(self.config.id);
+
+        self.pending_reads.push(PendingRead {
+            request_id,
+            read_index: self.commit_index,
+            term: self.current_term,
+            ack_seq: self.current_ack_seq,
+            acks,
+        });
+
+        Some(self.commit_index)
+    }
+
+    /// Drain all ready reads that have been confirmed by a majority of the cluster
+    /// and have had their ReadIndex surpassed by `last_applied`.
+    pub fn drain_ready_reads(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.ready_reads)
     }
 
     /// Advance logical time by one tick. Returns outgoing messages.
@@ -196,6 +244,7 @@ impl RaftNode {
         self.leader_id = None;
         self.election_ticks = 0;
         self.votes_received.clear();
+        self.pending_reads.clear();
     }
 
     /// Increment term, become candidate, vote for self, send RequestVote to peers.
@@ -258,7 +307,9 @@ impl RaftNode {
         }
     }
 
-    fn send_append_to(&self, peer: NodeId, out: &mut Vec<Envelope>) {
+    fn send_append_to(&mut self, peer: NodeId, out: &mut Vec<Envelope>) {
+        self.last_sent_ack_seq.insert(peer, self.current_ack_seq);
+
         let next = self
             .next_index
             .get(&peer)
@@ -396,6 +447,17 @@ impl RaftNode {
             return;
         }
 
+        // Process ReadIndex acknowledgements
+        if resp.term == self.current_term {
+            if let Some(&last_sent) = self.last_sent_ack_seq.get(&from) {
+                for read in &mut self.pending_reads {
+                    if read.ack_seq <= last_sent && read.term == self.current_term {
+                        read.acks.insert(from);
+                    }
+                }
+            }
+        }
+
         if resp.success {
             // Advance match/next index for this peer (only move forward).
             let mi = resp.match_index;
@@ -460,5 +522,121 @@ impl RaftNode {
                     .push((self.last_applied, entry.term, entry.command.clone()));
             }
         }
+        self.check_pending_reads();
+    }
+
+    fn check_pending_reads(&mut self) {
+        if self.role != Role::Leader {
+            return;
+        }
+
+        let quorum_size = self.quorum();
+        let last_applied = self.last_applied;
+
+        let mut ready = Vec::new();
+        self.pending_reads.retain(|read| {
+            if read.acks.len() >= quorum_size && last_applied >= read.read_index {
+                ready.push(read.request_id);
+                false
+            } else {
+                true
+            }
+        });
+
+        self.ready_reads.extend(ready);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_node(id: u64, peers: Vec<u64>) -> RaftNode {
+        RaftNode::new(RaftConfig {
+            id: NodeId(id),
+            peers: peers.into_iter().map(NodeId).collect(),
+            election_timeout_ticks: 10,
+            heartbeat_interval_ticks: 3,
+        })
+    }
+
+    #[test]
+    fn test_read_index_propose_on_follower_fails() {
+        let mut node = make_node(1, vec![2, 3]);
+        assert_eq!(node.role, Role::Follower);
+        assert_eq!(node.propose_read(123), None);
+    }
+
+    #[test]
+    fn test_read_index_leader_lifecycle() {
+        let mut node = make_node(1, vec![2, 3]);
+        let mut out = Vec::new();
+        
+        // Force election
+        node.start_election(&mut out);
+        assert_eq!(node.role, Role::Candidate);
+        
+        // Grant votes
+        node.handle(Envelope::new(NodeId(2), NodeId(1), Message::VoteResponse(VoteResponse {
+            term: Term(1),
+            vote_granted: true,
+        })));
+        assert_eq!(node.role, Role::Leader);
+        
+        // Propose a read
+        let read_index = node.propose_read(456).expect("Proposing read should succeed on leader");
+        assert_eq!(read_index, node.commit_index);
+        
+        // At this point, only leader (node 1) has acknowledged it. Quorum is 2 (majority of 3).
+        // It is not ready yet.
+        assert!(node.drain_ready_reads().is_empty());
+        
+        // Broadcast heartbeats
+        let heartbeats = node.broadcast();
+        assert_eq!(heartbeats.len(), 2);
+        
+        // Simulate AppendResponse from node 2
+        let resp_env = Envelope::new(NodeId(2), NodeId(1), Message::AppendResponse(AppendResponse {
+            term: Term(1),
+            success: true,
+            match_index: LogIndex(1), // no-op index
+        }));
+        node.handle(resp_env);
+        
+        // Quorum is satisfied (node 1 and node 2 acknowledged).
+        // Since last_applied is 1 (after no-op is applied on leader during try_advance_apply)
+        // and read_index is 1 (the no-op), last_applied >= read_index is true!
+        let ready = node.drain_ready_reads();
+        assert_eq!(ready, vec![456]);
+    }
+
+    #[test]
+    fn test_read_index_cleared_on_step_down() {
+        let mut node = make_node(1, vec![2, 3]);
+        let mut out = Vec::new();
+        node.start_election(&mut out);
+        
+        node.handle(Envelope::new(NodeId(2), NodeId(1), Message::VoteResponse(VoteResponse {
+            term: Term(1),
+            vote_granted: true,
+        })));
+        assert_eq!(node.role, Role::Leader);
+        
+        node.propose_read(789);
+        assert_eq!(node.pending_reads.len(), 1);
+        
+        // Step down due to higher term
+        node.handle(Envelope::new(NodeId(3), NodeId(1), Message::AppendRequest(AppendRequest {
+            term: Term(2),
+            leader_id: NodeId(3),
+            prev_log_index: LogIndex(0),
+            prev_log_term: Term(0),
+            entries: vec![],
+            leader_commit: LogIndex(0),
+        })));
+        
+        assert_eq!(node.role, Role::Follower);
+        assert_eq!(node.pending_reads.len(), 0);
+    }
+}
+
