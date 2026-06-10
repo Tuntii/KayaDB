@@ -12,6 +12,7 @@ members = [
     "crates/kaya-net",
     "crates/kaya-bench",
     "crates/kaya-client",
+    "crates/kaya-jepsen-test",
 ]
 resolver = "2"
 
@@ -34,6 +35,7 @@ kaya-engine = { path = "crates/kaya-engine", version = "0.1.12" }
 kaya-raft = { path = "crates/kaya-raft", version = "0.1.12" }
 kaya-sim = { path = "crates/kaya-sim", version = "0.1.12" }
 kaya-net = { path = "crates/kaya-net", version = "0.1.12" }
+kaya-client = { path = "crates/kaya-client", version = "0.1.12" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
 
 

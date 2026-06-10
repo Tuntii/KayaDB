@@ -571,38 +571,48 @@ mod tests {
     fn test_read_index_leader_lifecycle() {
         let mut node = make_node(1, vec![2, 3]);
         let mut out = Vec::new();
-        
+
         // Force election
         node.start_election(&mut out);
         assert_eq!(node.role, Role::Candidate);
-        
+
         // Grant votes
-        node.handle(Envelope::new(NodeId(2), NodeId(1), Message::VoteResponse(VoteResponse {
-            term: Term(1),
-            vote_granted: true,
-        })));
+        node.handle(Envelope::new(
+            NodeId(2),
+            NodeId(1),
+            Message::VoteResponse(VoteResponse {
+                term: Term(1),
+                vote_granted: true,
+            }),
+        ));
         assert_eq!(node.role, Role::Leader);
-        
+
         // Propose a read
-        let read_index = node.propose_read(456).expect("Proposing read should succeed on leader");
+        let read_index = node
+            .propose_read(456)
+            .expect("Proposing read should succeed on leader");
         assert_eq!(read_index, node.commit_index);
-        
+
         // At this point, only leader (node 1) has acknowledged it. Quorum is 2 (majority of 3).
         // It is not ready yet.
         assert!(node.drain_ready_reads().is_empty());
-        
+
         // Broadcast heartbeats
         let heartbeats = node.broadcast();
         assert_eq!(heartbeats.len(), 2);
-        
+
         // Simulate AppendResponse from node 2
-        let resp_env = Envelope::new(NodeId(2), NodeId(1), Message::AppendResponse(AppendResponse {
-            term: Term(1),
-            success: true,
-            match_index: LogIndex(1), // no-op index
-        }));
+        let resp_env = Envelope::new(
+            NodeId(2),
+            NodeId(1),
+            Message::AppendResponse(AppendResponse {
+                term: Term(1),
+                success: true,
+                match_index: LogIndex(1), // no-op index
+            }),
+        );
         node.handle(resp_env);
-        
+
         // Quorum is satisfied (node 1 and node 2 acknowledged).
         // Since last_applied is 1 (after no-op is applied on leader during try_advance_apply)
         // and read_index is 1 (the no-op), last_applied >= read_index is true!
@@ -615,28 +625,35 @@ mod tests {
         let mut node = make_node(1, vec![2, 3]);
         let mut out = Vec::new();
         node.start_election(&mut out);
-        
-        node.handle(Envelope::new(NodeId(2), NodeId(1), Message::VoteResponse(VoteResponse {
-            term: Term(1),
-            vote_granted: true,
-        })));
+
+        node.handle(Envelope::new(
+            NodeId(2),
+            NodeId(1),
+            Message::VoteResponse(VoteResponse {
+                term: Term(1),
+                vote_granted: true,
+            }),
+        ));
         assert_eq!(node.role, Role::Leader);
-        
+
         node.propose_read(789);
         assert_eq!(node.pending_reads.len(), 1);
-        
+
         // Step down due to higher term
-        node.handle(Envelope::new(NodeId(3), NodeId(1), Message::AppendRequest(AppendRequest {
-            term: Term(2),
-            leader_id: NodeId(3),
-            prev_log_index: LogIndex(0),
-            prev_log_term: Term(0),
-            entries: vec![],
-            leader_commit: LogIndex(0),
-        })));
-        
+        node.handle(Envelope::new(
+            NodeId(3),
+            NodeId(1),
+            Message::AppendRequest(AppendRequest {
+                term: Term(2),
+                leader_id: NodeId(3),
+                prev_log_index: LogIndex(0),
+                prev_log_term: Term(0),
+                entries: vec![],
+                leader_commit: LogIndex(0),
+            }),
+        ));
+
         assert_eq!(node.role, Role::Follower);
         assert_eq!(node.pending_reads.len(), 0);
     }
 }
-

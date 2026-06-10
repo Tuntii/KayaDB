@@ -1,39 +1,63 @@
 use kaya_core::{KayaError, Result};
 use kaya_net::{
     decode_error_payload, decode_scan_response, decode_value_payload, encode_key_payload,
-    encode_put_payload, encode_scan_payload, roundtrip, STATUS_NOT_FOUND, STATUS_NOT_LEADER,
-    STATUS_OK,
+    encode_put_payload, encode_scan_payload, roundtrip, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND,
+    STATUS_NOT_LEADER, STATUS_OK,
 };
+use kaya_sim::{LinearizabilityChecker, Op, OpResult};
 use std::net::SocketAddr;
 
-/// An ergonomic async client for interacting with a KayaDB Raft cluster.
-///
-/// `KayaClient` connects over TCP and automatically handles leader discovery
-/// and retry routing. If a query is sent to a follower node, the follower's
-/// redirection hint is captured, and the client transparently reconnects to
-/// the active leader and retries the command.
 pub struct KayaClient {
     addr: SocketAddr,
     max_redirects: usize,
+    trace: Option<LinearizabilityChecker>,
 }
 
 impl KayaClient {
-    /// Create a new client pointing to a node in the KayaDB cluster.
     pub async fn connect(addr: SocketAddr) -> Result<Self> {
         Ok(Self {
             addr,
             max_redirects: 3,
+            trace: None,
         })
     }
 
-    /// Set the maximum number of leader redirection retries. Defaults to 3.
     pub fn set_max_redirects(&mut self, max: usize) {
         self.max_redirects = max;
     }
 
-    /// Get the current active socket address being communicated with.
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    pub fn enable_tracing(&mut self) {
+        self.trace = Some(LinearizabilityChecker::new());
+    }
+
+    pub fn disable_tracing(&mut self) {
+        self.trace = None;
+    }
+
+    pub fn trace_len(&self) -> usize {
+        self.trace.as_ref().map_or(0, |t| t.len())
+    }
+
+    pub fn take_trace(&mut self, seed: u64) -> Option<String> {
+        self.trace.take().map(|checker| {
+            let s = checker.to_trace_string(seed);
+            self.trace = Some(LinearizabilityChecker::new());
+            s
+        })
+    }
+
+    pub fn check_trace(&self) -> Option<std::result::Result<(), Vec<String>>> {
+        self.trace.as_ref().map(|c| c.check_sequential())
+    }
+
+    fn record(&mut self, op: Op, result: OpResult) {
+        if let Some(ref mut checker) = self.trace {
+            checker.record_next(op, result);
+        }
     }
 
     async fn send_with_retry(&mut self, opcode: u8, payload: &[u8]) -> Result<(u16, Vec<u8>)> {
@@ -55,7 +79,7 @@ impl KayaClient {
                                         self.max_redirects
                                     );
                                     current_addr = parsed_addr;
-                                    self.addr = parsed_addr; // Cache the new leader address
+                                    self.addr = parsed_addr;
                                     continue;
                                 }
                             }
@@ -76,59 +100,125 @@ impl KayaClient {
         )))
     }
 
-    /// Write a key-value pair to the database.
     pub async fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let payload = encode_put_payload(key, value);
         let (status, body) = self.send_with_retry(1, &payload).await?;
         if status == STATUS_OK {
+            self.record(
+                Op::Put {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                },
+                OpResult::Ok,
+            );
             Ok(())
+        } else if status == STATUS_INVALID_ARGUMENT {
+            let msg =
+                decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            self.record(
+                Op::Put {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                },
+                OpResult::Error(msg.clone()),
+            );
+            Err(KayaError::invalid_argument(msg))
         } else {
             let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
+            self.record(
+                Op::Put {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                },
+                OpResult::Error(msg.clone()),
+            );
             Err(KayaError::internal(msg))
         }
     }
 
-    /// Read the value associated with a key from the database.
     pub async fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let payload = encode_key_payload(key);
         let (status, body) = self.send_with_retry(2, &payload).await?;
         if status == STATUS_OK {
             let val = decode_value_payload(&body).map_err(KayaError::corruption)?;
+            self.record(
+                Op::Get { key: key.to_vec() },
+                OpResult::Value(Some(val.clone())),
+            );
             Ok(Some(val))
         } else if status == STATUS_NOT_FOUND {
+            self.record(Op::Get { key: key.to_vec() }, OpResult::Value(None));
             Ok(None)
+        } else if status == STATUS_INVALID_ARGUMENT {
+            let msg =
+                decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            self.record(Op::Get { key: key.to_vec() }, OpResult::Error(msg.clone()));
+            Err(KayaError::invalid_argument(msg))
         } else {
             let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
+            self.record(Op::Get { key: key.to_vec() }, OpResult::Error(msg.clone()));
             Err(KayaError::internal(msg))
         }
     }
 
-    /// Remove a key-value pair from the database.
     pub async fn delete(&mut self, key: &[u8]) -> Result<()> {
         let payload = encode_key_payload(key);
         let (status, body) = self.send_with_retry(3, &payload).await?;
         if status == STATUS_OK {
+            self.record(Op::Delete { key: key.to_vec() }, OpResult::Ok);
             Ok(())
+        } else if status == STATUS_INVALID_ARGUMENT {
+            let msg =
+                decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            self.record(
+                Op::Delete { key: key.to_vec() },
+                OpResult::Error(msg.clone()),
+            );
+            Err(KayaError::invalid_argument(msg))
         } else {
             let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
+            self.record(
+                Op::Delete { key: key.to_vec() },
+                OpResult::Error(msg.clone()),
+            );
             Err(KayaError::internal(msg))
         }
     }
 
-    /// Scan all active keys starting with the specified prefix.
     pub async fn scan(&mut self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let payload = encode_scan_payload(prefix);
         let (status, body) = self.send_with_retry(4, &payload).await?;
         if status == STATUS_OK {
             let items = decode_scan_response(&body).map_err(KayaError::corruption)?;
+            self.record(
+                Op::Scan {
+                    prefix: prefix.to_vec(),
+                },
+                OpResult::Scan(items.clone()),
+            );
             Ok(items)
+        } else if status == STATUS_INVALID_ARGUMENT {
+            let msg =
+                decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            self.record(
+                Op::Scan {
+                    prefix: prefix.to_vec(),
+                },
+                OpResult::Error(msg.clone()),
+            );
+            Err(KayaError::invalid_argument(msg))
         } else {
             let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
+            self.record(
+                Op::Scan {
+                    prefix: prefix.to_vec(),
+                },
+                OpResult::Error(msg.clone()),
+            );
             Err(KayaError::internal(msg))
         }
     }
 
-    /// Query the health role of the target node (e.g. returns "leader" or "follower").
     pub async fn health(&mut self) -> Result<String> {
         let (status, body) = self.send_with_retry(5, &[]).await?;
         if status == STATUS_OK {
@@ -140,7 +230,6 @@ impl KayaClient {
         }
     }
 
-    /// Query comprehensive node statistics (Raft + LSM Engine metrics) in JSON.
     pub async fn stats(&mut self) -> Result<String> {
         let (status, body) = self.send_with_retry(6, &[]).await?;
         if status == STATUS_OK {

@@ -1,17 +1,20 @@
 [package]
-name = "kaya-client"
-description = "Official async Rust client library for KayaDB"
+name = "kaya-jepsen-test"
+description = "Jepsen-style correctness testing for KayaDB clusters"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-kaya-core.workspace = true
+kaya-client.workspace = true
 kaya-net.workspace = true
 kaya-sim.workspace = true
 tokio.workspace = true
+rand = "0.8"
 
 [lib]
 path = "src/lib.rs"

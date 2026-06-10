@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
+use std::time::Duration;
 
 use kaya_core::{DurabilityMode, EngineConfig, KayaError, Result, WalConfig};
 use kaya_engine::{
@@ -13,8 +14,8 @@ use kaya_io::FileDisk;
 use kaya_lsm::{inspect_manifest_path, inspect_sstable_path, ManifestInspection, SstInspection};
 use kaya_net::{
     decode_error_payload, decode_scan_response, decode_value_payload, encode_key_payload,
-    encode_put_payload, encode_scan_payload, roundtrip, STATUS_ERROR, STATUS_NOT_FOUND,
-    STATUS_NOT_LEADER, STATUS_OK,
+    encode_put_payload, encode_scan_payload, roundtrip, STATUS_ERROR, STATUS_INVALID_ARGUMENT,
+    STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
 };
 use kaya_wal::{inspect_wal_path, WalInspection};
 
@@ -29,14 +30,21 @@ fn run() -> Result<()> {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     let json = remove_flag(&mut args, "--json");
 
-    // --server <addr>: when present, all KV commands go over TCP.
-    let server_addr: Option<SocketAddr> = match remove_value_flag(&mut args, "--server") {
-        None => None,
-        Some(s) => Some(
-            s.parse()
-                .map_err(|e| KayaError::invalid_argument(format!("--server: {e}")))?,
-        ),
-    };
+    let server_addrs: Vec<SocketAddr> = remove_all_value_flags(&mut args, "--server")
+        .into_iter()
+        .map(|s| {
+            s.parse::<SocketAddr>()
+                .map_err(|e| KayaError::invalid_argument(format!("--server: {e}")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let timeout_ms: Option<u64> = remove_value_flag(&mut args, "--timeout")
+        .map(|s| {
+            s.parse::<u64>()
+                .map_err(|e| KayaError::invalid_argument(format!("--timeout: {e}")))
+        })
+        .transpose()?;
+    let timeout = timeout_ms.map(Duration::from_millis);
 
     let data_dir = remove_value_flag(&mut args, "--data").unwrap_or_else(|| "./data".to_owned());
     let durability = match remove_value_flag(&mut args, "--durability").as_deref() {
@@ -50,8 +58,8 @@ fn run() -> Result<()> {
     };
 
     // ── server mode ───────────────────────────────────────────────────────────
-    if let Some(addr) = server_addr {
-        return run_server_mode(args, addr, json);
+    if !server_addrs.is_empty() {
+        return run_server_mode(args, server_addrs, json, timeout);
     }
 
     // ── local engine mode (unchanged) ─────────────────────────────────────────
@@ -257,35 +265,74 @@ async fn open_engine(
 // ── server-mode dispatch ──────────────────────────────────────────────────────
 
 async fn roundtrip_with_retry(
-    mut addr: SocketAddr,
+    endpoints: &[SocketAddr],
     opcode: u8,
     payload: &[u8],
+    timeout: Option<Duration>,
 ) -> Result<(u16, Vec<u8>)> {
-    let mut retries = 0;
+    let mut addr_idx = 0;
+    let mut redirect_retries = 0;
+    let mut current_addr = endpoints[0];
+
     loop {
-        let (status, body) = roundtrip(addr, opcode, payload)
-            .await
-            .map_err(|e| KayaError::internal(e.to_string()))?;
-        if status == STATUS_NOT_LEADER && retries < 3 && !body.is_empty() {
+        let request = roundtrip(current_addr, opcode, payload);
+        let result = match timeout {
+            Some(dur) => match tokio::time::timeout(dur, request).await {
+                Ok(r) => r,
+                Err(_) => {
+                    return Err(KayaError::internal(format!(
+                        "request to {current_addr} timed out after {}ms",
+                        dur.as_millis()
+                    )));
+                }
+            },
+            None => request.await,
+        };
+        let (status, body) = result.map_err(|e| KayaError::internal(e.to_string()))?;
+
+        if status == STATUS_NOT_LEADER && redirect_retries < 3 && !body.is_empty() {
             if let Ok(leader_addr_str) = String::from_utf8(body.clone()) {
                 if let Ok(new_addr) = leader_addr_str.parse::<SocketAddr>() {
                     eprintln!("Redirecting to leader at {}...", new_addr);
-                    addr = new_addr;
-                    retries += 1;
+                    current_addr = new_addr;
+                    redirect_retries += 1;
                     continue;
                 }
             }
         }
+
+        if status == STATUS_ERROR || status == STATUS_INVALID_ARGUMENT {
+            if let Ok(msg) = decode_error_payload(&body) {
+                if (msg.contains("connection") || msg.contains("unavailable"))
+                    && addr_idx + 1 < endpoints.len()
+                {
+                    addr_idx += 1;
+                    current_addr = endpoints[addr_idx];
+                    eprintln!("Trying next endpoint: {current_addr}");
+                    continue;
+                }
+            }
+        }
+
         return Ok((status, body));
     }
 }
 
-/// Send commands to a running `kayadb-server` over TCP.
-fn run_server_mode(args: Vec<String>, addr: SocketAddr, json: bool) -> Result<()> {
-    block_on(async move { run_server_mode_async(args, addr, json).await })
+fn run_server_mode(
+    args: Vec<String>,
+    endpoints: Vec<SocketAddr>,
+    json: bool,
+    timeout: Option<Duration>,
+) -> Result<()> {
+    block_on(async move { run_server_mode_async(args, endpoints, json, timeout).await })
 }
 
-async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) -> Result<()> {
+async fn run_server_mode_async(
+    args: Vec<String>,
+    endpoints: Vec<SocketAddr>,
+    json: bool,
+    timeout: Option<Duration>,
+) -> Result<()> {
     match args.as_slice() {
         [] => {
             print_usage();
@@ -296,7 +343,7 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
         )),
         [cmd, key, value] if cmd == "put" => {
             let payload = encode_put_payload(key.as_bytes(), value.as_bytes());
-            let (status, body) = roundtrip_with_retry(addr, 1, &payload).await?;
+            let (status, body) = roundtrip_with_retry(&endpoints, 1, &payload, timeout).await?;
             match status {
                 STATUS_OK => {
                     if json {
@@ -309,9 +356,9 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
                 STATUS_NOT_LEADER => Err(KayaError::internal(
                     "not leader — retry on a different node",
                 )),
-                STATUS_ERROR => {
+                STATUS_ERROR | STATUS_INVALID_ARGUMENT => {
                     let msg = decode_error_payload(&body).unwrap_or_else(|_| "unknown".into());
-                    Err(KayaError::internal(msg))
+                    Err(KayaError::invalid_argument(msg))
                 }
                 s => Err(KayaError::internal(format!("unexpected status: {s}"))),
             }
@@ -321,7 +368,7 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
         )),
         [cmd, key] if cmd == "get" => {
             let payload = encode_key_payload(key.as_bytes());
-            let (status, body) = roundtrip_with_retry(addr, 2, &payload).await?;
+            let (status, body) = roundtrip_with_retry(&endpoints, 2, &payload, timeout).await?;
             match status {
                 STATUS_OK => {
                     let value = decode_value_payload(&body).map_err(KayaError::internal)?;
@@ -344,9 +391,9 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
                 STATUS_NOT_LEADER => Err(KayaError::internal(
                     "not leader — retry on a different node",
                 )),
-                STATUS_ERROR => {
+                STATUS_ERROR | STATUS_INVALID_ARGUMENT => {
                     let msg = decode_error_payload(&body).unwrap_or_else(|_| "unknown".into());
-                    Err(KayaError::internal(msg))
+                    Err(KayaError::invalid_argument(msg))
                 }
                 s => Err(KayaError::internal(format!("unexpected status: {s}"))),
             }
@@ -356,7 +403,7 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
         )),
         [cmd, key] if cmd == "delete" => {
             let payload = encode_key_payload(key.as_bytes());
-            let (status, body) = roundtrip_with_retry(addr, 3, &payload).await?;
+            let (status, body) = roundtrip_with_retry(&endpoints, 3, &payload, timeout).await?;
             match status {
                 STATUS_OK => {
                     if json {
@@ -369,9 +416,9 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
                 STATUS_NOT_LEADER => Err(KayaError::internal(
                     "not leader — retry on a different node",
                 )),
-                STATUS_ERROR => {
+                STATUS_ERROR | STATUS_INVALID_ARGUMENT => {
                     let msg = decode_error_payload(&body).unwrap_or_else(|_| "unknown".into());
-                    Err(KayaError::internal(msg))
+                    Err(KayaError::invalid_argument(msg))
                 }
                 s => Err(KayaError::internal(format!("unexpected status: {s}"))),
             }
@@ -381,7 +428,7 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
         )),
         [cmd, prefix] if cmd == "scan" => {
             let payload = encode_scan_payload(prefix.as_bytes());
-            let (status, body) = roundtrip_with_retry(addr, 4, &payload).await?;
+            let (status, body) = roundtrip_with_retry(&endpoints, 4, &payload, timeout).await?;
             match status {
                 STATUS_OK => {
                     let items = decode_scan_response(&body).map_err(KayaError::internal)?;
@@ -412,17 +459,15 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
                 STATUS_NOT_LEADER => Err(KayaError::internal(
                     "not leader — retry on a different node",
                 )),
-                STATUS_ERROR => {
+                STATUS_ERROR | STATUS_INVALID_ARGUMENT => {
                     let msg = decode_error_payload(&body).unwrap_or_else(|_| "unknown".into());
-                    Err(KayaError::internal(msg))
+                    Err(KayaError::invalid_argument(msg))
                 }
                 s => Err(KayaError::internal(format!("unexpected status: {s}"))),
             }
         }
         [cmd] if cmd == "health" => {
-            let (status, body) = roundtrip(addr, 5, &[])
-                .await
-                .map_err(|e| KayaError::internal(e.to_string()))?;
+            let (status, body) = roundtrip_with_retry(&endpoints, 5, &[], timeout).await?;
             if status == STATUS_OK {
                 let role = String::from_utf8_lossy(&body);
                 if json {
@@ -436,9 +481,7 @@ async fn run_server_mode_async(args: Vec<String>, addr: SocketAddr, json: bool) 
             }
         }
         [cmd] if cmd == "status" => {
-            let (status, body) = roundtrip_with_retry(addr, 6, &[])
-                .await
-                .map_err(|e| KayaError::internal(e.to_string()))?;
+            let (status, body) = roundtrip_with_retry(&endpoints, 6, &[], timeout).await?;
             if status == STATUS_OK {
                 let stats_str =
                     String::from_utf8(body).map_err(|e| KayaError::corruption(e.to_string()))?;
@@ -482,6 +525,14 @@ fn remove_value_flag(args: &mut Vec<String>, flag: &str) -> Option<String> {
     }
 }
 
+fn remove_all_value_flags(args: &mut Vec<String>, flag: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    while let Some(v) = remove_value_flag(args, flag) {
+        values.push(v);
+    }
+    values
+}
+
 fn print_usage() {
     println!("kayactl — KayaDB command-line tool");
     println!();
@@ -496,12 +547,18 @@ fn print_usage() {
     println!("  kayactl [--data <dir>] [--json] recover --dry-run");
     println!();
     println!("CLUSTER MODE (via running kayadb-server)");
-    println!("  kayactl --server <addr> [--json] put <key> <value>");
-    println!("  kayactl --server <addr> [--json] get <key>");
-    println!("  kayactl --server <addr> [--json] delete <key>");
-    println!("  kayactl --server <addr> [--json] scan <prefix>");
-    println!("  kayactl --server <addr> [--json] health");
-    println!("  kayactl --server <addr> [--json] status");
+    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] put <key> <value>");
+    println!(
+        "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] get <key>"
+    );
+    println!(
+        "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] delete <key>"
+    );
+    println!(
+        "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] scan <prefix>"
+    );
+    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] health");
+    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] status");
     println!();
     println!("INSPECT COMMANDS");
     println!("  kayactl [--json] inspect wal <path>");
@@ -511,6 +568,7 @@ fn print_usage() {
     println!("DEFAULTS");
     println!("  --data ./data");
     println!("  --durability strict");
+    println!("  --timeout (none)");
 }
 
 fn print_human_stats_from_json(json: &str) {

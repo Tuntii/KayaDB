@@ -11,7 +11,8 @@ pub use codec::{
 pub use roster::NodeRoster;
 pub use transport::{
     encode_client_frame, read_client_frame, roundtrip, send_envelopes, start_raft_listener,
-    write_client_response, STATUS_ERROR, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
+    write_client_response, STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND,
+    STATUS_NOT_LEADER, STATUS_OK,
 };
 
 use kaya_core::{KayaError, Result};

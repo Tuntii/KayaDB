@@ -224,3 +224,228 @@ pub async fn roundtrip(
     }
     Ok((status, body))
 }
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn encode_client_frame_empty_payload() {
+        let frame = encode_client_frame(5, &[]);
+        assert_eq!(&frame[..4], &1u32.to_le_bytes());
+        assert_eq!(frame[4], 5);
+        assert_eq!(frame.len(), 5);
+    }
+
+    #[test]
+    fn encode_client_frame_with_payload() {
+        let frame = encode_client_frame(1, b"hello");
+        assert_eq!(&frame[..4], &6u32.to_le_bytes());
+        assert_eq!(frame[4], 1);
+        assert_eq!(&frame[5..], b"hello");
+    }
+
+    #[tokio::test]
+    async fn read_client_frame_valid() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_client_frame(&mut stream).await
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let frame = encode_client_frame(2, b"key");
+        client.write_all(&frame).await.unwrap();
+        client.flush().await.unwrap();
+
+        let (opcode, payload) = server.await.unwrap().unwrap();
+        assert_eq!(opcode, 2);
+        assert_eq!(payload, b"key");
+    }
+
+    #[tokio::test]
+    async fn read_client_frame_empty_rejected() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_client_frame(&mut stream).await
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(&0u32.to_le_bytes()).await.unwrap();
+        client.flush().await.unwrap();
+
+        let result = server.await.unwrap();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn read_client_frame_oversized_rejected() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_client_frame(&mut stream).await
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let huge_len: u32 = 65 * 1024 * 1024;
+        client.write_all(&huge_len.to_le_bytes()).await.unwrap();
+        client.flush().await.unwrap();
+
+        let result = server.await.unwrap();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn read_client_frame_truncated_payload() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_client_frame(&mut stream).await
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(&10u32.to_le_bytes()).await.unwrap();
+        client.write_all(&[1u8]).await.unwrap();
+        client.write_all(b"short").await.unwrap();
+        client.flush().await.unwrap();
+        drop(client);
+
+        let result = server.await.unwrap();
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn write_and_read_response_roundtrip() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            write_client_response(&mut stream, STATUS_OK, b"ok")
+                .await
+                .unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let resp_len = client.read_u32_le().await.unwrap() as usize;
+        let status = client.read_u16_le().await.unwrap();
+        let body_len = resp_len - 2;
+        let mut body = vec![0u8; body_len];
+        client.read_exact(&mut body).await.unwrap();
+
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(body, b"ok");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_response_empty_payload() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            write_client_response(&mut stream, STATUS_NOT_FOUND, &[])
+                .await
+                .unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let resp_len = client.read_u32_le().await.unwrap() as usize;
+        let status = client.read_u16_le().await.unwrap();
+
+        assert_eq!(resp_len, 2);
+        assert_eq!(status, STATUS_NOT_FOUND);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn roundtrip_client_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let (opcode, _payload) = read_client_frame(&mut stream).await.unwrap();
+            assert_eq!(opcode, 5);
+            write_client_response(&mut stream, STATUS_OK, b"leader")
+                .await
+                .unwrap();
+        });
+
+        let (status, body) = roundtrip(addr, 5, &[]).await.unwrap();
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(body, b"leader");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn roundtrip_connection_refused() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let result = roundtrip(addr, 1, &[]).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_client_frame_opcode_only() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_client_frame(&mut stream).await
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let frame = encode_client_frame(5, &[]);
+        client.write_all(&frame).await.unwrap();
+        client.flush().await.unwrap();
+
+        let (opcode, payload) = server.await.unwrap().unwrap();
+        assert_eq!(opcode, 5);
+        assert!(payload.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_client_frame_multiple() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let f1 = read_client_frame(&mut stream).await.unwrap();
+            let f2 = read_client_frame(&mut stream).await.unwrap();
+            (f1, f2)
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let frame1 = encode_client_frame(1, b"put");
+        let frame2 = encode_client_frame(2, b"get");
+        client.write_all(&frame1).await.unwrap();
+        client.write_all(&frame2).await.unwrap();
+        client.flush().await.unwrap();
+
+        let (f1, f2) = server.await.unwrap();
+        assert_eq!(f1.0, 1);
+        assert_eq!(f1.1, b"put");
+        assert_eq!(f2.0, 2);
+        assert_eq!(f2.1, b"get");
+    }
+}

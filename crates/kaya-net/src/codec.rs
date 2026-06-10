@@ -436,4 +436,235 @@ mod tests {
         let decoded = decode_scan_response(&encoded).unwrap();
         assert_eq!(decoded, items);
     }
+
+    // ── malformed client payload tests ─────────────────────────────────────────
+
+    #[test]
+    fn decode_put_payload_empty() {
+        assert!(decode_put_payload(&[]).is_err());
+    }
+
+    #[test]
+    fn decode_put_payload_truncated_header() {
+        assert!(decode_put_payload(&[0x05, 0x00]).is_err());
+    }
+
+    #[test]
+    fn decode_put_payload_truncated_key() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&10u32.to_le_bytes());
+        data.extend_from_slice(&5u32.to_le_bytes());
+        data.extend_from_slice(b"short");
+        assert!(decode_put_payload(&data).is_err());
+    }
+
+    #[test]
+    fn decode_put_payload_truncated_value() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&3u32.to_le_bytes());
+        data.extend_from_slice(&10u32.to_le_bytes());
+        data.extend_from_slice(b"key");
+        data.extend_from_slice(b"short");
+        assert!(decode_put_payload(&data).is_err());
+    }
+
+    #[test]
+    fn decode_key_payload_empty() {
+        assert!(decode_key_payload(&[]).is_err());
+    }
+
+    #[test]
+    fn decode_key_payload_truncated_length() {
+        assert!(decode_key_payload(&[0x01]).is_err());
+    }
+
+    #[test]
+    fn decode_key_payload_truncated_data() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&100u32.to_le_bytes());
+        data.extend_from_slice(b"tiny");
+        assert!(decode_key_payload(&data).is_err());
+    }
+
+    #[test]
+    fn decode_value_payload_empty() {
+        assert!(decode_value_payload(&[]).is_err());
+    }
+
+    #[test]
+    fn decode_value_payload_truncated() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&50u32.to_le_bytes());
+        data.extend_from_slice(b"short");
+        assert!(decode_value_payload(&data).is_err());
+    }
+
+    #[test]
+    fn decode_scan_response_empty() {
+        assert!(decode_scan_response(&[]).is_err());
+    }
+
+    #[test]
+    fn decode_scan_response_oversized_count() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&2_000_000u32.to_le_bytes());
+        assert!(decode_scan_response(&data).is_err());
+    }
+
+    #[test]
+    fn decode_scan_response_truncated_items() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&5u32.to_le_bytes());
+        data.extend_from_slice(b"key");
+        assert!(decode_scan_response(&data).is_err());
+    }
+
+    #[test]
+    fn decode_error_payload_empty() {
+        assert!(decode_error_payload(&[]).is_err());
+    }
+
+    #[test]
+    fn decode_error_payload_truncated() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&100u32.to_le_bytes());
+        data.extend_from_slice(b"err");
+        assert!(decode_error_payload(&data).is_err());
+    }
+
+    #[test]
+    fn decode_error_payload_invalid_utf8() {
+        let mut data = Vec::new();
+        let bad = vec![0xff, 0xfe, 0xfd];
+        data.extend_from_slice(&(bad.len() as u32).to_le_bytes());
+        data.extend_from_slice(&bad);
+        assert!(decode_error_payload(&data).is_err());
+    }
+
+    // ── malformed Raft envelope tests ────────────────────────────────────────
+
+    #[test]
+    fn decode_envelope_empty() {
+        assert!(decode_envelope(&[]).is_err());
+    }
+
+    #[test]
+    fn decode_envelope_truncated_from() {
+        assert!(decode_envelope(&[0x01, 0x02]).is_err());
+    }
+
+    #[test]
+    fn decode_envelope_truncated_msg_type() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&2u64.to_le_bytes());
+        assert!(decode_envelope(&data).is_err());
+    }
+
+    #[test]
+    fn decode_envelope_unknown_msg_type() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&2u64.to_le_bytes());
+        data.push(99);
+        assert!(decode_envelope(&data).is_err());
+    }
+
+    #[test]
+    fn decode_envelope_vote_request_truncated() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&2u64.to_le_bytes());
+        data.push(MSG_VOTE_REQUEST);
+        data.extend_from_slice(&5u64.to_le_bytes());
+        assert!(decode_envelope(&data).is_err());
+    }
+
+    #[test]
+    fn decode_envelope_append_request_oversized_entry_count() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&2u64.to_le_bytes());
+        data.push(MSG_APPEND_REQUEST);
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&200_000u32.to_le_bytes());
+        assert!(decode_envelope(&data).is_err());
+    }
+
+    #[test]
+    fn decode_envelope_append_request_oversized_command() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&2u64.to_le_bytes());
+        data.push(MSG_APPEND_REQUEST);
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&(17 * 1024 * 1024u32).to_le_bytes());
+        assert!(decode_envelope(&data).is_err());
+    }
+
+    #[test]
+    fn decode_envelope_append_request_truncated_entry() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&2u64.to_le_bytes());
+        data.push(MSG_APPEND_REQUEST);
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&10u32.to_le_bytes());
+        data.extend_from_slice(b"short");
+        assert!(decode_envelope(&data).is_err());
+    }
+
+    #[test]
+    fn decode_envelope_vote_response_truncated() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&2u64.to_le_bytes());
+        data.push(MSG_VOTE_RESPONSE);
+        assert!(decode_envelope(&data).is_err());
+    }
+
+    #[test]
+    fn decode_envelope_append_response_truncated() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&2u64.to_le_bytes());
+        data.push(MSG_APPEND_RESPONSE);
+        data.extend_from_slice(&1u64.to_le_bytes());
+        assert!(decode_envelope(&data).is_err());
+    }
+
+    #[test]
+    fn all_decoders_no_panic_on_garbage() {
+        let cases: &[&[u8]] = &[
+            &[0xff],
+            &[0x00, 0x00, 0x00, 0xff],
+            &[0xff; 64],
+            &[0x01, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff],
+        ];
+        for input in cases {
+            let _ = decode_put_payload(input);
+            let _ = decode_key_payload(input);
+            let _ = decode_value_payload(input);
+            let _ = decode_scan_response(input);
+            let _ = decode_error_payload(input);
+            let _ = decode_envelope(input);
+        }
+    }
 }

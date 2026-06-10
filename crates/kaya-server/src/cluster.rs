@@ -28,8 +28,8 @@ use kaya_io::FileDisk;
 use kaya_net::{
     decode_key_payload, decode_put_payload, decode_scan_payload, encode_error_payload,
     encode_scan_response, encode_value_payload, read_client_frame, send_envelopes,
-    start_raft_listener, write_client_response, NodeRoster, STATUS_ERROR, STATUS_NOT_FOUND,
-    STATUS_NOT_LEADER, STATUS_OK,
+    start_raft_listener, write_client_response, NodeRoster, STATUS_ERROR, STATUS_INVALID_ARGUMENT,
+    STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
 };
 use kaya_raft::{Envelope, LogIndex, NodeId, RaftConfig, RaftNode};
 
@@ -222,6 +222,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
 
 // ── raft event loop ───────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn raft_event_loop(
     raft: SharedRaft,
     engine: SharedEngine,
@@ -359,6 +360,7 @@ async fn apply_command(engine: &SharedEngine, command: &[u8]) -> Result<(), Stri
 
 // ── client accept loop ────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn client_accept_loop(
     listener: TcpListener,
     raft: SharedRaft,
@@ -385,6 +387,7 @@ async fn client_accept_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     mut stream: TcpStream,
     raft: SharedRaft,
@@ -432,6 +435,7 @@ fn get_leader_hint(raft: &SharedRaft, roster: &NodeRoster) -> Vec<u8> {
     vec![]
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     raft: &SharedRaft,
     engine: &SharedEngine,
@@ -449,20 +453,20 @@ async fn dispatch(
                 let cmd = RaftCommand::Put { key, value }.encode();
                 propose_and_wait(raft, roster, propose_tx, cmd).await
             }
-            Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
+            Err(e) => (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
         },
 
         // GET
         2 => {
             let req_id = next_read_req_id.fetch_add(1, Ordering::SeqCst);
-            match propose_read_and_wait(raft, roster, read_propose_tx, req_id).await {
+            match propose_read_and_wait(raft, read_propose_tx, req_id).await {
                 Ok(()) => match decode_key_payload(&payload) {
                     Ok(key) => match engine.lock().await.get(&key, ReadOptions::default()).await {
                         Ok(Some(v)) => (STATUS_OK, encode_value_payload(&v)),
                         Ok(None) => (STATUS_NOT_FOUND, vec![]),
                         Err(e) => (STATUS_ERROR, encode_error_payload(&e.to_string())),
                     },
-                    Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
+                    Err(e) => (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
                 },
                 Err(e) if e == "not_leader" => {
                     let hint = get_leader_hint(raft, roster);
@@ -478,13 +482,13 @@ async fn dispatch(
                 let cmd = RaftCommand::Delete { key }.encode();
                 propose_and_wait(raft, roster, propose_tx, cmd).await
             }
-            Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
+            Err(e) => (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
         },
 
         // SCAN
         4 => {
             let req_id = next_read_req_id.fetch_add(1, Ordering::SeqCst);
-            match propose_read_and_wait(raft, roster, read_propose_tx, req_id).await {
+            match propose_read_and_wait(raft, read_propose_tx, req_id).await {
                 Ok(()) => match decode_scan_payload(&payload) {
                     Ok(prefix) => {
                         match engine
@@ -501,7 +505,7 @@ async fn dispatch(
                             Err(e) => (STATUS_ERROR, encode_error_payload(&e.to_string())),
                         }
                     }
-                    Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
+                    Err(e) => (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
                 },
                 Err(e) if e == "not_leader" => {
                     let hint = get_leader_hint(raft, roster);
@@ -589,7 +593,6 @@ async fn propose_and_wait(
 /// Send a read proposal to the Raft loop and wait for it to be confirmed by a majority.
 async fn propose_read_and_wait(
     raft: &SharedRaft,
-    roster: &NodeRoster,
     read_propose_tx: &mpsc::Sender<ReadIndexReq>,
     request_id: u64,
 ) -> Result<(), String> {
@@ -598,7 +601,10 @@ async fn propose_read_and_wait(
     }
     let (reply_tx, reply_rx) = oneshot::channel::<Result<(), String>>();
     if read_propose_tx
-        .send(ReadIndexReq { request_id, reply_tx })
+        .send(ReadIndexReq {
+            request_id,
+            reply_tx,
+        })
         .await
         .is_err()
     {
