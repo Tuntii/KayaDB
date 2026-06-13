@@ -3,6 +3,7 @@
 ## Introduction
 
 * [Welcome to KayaDB](README.md)
+* [KayaDB Explained](KayaDB_Explained.md) — The complete picture (what it does, why it exists, how everything works)
 * [Why KayaDB?](README.md#project-status)
 
 ## Getting Started

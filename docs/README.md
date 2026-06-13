@@ -46,6 +46,7 @@ See the dedicated guide: [Publishing the Documentation](publishing.md) for setup
 | [Development guide](development.md) | Run tests, simulations, fuzz targets, benchmarks, and contribution checks |
 | [Security guide](security.md) | Learn the deployment limits, network warnings, and safe local defaults |
 | [Design Specifications](specifications.md) | Read the detailed internal specs (WAL format, recovery rules, invariants, etc.) |
+| [KayaDB Explained](KayaDB_Explained.md) | **The single comprehensive document** that explains what KayaDB actually is, why it exists, how every layer works, its unique testing approach, and current status. |
 
 ---
 
