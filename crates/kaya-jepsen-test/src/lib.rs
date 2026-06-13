@@ -45,6 +45,6 @@ pub mod runner;
 pub mod workload;
 
 pub use history::{History, Operation, OperationResult};
-pub use nemesis::{Nemesis, NemesisConfig};
+pub use nemesis::{Nemesis, NemesisConfig, NemesisType};
 pub use runner::{TestConfig, TestResult, TestRunner};
 pub use workload::{Workload, WorkloadConfig};

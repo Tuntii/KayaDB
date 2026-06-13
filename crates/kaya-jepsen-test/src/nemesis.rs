@@ -165,18 +165,54 @@ impl Nemesis {
     }
 
     async fn partition_node(&self, node_id: usize) {
-        eprintln!(
-            "[Nemesis] Partitioning node {} (not implemented yet)",
-            node_id
-        );
-        // TODO: Implement network partition using iptables/tc (Linux) or firewall rules (Windows)
+        eprintln!("[Nemesis] Partitioning node {}", node_id);
+
+        // Try PowerShell script first (Windows)
+        let result = Command::new("powershell")
+            .args([
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "scripts/partition-node.ps1",
+                "-NodeId",
+                &node_id.to_string(),
+                "-ClusterDir",
+                &self.cluster_dir,
+            ])
+            .output();
+
+        if result.is_err() {
+            // Fallback to bash script (Unix)
+            let _ = Command::new("bash")
+                .args(["scripts/partition-node.sh", &node_id.to_string()])
+                .env("CLUSTER_DIR", &self.cluster_dir)
+                .output();
+        }
     }
 
     async fn heal_partition(&self, node_id: usize) {
-        eprintln!(
-            "[Nemesis] Healing partition for node {} (not implemented yet)",
-            node_id
-        );
-        // TODO: Implement partition healing
+        eprintln!("[Nemesis] Healing partition for node {}", node_id);
+
+        // Try PowerShell script first (Windows)
+        let result = Command::new("powershell")
+            .args([
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "scripts/heal-partition.ps1",
+                "-NodeId",
+                &node_id.to_string(),
+                "-ClusterDir",
+                &self.cluster_dir,
+            ])
+            .output();
+
+        if result.is_err() {
+            // Fallback to bash script (Unix)
+            let _ = Command::new("bash")
+                .args(["scripts/heal-partition.sh", &node_id.to_string()])
+                .env("CLUSTER_DIR", &self.cluster_dir)
+                .output();
+        }
     }
 }

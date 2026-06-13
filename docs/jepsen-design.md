@@ -299,14 +299,16 @@ Create shell/PowerShell scripts to manage cluster lifecycle:
 - `scripts/restart-node.sh` - Restart a specific node
 - `scripts/partition-network.sh` - Create network partition (requires `iptables` or `tc`)
 
-### Phase 2: Test Harness (next)
+### Phase 2: Test Harness (done)
 
 Build a Rust-based test harness in `crates/kaya-jepsen-test/`:
-- **Workload generators** - Concurrent clients running W1-W4
-- **Nemesis injectors** - Kill, partition, delay
-- **History recorder** - Record all operations with timestamps
-- **Linearizability checker** - Use existing `kaya_sim::LinearizabilityChecker`
-- **Test runner** - Orchestrate workloads, nemeses, and verification
+- **Workload generators** - Concurrent clients running W1-W4 (Register/Counter/Set/Map)
+- **Nemesis injectors** - Kill (via scripts), **Partition** (newly implemented cross-platform: `partition-node.ps1` + `heal-partition.ps1` using Windows Firewall `New-NetFirewallRule`, Linux `iptables` with comments; falls back gracefully). Restart also completed for Windows symmetry (`restart-node.ps1`).
+- **History recorder** - Thread-safe `History` + `Operation` recording with `kaya_sim` Op/OpResult
+- **Linearizability checker** - Uses `kaya_sim::LinearizabilityChecker::check_sequential()` (errors are recorded and tolerated)
+- **Test runner** - `TestRunner` + `TestConfig` + `TestResult` (duration-based orchestration, nemesis + workload, post-run verification + trace export on failure)
+
+A ready-to-run `examples/jepsen_demo.rs` was added for end-to-end "tam deneme" (cargo run -p kaya-jepsen-test --example jepsen_demo). It exercises Partition nemesis + real clients against a live cluster started via the scripts.
 
 ### Phase 3: CI Integration (future)
 
@@ -330,4 +332,5 @@ KayaDB's approach: build a lightweight Rust-native test harness instead of using
 
 - `crates/kaya-sim/src/linear.rs` - Sequential linearizability checker
 - `crates/kaya-server/src/integration_tests.rs` - Existing cluster tests
-- `ROADMAP.md` - M12 milestone
+- `crates/kaya-jepsen-test/examples/jepsen_demo.rs` - Runnable full demo (Partition + runner)
+- `ROADMAP.md` - M12 milestone (Jepsen prep harness complete; full external Jepsen + more nemeses later)
