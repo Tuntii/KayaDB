@@ -1,0 +1,30 @@
+{
+  "title": "KayaDB",
+  "description": "Correctness-first, inspectable, embeddable key-value storage engine with deterministic fault injection, LSM-tree storage, and Raft consensus.",
+  "author": "KayaDB Contributors",
+  "language": "en",
+  "gitbook": "3.2.3",
+  "structure": {
+    "readme": "README.md",
+    "summary": "SUMMARY.md"
+  },
+  "plugins": [
+    "prism",
+    "-highlight",
+    "anchors",
+    "theme-default"
+  ],
+  "pluginsConfig": {
+    "prism": {
+      "css": [
+        "prismjs/themes/prism-tomorrow.css"
+      ]
+    }
+  },
+  "links": {
+    "sidebar": {
+      "GitHub": "https://github.com/Tuntii/KayaDB",
+      "Roadmap": "https://github.com/Tuntii/KayaDB/blob/main/ROADMAP.md"
+    }
+  }
+}

@@ -13,9 +13,31 @@
 
 _KayaDB is the database project for people who believe crashes should be test cases, not horror stories._
 
-[Docs](docs/README.md) · [Getting started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [CLI reference](docs/cli-reference.md) · [Security](docs/security.md) · [Roadmap](ROADMAP.md)
-
 </div>
+
+## 📚 Documentation
+
+**The complete documentation is published on GitHub Pages**:
+
+→ **[https://tuntii.github.io/KayaDB/](https://tuntii.github.io/KayaDB/)**
+
+It includes:
+- Getting Started & CLI reference
+- Architecture and internals
+- Detailed specifications (WAL, LSM, recovery, simulation...)
+- Correctness testing (SimDisk, Jepsen, fuzzing)
+- Security, contributing, and roadmap
+
+The source lives in the `docs/` folder (using Docsify + we still maintain GitBook-compatible files).
+
+---
+
+**Quick links in this README:**
+- [Why KayaDB exists](#why-kayadb-exists)
+- [Quick start](#quick-start)
+- [Feature snapshot](#feature-snapshot)
+- [Roadmap](ROADMAP.md)
+- [Contributing](CONTRIBUTING.md)
 
 ---
 
@@ -25,64 +47,11 @@ KayaDB is an open-source storage engine and distributed key-value database proto
 
 > **If a storage bug cannot be reproduced, inspected, and turned into an invariant, it is not really fixed.**
 
-The project combines an LSM-tree storage engine, a write-ahead log, deterministic disk fault injection, a replayable simulator, a Raft prototype, a TCP server, an async Rust client, and an operator CLI — all inside one intentionally small Rust workspace.
+The project combines an LSM-tree storage engine, a write-ahead log, deterministic disk fault injection (`SimDisk`), a replayable simulator, a Raft prototype, a TCP server, an async Rust client, and an operator CLI — all inside one intentionally small Rust workspace.
 
-KayaDB is not trying to be “yet another black-box database”. It is built to be opened, inspected, broken on purpose, replayed from a seed, and improved in public.
+**Full documentation, architecture deep-dives, specifications and guides live in the [GitBook documentation](docs/README.md).**
 
----
-
-## What makes it different
-
-### 1. Deterministic crashes with the same engine code
-
-Most projects test happy paths first and crash paths later. KayaDB flips that priority.
-
-The entire storage stack talks to a `Disk` trait. In normal runs, that trait is backed by `FileDisk`. In tests and simulations, the same engine code runs on `SimDisk`, an in-memory disk that models volatile bytes, stable bytes, `fsync`, partial writes, dropped writes, I/O errors, and crash recovery.
-
-```text
-kaya-engine
-   ├─ kaya-wal
-   ├─ kaya-lsm
-   └─ kaya-io::Disk
-        ├─ FileDisk  → real filesystem + fsync
-        └─ SimDisk   → deterministic fault injection + crash replay
-```
-
-That means storage failures are not vague CI flakes. They can become reproducible seeds, JSONL traces, and regression tests.
-
-### 2. Inspectable persistent formats
-
-KayaDB treats every byte written to disk as something operators and contributors should be able to understand.
-
-`kayactl` can inspect:
-
-- WAL segments,
-- SSTables,
-- manifests,
-- recovery reports,
-- engine and cluster status.
-
-No hidden “trust me bro” file formats. If KayaDB writes it, the project aims to give you a way to inspect it.
-
-### 3. Design-first development
-
-Persistent formats, recovery semantics, testing rules, CLI UX, security boundaries, and roadmap decisions are documented before they become hard to change.
-
-The north star is not “ship more code”. It is:
-
-- define the invariant,
-- implement the smallest correct mechanism,
-- prove it with deterministic tests,
-- expose enough tooling to debug it when it fails.
-
-### 4. Embeddable engine and networked server
-
-KayaDB can be used in two modes:
-
-- **Embedded** — use `kaya-engine` directly inside a Rust process.
-- **Server / cluster** — run `kayadb-server` and connect with `kayactl` or `kaya-client` over TCP.
-
-The project is deliberately modular, so storage, networking, consensus, simulation, and CLI code can be studied independently.
+This README contains only a high-level overview + quick start.
 
 ---
 
@@ -259,155 +228,50 @@ See [`crates/kaya-client/examples/`](crates/kaya-client/examples/).
 
 ---
 
-## Architecture
+## Architecture & Testing
 
-```mermaid
-flowchart TB
-    CLI["kayactl\nCLI + inspectors"]
-    Client["kaya-client\nasync Rust client"]
-    Server["kayadb-server\nTCP node"]
-    Engine["kaya-engine\nembedded KV API"]
-    WAL["kaya-wal\nWAL codec + recovery"]
-    LSM["kaya-lsm\nmemtable + SSTable + manifest"]
-    IO["kaya-io\nDisk trait"]
-    FileDisk["FileDisk\nreal filesystem"]
-    SimDisk["SimDisk\nfault injection"]
-    Core["kaya-core\nerrors + IDs + CRC32C"]
-    Raft["kaya-raft\nconsensus state machine"]
-    Net["kaya-net\nwire codec + TCP transport"]
-    Sim["kaya-sim\nseeded simulation + replay"]
+For the full architecture, crate map, data flows, write/read paths, and design decisions, see the **[Architecture chapter in the documentation](docs/architecture.md)**.
 
-    CLI --> Engine
-    CLI --> Server
-    Client --> Server
-    Server --> Engine
-    Server --> Net
-    Net --> Raft
-    Sim --> Engine
-    Sim --> Raft
-    Engine --> WAL
-    Engine --> LSM
-    WAL --> IO
-    LSM --> IO
-    IO --> FileDisk
-    IO --> SimDisk
-    IO --> Core
-    WAL --> Core
-    LSM --> Core
-    Engine --> Core
-```
+KayaDB emphasizes **design-first + correctness-first** development:
 
-### Workspace map
+- All persistent formats are inspectable via `kayactl inspect`
+- The same engine code runs against real `FileDisk` and deterministic `SimDisk`
+- Extensive use of seeded simulation, trace replay, crash/recovery idempotence tests, and fuzzing
 
-| Crate | Purpose |
-|---|---|
-| [`kaya-core`](crates/kaya-core/README.md) | Shared errors, typed IDs, config, CRC32C helpers |
-| [`kaya-io`](crates/kaya-io/README.md) | `Disk` trait, `FileDisk`, `SimDisk`, safe relative paths |
-| [`kaya-wal`](crates/kaya-wal/README.md) | WAL frame codec, append writer, recovery, inspection |
-| [`kaya-lsm`](crates/kaya-lsm/README.md) | Memtable, SSTable, manifest, compaction primitives |
-| [`kaya-engine`](crates/kaya-engine/README.md) | Embedded async key-value engine |
-| [`kaya-sim`](crates/kaya-sim/README.md) | Seeded simulator, trace replay, linearizability tooling |
-| [`kaya-raft`](crates/kaya-raft/README.md) | Pure Raft state machine |
-| [`kaya-net`](crates/kaya-net/README.md) | Binary protocol, TCP helpers, node roster |
-| [`kaya-server`](crates/kaya-server/README.md) | `kayadb-server` process and cluster runtime |
-| [`kaya-client`](crates/kaya-client/README.md) | Async Rust TCP client |
-| [`kayactl`](crates/kayactl/README.md) | CLI, inspectors, stats, dry-run recovery |
-| [`kaya-bench`](crates/kaya-bench/README.md) | Criterion benchmark suite |
-
-For the deeper design tour, read [`docs/architecture.md`](docs/architecture.md).
+See:
+- [Development & Testing Guide](docs/development.md)
+- [Jepsen-style testing design](docs/jepsen-design.md)
+- [Full technical specifications](docs/README.md#full-documentation-structure)
 
 ---
 
-## Testing philosophy
+## Inspectability & Performance
 
-KayaDB is built around invariants, not vibes.
-
-The project uses several layers of validation:
-
-- unit tests for codecs, memtable behavior, parser limits, and state transitions,
-- crash/recovery tests through `SimDisk`,
-- seeded simulation in `kaya-sim`,
-- trace replay for reproducibility,
-- fuzz targets for malformed WAL/SSTable/manifest/protocol input,
-- a small formal model for WAL crash behavior maintained alongside the project,
-- CI for `fmt`, `clippy -D warnings`, and the workspace test suite.
-
-Useful commands:
+Inspect any on-disk artifact:
 
 ```bash
-cargo test --workspace
-cargo test -p kaya-sim
-cargo +nightly fuzz run fuzz_wal_decoder
-cargo +nightly fuzz run fuzz_command_frame_decoder
-cargo bench -p kaya-bench
+kayactl inspect wal ./data/wal-000001.wal
+kayactl inspect sstable ./data/sst-000001.sst
+kayactl --data ./data recover --dry-run --json
 ```
 
-See [`docs/development.md`](docs/development.md) and [`BENCHMARKS.md`](BENCHMARKS.md).
-
----
-
-## Inspectability examples
-
-Once you have a local data directory, you can inspect storage internals directly:
-
-```bash
-cargo run -p kayactl -- inspect wal ./.kayadb-demo/wal-000001.wal
-cargo run -p kayactl -- inspect sstable ./.kayadb-demo/sst-000001.sst
-cargo run -p kayactl -- inspect manifest ./.kayadb-demo/MANIFEST
-cargo run -p kayactl -- --data ./.kayadb-demo recover --dry-run --json
-```
-
-That is the debugging loop KayaDB wants to make normal:
-
-```text
-failure → seed / trace → inspect bytes → add invariant → regression test
-```
-
----
-
-## Performance notes
-
-KayaDB includes a Criterion benchmark suite for WAL append, SSTable operations, and end-to-end engine workloads. Benchmark numbers are hardware- and filesystem-dependent, so this README avoids pretending that one laptop run is a universal truth.
-
-Run the suite locally:
+Benchmark suite (Criterion):
 
 ```bash
 cargo bench -p kaya-bench
 ```
 
-Published benchmark notes live in [`BENCHMARKS.md`](BENCHMARKS.md). Treat them as project telemetry, not a production SLA.
+Detailed numbers and methodology live in [BENCHMARKS.md](BENCHMARKS.md).
 
 ---
 
-## Current limitations
+## Current Status & Limitations
 
-KayaDB is intentionally honest about what it is not ready for yet.
+See the **[full status and roadmap](ROADMAP.md)**.
 
-- **Not production-ready** — use it for research, learning, prototyping, and contribution, not irreplaceable data.
-- **No built-in authentication** — do not expose client or Raft ports to the public internet.
-- **No TLS in the protocol** — wrap traffic with a private network, VPN, WireGuard, stunnel, ghostunnel, or similar infrastructure if needed.
-- **Static cluster membership** — dynamic member add/remove is not implemented yet.
-- **No Raft log snapshotting/compaction yet** — long-running busy clusters can grow their Raft logs.
-- **Leader-routed reads** — followers should redirect or reject client reads instead of serving stale data.
-- **Experimental format evolution** — persistent formats are documented, but compatibility policy is still early.
+KayaDB is intentionally honest about its current limitations (no auth/TLS, static membership, no snapshots yet, etc.). Read the [Security guide](docs/security.md) before any deployment.
 
-Read [`docs/security.md`](docs/security.md) before any deployment experiment.
-
----
-
-## Roadmap
-
-The short version:
-
-1. **Foundation** — workspace, core types, specs, CI. ✅
-2. **Durability layer** — `Disk`, WAL, recovery, `SimDisk`. ✅
-3. **Local engine** — memtable, LSM, manifest, flush, compaction. ✅
-4. **Correctness tooling** — deterministic simulation, fuzz targets, recovery idempotence. ✅
-5. **Distributed prototype** — Raft simulation, TCP cluster mode, client protocol. ✅
-6. **Readiness hardening** — stronger cluster tests, recovery diagnostics, status UX. 🚧
-7. **Future systems work** — Jepsen prep, Raft snapshots, dynamic membership, Linux eBPF observability, production security boundaries. 🔒
-
-See [`ROADMAP.md`](ROADMAP.md).
+For the complete picture and deeper explanations, use the **[official GitBook documentation](docs/README.md)**.
 
 ---
 
