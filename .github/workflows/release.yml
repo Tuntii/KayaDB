@@ -60,7 +60,7 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: |
             mkdir -p release-pkg
-            cp target/${{ matrix.target }}/release/kaya-server release-pkg/${{ matrix.bin_name }}
+            cp target/${{ matrix.target }}/release/kayadb-server release-pkg/${{ matrix.bin_name }}
             cp target/${{ matrix.target }}/release/kayactl release-pkg/${{ matrix.ctl_name }}
             cp README.md release-pkg/
             cp docs/security.md release-pkg/ || true
@@ -73,7 +73,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release-pkg
-          Copy-Item target/${{ matrix.target }}/release/kaya-server.exe release-pkg/${{ matrix.bin_name }}
+          Copy-Item target/${{ matrix.target }}/release/kayadb-server.exe release-pkg/${{ matrix.bin_name }}
           Copy-Item target/${{ matrix.target }}/release/kayactl.exe release-pkg/${{ matrix.ctl_name }}
           Copy-Item README.md release-pkg/
           if (Test-Path docs/security.md) { Copy-Item docs/security.md release-pkg/ }

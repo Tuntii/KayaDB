@@ -18,9 +18,10 @@ concurrency:
 
 jobs:
   deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    # Note: For this to work, go to repo Settings > Pages and set "Source" to "GitHub Actions".
+    # The "github-pages" environment is optional here; we removed the hard requirement
+    # to avoid deploys getting stuck on first-time setup or protection rules.
+    # If you want stricter control, create the environment in Settings > Environments.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -30,7 +31,7 @@ jobs:
         uses: actions/configure-pages@v4
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           # The folder that contains the Docsify site
           path: './docs'
@@ -38,3 +39,6 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Output URL
+        run: echo "Deployed to ${{ steps.deployment.outputs.page_url }}"

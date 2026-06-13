@@ -19,7 +19,9 @@ We have a workflow at `.github/workflows/docs.yml`.
 1. Go to your repository → **Settings → Pages**
 2. Under **"Build and deployment"**:
    - **Source**: GitHub Actions
-3. The workflow will automatically deploy on every push to `main` that touches `docs/`.
+3. (Optional but recommended) If you want, create an environment named `github-pages` in **Settings → Environments** for extra control. The workflow no longer hard-requires it, so first deploys won't get stuck on missing environment.
+
+The workflow will automatically deploy on every push to `main` that touches `docs/`.
 
 The site will be live at `https://tuntii.github.io/KayaDB/`.
 

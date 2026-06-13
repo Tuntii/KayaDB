@@ -11,11 +11,15 @@
 //!
 //! 2. (Recommended) Start the cluster using the cross-platform scripts.
 //!    On Windows (from an **Administrator** PowerShell for firewall/partition tests):
-//!      $env:ClusterDir = "$env:TEMP\kayadb-jepsen-demo"
-//!      powershell -ExecutionPolicy Bypass -File scripts/start-cluster.ps1 -ClusterDir $env:ClusterDir -KayaServer "target\debug\kayadb-server.exe"
+//!    ```powershell
+//!    $env:ClusterDir = "$env:TEMP\kayadb-jepsen-demo"
+//!    powershell -ExecutionPolicy Bypass -File scripts/start-cluster.ps1 -ClusterDir $env:ClusterDir -KayaServer "target\debug\kayadb-server.exe"
+//!    ```
 //!
 //!    On Linux/macOS:
-//!      CLUSTER_DIR=/tmp/kayadb-jepsen-demo ./scripts/start-cluster.sh
+//!    ```bash
+//!    CLUSTER_DIR=/tmp/kayadb-jepsen-demo ./scripts/start-cluster.sh
+//!    ```
 //!
 //!    Wait ~5-8 seconds for Raft leader election.
 //!
@@ -79,9 +83,18 @@ async fn main() {
         cluster_dir,
     };
 
-    println!("Cluster dir (must match your start-cluster invocation): {}", config.cluster_dir);
-    println!("Nemesis: {:?}", config.nemesis.as_ref().unwrap().nemesis_type);
-    println!("Duration: {}s with {} concurrent clients", config.duration_secs, config.workload.clients);
+    println!(
+        "Cluster dir (must match your start-cluster invocation): {}",
+        config.cluster_dir
+    );
+    println!(
+        "Nemesis: {:?}",
+        config.nemesis.as_ref().unwrap().nemesis_type
+    );
+    println!(
+        "Duration: {}s with {} concurrent clients",
+        config.duration_secs, config.workload.clients
+    );
     println!();
     println!(">>> Starting test run. Make sure the 3-node cluster is up! <<<");
     println!();
@@ -97,7 +110,10 @@ async fn main() {
                     println!("  - {}", v);
                 }
                 if let Some(trace) = &result.trace {
-                    println!("Trace exported ({} bytes) - can be replayed with kaya-sim", trace.len());
+                    println!(
+                        "Trace exported ({} bytes) - can be replayed with kaya-sim",
+                        trace.len()
+                    );
                 }
             } else {
                 println!("No linearizability violations detected. Great!");
