@@ -12,3 +12,4 @@ spec/KayaDB_Technical_Spec.md
 # Geçici Türkçe tam açıklama dosyası (kullanıcı PDF hazırlayacak)
 # PDF hazırlandıktan sonra bu satır kaldırılıp dosya eklenecek
 docs/KayaDB_Explained_TR.md
+/memory

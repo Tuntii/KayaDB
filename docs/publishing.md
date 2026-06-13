@@ -10,31 +10,6 @@ Once enabled, the documentation will be available at:
 https://tuntii.github.io/KayaDB/
 ```
 
-## How to Enable GitHub Pages (One-time setup)
-
-### Option 1: Recommended — GitHub Actions (already configured)
-
-We have a workflow at `.github/workflows/docs.yml`.
-
-1. Go to your repository → **Settings → Pages**
-2. Under **"Build and deployment"**:
-   - **Source**: GitHub Actions
-3. (Optional but recommended) If you want, create an environment named `github-pages` in **Settings → Environments** for extra control. The workflow no longer hard-requires it, so first deploys won't get stuck on missing environment.
-
-The workflow will automatically deploy on every push to `main` that touches `docs/`.
-
-The site will be live at `https://tuntii.github.io/KayaDB/`.
-
-### Option 2: Simple (no Actions) — Deploy from /docs folder
-
-1. Go to **Settings → Pages**
-2. Set **Source** to: `Deploy from a branch`
-3. Branch: `main`
-4. Folder: `/docs`
-5. Save.
-
-> Note: Option 1 (Actions) is preferred because it gives better control and works even if you later want a custom domain or more advanced processing.
-
 ## Local Preview (Development)
 
 The easiest way to preview the site locally:
