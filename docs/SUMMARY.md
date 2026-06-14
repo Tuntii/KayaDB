@@ -5,6 +5,7 @@
 * [Welcome to KayaDB](README.md)
 * [KayaDB Explained](KayaDB_Explained.md) — The complete picture (what it does, why it exists, how everything works)
 * [Why KayaDB?](README.md#project-status)
+* [Productization north star](productization.md) — M13: evolving from prototype to deployable product
 
 ## Getting Started
 

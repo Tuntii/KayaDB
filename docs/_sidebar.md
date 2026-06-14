@@ -37,6 +37,7 @@
   - [Key Technical Specs](specifications.md#core-specifications)
 
 - [Project](publishing.md)
+  - [Productization north star](productization.md)
   - [Contributing](../CONTRIBUTING.md)
   - [Roadmap](../ROADMAP.md)
   - [Publishing Docs](publishing.md)

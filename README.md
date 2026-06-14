@@ -267,7 +267,7 @@ Detailed numbers and methodology live in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Current Status & Limitations
 
-See the **[full status and roadmap](ROADMAP.md)** — including the **[North star: prototype → product](ROADMAP.md#north-star-prototype--product)** section (M13 productization gates).
+See the **[full status and roadmap](ROADMAP.md)** and the tracked **[productization north star](docs/productization.md)** (M13 exit gates — prototype → deployable product).
 
 KayaDB is experimental today but is **deliberately being evolved into a deployable product** once durability, auth/TLS, chaos validation, and ops runbooks are complete. Current gaps include unauthenticated admin RPCs and in-memory Raft state across restarts. Read the [Security guide](docs/security.md) before any deployment.
 
