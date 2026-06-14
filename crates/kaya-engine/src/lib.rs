@@ -10,6 +10,20 @@ use kaya_lsm::{
     ManifestWarning, Memtable, SstEntry, SstableBuilder, SstableReader, TableMetadata,
     ValueRecordRef, CURRENT_FILE_NAME, CURRENT_TMP_FILE_NAME, MANIFEST_FILE_NAME, SST_FOOTER_LEN,
 };
+
+/// A compact, pinnable snapshot view of the LSM state at a point in time.
+/// Used for efficient Raft snapshots instead of full KV dump.
+///
+/// Contains:
+/// - pinned_tables: the exact live SSTables at snapshot time (with their metadata)
+/// - memtable_data: raw contents of the memtable at that point (key, value or tombstone, seq)
+/// - cutoff_seq: the MVCC sequence number boundary
+#[derive(Debug, Clone)]
+pub struct SnapshotView {
+    pub pinned_tables: Vec<TableMetadata>,
+    pub memtable_data: Vec<(Bytes, Option<Bytes>, SequenceNumber)>,
+    pub cutoff_seq: SequenceNumber,
+}
 use kaya_wal::{recover_wal, WalPayload, WalRecoveryReport, WalWarning, WalWriter};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -108,6 +122,9 @@ pub struct Engine<D: Disk> {
     next_manifest_edit_seq: u64,
     /// Live SSTables sorted newest-first (highest table_id first).
     live_sstables: Vec<(TableMetadata, SstableReader)>,
+    /// Reference counts for pinned SSTables (used for snapshots).
+    /// table_id -> refcount. When >0 the table is pinned and should not be deleted by compaction.
+    sstable_refcounts: std::collections::HashMap<u64, u32>,
     #[allow(dead_code)]
     lock_file: Option<std::fs::File>,
 }
@@ -257,6 +274,7 @@ impl<D: Disk> Engine<D> {
             next_table_id,
             next_manifest_edit_seq,
             live_sstables,
+            sstable_refcounts: std::collections::HashMap::new(),
             lock_file,
         })
     }
@@ -264,6 +282,22 @@ impl<D: Disk> Engine<D> {
     pub async fn close(&mut self) -> Result<()> {
         let _ = &self.disk;
         Ok(())
+    }
+
+    /// Attempt to load a persisted Raft snapshot from `snap_path`.
+    /// Returns true if a snapshot was loaded and applied.
+    pub async fn load_persisted_raft_snapshot(
+        &mut self,
+        snap_path: impl AsRef<std::path::Path>,
+    ) -> Result<bool> {
+        if let Ok(data) = std::fs::read(snap_path.as_ref()) {
+            self.install_snapshot(&data).await?;
+            // Optional: remove after successful load to avoid re-applying
+            // let _ = std::fs::remove_file(snap_path);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub async fn put(
@@ -364,6 +398,262 @@ impl<D: Disk> Engine<D> {
             result.truncate(limit);
         }
         Ok(result)
+    }
+
+    /// Create a **pinned, manifest-anchored MVCC snapshot** (the proper prototype implementation).
+    ///
+    /// Instead of dumping the entire KV dataset, we capture:
+    /// - The exact set of live SSTables (from manifest) — these will be "pinned".
+    /// - The current memtable contents (raw with seqs).
+    /// - The cutoff SequenceNumber.
+    ///
+    /// This is cheap (mostly metadata + one flush) and allows efficient log truncation
+    /// in Raft. The returned bytes are a compact serialized `SnapshotView`.
+    ///
+    /// Files referenced in the snapshot are refcounted so compaction won't delete them
+    /// until the snapshot is released.
+    pub async fn create_snapshot(&mut self) -> Result<Vec<u8>> {
+        // Make sure the current memtable is captured as immutable view.
+        // For simplicity we capture the mutable memtable's raw state (it will be
+        // treated as the "snapshot memtable" on install).
+        let memtable_snapshot: Vec<(Bytes, Option<Bytes>, SequenceNumber)> =
+            self.memtable.raw_scan_prefix(b"").into_iter().collect();
+
+        // Capture the pinned live tables (clone metadata; readers stay shared).
+        let pinned_tables: Vec<TableMetadata> =
+            self.manifest_state.live_tables.clone();
+
+        // Pin them (increment refcounts).
+        for meta in &pinned_tables {
+            *self.sstable_refcounts.entry(meta.table_id).or_insert(0) += 1;
+        }
+
+        let cutoff = self.manifest_state.last_sequence;
+
+        let view = SnapshotView {
+            pinned_tables,
+            memtable_data: memtable_snapshot,
+            cutoff_seq: cutoff,
+        };
+
+        // Serialize the view in a simple format:
+        // [num_tables: u32]
+        //   for each table: full TableMetadata serialization (reuse encode logic or manual)
+        // [num_memtable_entries: u32]
+        //   for each: [key_len u32][key][has_value u8][value?][seq u64]
+        // [cutoff_seq u64]
+        //
+        // For prototype we use a straightforward length-prefixed encoding.
+        let mut buf = Vec::new();
+
+        // pinned tables count + their data
+        buf.extend_from_slice(&(view.pinned_tables.len() as u32).to_le_bytes());
+        for meta in &view.pinned_tables {
+            // Simple manual serialization of TableMetadata (enough for prototype)
+            buf.extend_from_slice(&meta.table_id.to_le_bytes());
+            buf.extend_from_slice(&meta.level.to_le_bytes());
+            let path_bytes = meta.path.as_bytes();
+            buf.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(path_bytes);
+            buf.extend_from_slice(&(meta.smallest_key.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&meta.smallest_key);
+            buf.extend_from_slice(&(meta.largest_key.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&meta.largest_key);
+            buf.extend_from_slice(&meta.min_sequence.get().to_le_bytes());
+            buf.extend_from_slice(&meta.max_sequence.get().to_le_bytes());
+            buf.extend_from_slice(&meta.entry_count.to_le_bytes());
+            buf.extend_from_slice(&meta.file_size.to_le_bytes());
+            buf.extend_from_slice(&meta.footer_checksum.to_le_bytes());
+        }
+
+        // memtable entries
+        buf.extend_from_slice(&(view.memtable_data.len() as u32).to_le_bytes());
+        for (key, value_opt, seq) in &view.memtable_data {
+            buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
+            buf.extend_from_slice(key);
+            match value_opt {
+                Some(v) => {
+                    buf.push(1u8);
+                    buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(v);
+                }
+                None => {
+                    buf.push(0u8);
+                }
+            }
+            buf.extend_from_slice(&seq.get().to_le_bytes());
+        }
+
+        // cutoff
+        buf.extend_from_slice(&view.cutoff_seq.get().to_le_bytes());
+
+        Ok(buf)
+    }
+
+    /// Install a pinned snapshot view produced by `create_snapshot`.
+    ///
+    /// This replaces the current LSM view with the one described by the snapshot:
+    /// - Loads the pinned SSTables (by path, assuming they are present in the data dir
+    ///   or have been transferred).
+    /// - Replaces the memtable with the one from the snapshot.
+    /// - Sets the last_sequence.
+    ///
+    /// After this call, only Raft log entries *after* the snapshot's applied index
+    /// should be replayed/applied.
+    pub async fn install_snapshot(&mut self, data: &[u8]) -> Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let mut cur: &[u8] = data;
+
+        // pinned tables
+        let num_tables = Self::take_u32(&mut cur)? as usize;
+        let mut pinned: Vec<TableMetadata> = Vec::with_capacity(num_tables);
+        for _ in 0..num_tables {
+            let table_id = u64::from_le_bytes([
+                cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
+            ]);
+            cur = &cur[8..];
+            let level = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]);
+            cur = &cur[4..];
+            let path_len = Self::take_u32(&mut cur)? as usize;
+            let path = String::from_utf8(cur[..path_len].to_vec())
+                .map_err(|_| KayaError::corruption("bad path in snapshot"))?;
+            cur = &cur[path_len..];
+            let sk_len = Self::take_u32(&mut cur)? as usize;
+            let smallest_key = cur[..sk_len].to_vec();
+            cur = &cur[sk_len..];
+            let lk_len = Self::take_u32(&mut cur)? as usize;
+            let largest_key = cur[..lk_len].to_vec();
+            cur = &cur[lk_len..];
+            let min_seq = u64::from_le_bytes([
+                cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
+            ]);
+            cur = &cur[8..];
+            let max_seq = u64::from_le_bytes([
+                cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
+            ]);
+            cur = &cur[8..];
+            let entry_count = u64::from_le_bytes([
+                cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
+            ]);
+            cur = &cur[8..];
+            let file_size = u64::from_le_bytes([
+                cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
+            ]);
+            cur = &cur[8..];
+            let footer_checksum = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]);
+            cur = &cur[4..];
+
+            pinned.push(TableMetadata {
+                table_id,
+                level,
+                path,
+                smallest_key,
+                largest_key,
+                min_sequence: SequenceNumber::new(min_seq),
+                max_sequence: SequenceNumber::new(max_seq),
+                entry_count,
+                file_size,
+                footer_checksum,
+            });
+        }
+
+        // memtable data
+        let num_mt = Self::take_u32(&mut cur)? as usize;
+        let mut mt_data = Vec::with_capacity(num_mt);
+        for _ in 0..num_mt {
+            let klen = Self::take_u32(&mut cur)? as usize;
+            let key = cur[..klen].to_vec();
+            cur = &cur[klen..];
+            let has_val = cur[0];
+            cur = &cur[1..];
+            let value = if has_val == 1 {
+                let vlen = Self::take_u32(&mut cur)? as usize;
+                let v = cur[..vlen].to_vec();
+                cur = &cur[vlen..];
+                Some(v)
+            } else {
+                None
+            };
+            let seq = u64::from_le_bytes([
+                cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
+            ]);
+            cur = &cur[8..];
+            mt_data.push((key, value, SequenceNumber::new(seq)));
+        }
+
+        let cutoff = u64::from_le_bytes([
+            cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
+        ]);
+        let cutoff_seq = SequenceNumber::new(cutoff);
+
+        // Now apply the snapshot view to the engine.
+        // 1. Rebuild live_sstables from pinned tables (re-open readers).
+        let mut new_live: Vec<(TableMetadata, SstableReader)> = Vec::new();
+        for meta in &pinned {
+            let sst_rel = RelativePath::new(&meta.path)?;
+            let sst_len = self.disk.file_len(&sst_rel).await?;
+            let mut sst_buf = vec![0u8; sst_len as usize];
+            self.disk.read_at(&sst_rel, 0, &mut sst_buf).await?;
+            let reader = SstableReader::open(sst_buf)?;
+            new_live.push((meta.clone(), reader));
+        }
+        // Sort newest-first
+        new_live.sort_by_key(|b| std::cmp::Reverse(b.0.table_id));
+
+        self.live_sstables = new_live;
+        self.manifest_state.live_tables = pinned.clone();
+
+        // 2. Replace memtable with the snapshot one.
+        let mut new_mem = Memtable::new();
+        for (key, value, seq) in mt_data {
+            match value {
+                Some(v) => new_mem.put(key, v, seq),
+                None => new_mem.delete(key, seq),
+            }
+        }
+        self.memtable = new_mem;
+
+        // 3. Update sequence / manifest last seq.
+        self.manifest_state.last_sequence = cutoff_seq;
+        self.stats.last_sequence = cutoff_seq.get().saturating_sub(1).max(0);
+        self.stats.memtable_entries = self.memtable.len() as u64;
+        self.stats.sstable_count = self.live_sstables.len() as u64;
+
+        // Decrement refs for the tables we just installed from this snapshot.
+        for meta in &pinned {
+            if let Some(count) = self.sstable_refcounts.get_mut(&meta.table_id) {
+                if *count > 0 {
+                    *count -= 1;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Small private helpers for snapshot (de)serialization.
+    #[allow(dead_code)]
+    fn take_u32(cur: &mut &[u8]) -> Result<u32> {
+        if cur.len() < 4 {
+            return Err(KayaError::invalid_argument("truncated snapshot u32"));
+        }
+        let v = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]);
+        *cur = &cur[4..];
+        Ok(v)
+    }
+
+    #[allow(dead_code)]
+    fn take_bytes(cur: &mut &[u8]) -> Result<Vec<u8>> {
+        let len = Self::take_u32(cur)? as usize;
+        if cur.len() < len {
+            return Err(KayaError::invalid_argument("truncated snapshot bytes"));
+        }
+        let bytes = cur[..len].to_vec();
+        *cur = &cur[len..];
+        Ok(bytes)
     }
 
     pub async fn flush(&mut self) -> Result<FlushResult> {

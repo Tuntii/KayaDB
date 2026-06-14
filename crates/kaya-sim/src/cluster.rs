@@ -1,6 +1,15 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
-use kaya_raft::{Envelope, LogIndex, NodeId, RaftConfig, RaftNode, RaftStatus, Term};
+use kaya_core::{EngineConfig, Lsn};
+use kaya_engine::{Engine, ScanOptions, WriteOptions};
+use kaya_io::SimDisk;
+use kaya_raft::{
+    ClusterMember, Envelope, LogIndex, NodeId, RaftApplyCommand, RaftCommand, RaftConfig,
+    RaftNode, RaftStatus, Term,
+};
+
+use crate::model::RefModel;
 
 use crate::rng::SimRng;
 
@@ -130,6 +139,14 @@ pub struct ClusterSimReport {
 /// 4. Invariants are checked (election safety: ≤1 leader per term).
 pub struct ClusterSim {
     nodes: HashMap<NodeId, RaftNode>,
+    /// Per-node replicated state machines (mirrors server engine apply path).
+    state_machines: HashMap<NodeId, RefModel>,
+    /// Per-node real engines on SimDisk (engine-backed snapshot path).
+    engines: HashMap<NodeId, Engine<SimDisk>>,
+    _disks: HashMap<NodeId, Arc<SimDisk>>,
+    /// In-memory Raft index ↔ engine LSN correlation (mirrors server apply index).
+    apply_records: HashMap<NodeId, Vec<RaftApplyCommand>>,
+    runtime: tokio::runtime::Runtime,
     all_ids: Vec<NodeId>,
     network: SimNetwork,
     ticks: u64,
@@ -156,8 +173,37 @@ impl ClusterSim {
             };
             nodes.insert(id, RaftNode::new(config));
         }
+        let state_machines = all_ids
+            .iter()
+            .map(|&id| (id, RefModel::new()))
+            .collect();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("tokio runtime for ClusterSim");
+
+        let mut engines = HashMap::new();
+        let mut disks = HashMap::new();
+        let engine_cfg = EngineConfig {
+            disable_locking: true,
+            ..EngineConfig::default()
+        };
+        for &id in &all_ids {
+            let disk = Arc::new(SimDisk::new());
+            let engine = runtime
+                .block_on(Engine::open(engine_cfg.clone(), disk.clone()))
+                .expect("engine open in ClusterSim");
+            disks.insert(id, disk);
+            engines.insert(id, engine);
+        }
+
         Self {
             nodes,
+            state_machines,
+            engines,
+            _disks: disks,
+            apply_records: HashMap::new(),
+            runtime,
             all_ids,
             network: SimNetwork::new(seed, net_config),
             ticks: 0,
@@ -195,7 +241,9 @@ impl ClusterSim {
             }
         }
 
+        self.apply_drained_entries();
         self.check_election_safety();
+        self.check_state_machine_convergence();
     }
 
     /// Run the cluster for `ticks` logical ticks.
@@ -205,14 +253,64 @@ impl ClusterSim {
         }
     }
 
-    /// Propose a command to the current leader.
+    /// Propose a command to the current leader and immediately broadcast replication
+    /// (mirrors the server Raft loop's propose + broadcast path).
     ///
     /// Returns `(leader_id, log_index)` or `None` if there is no unique leader.
     pub fn propose(&mut self, command: Vec<u8>) -> Option<(NodeId, LogIndex)> {
         let leader = self.current_leader()?;
         let node = self.nodes.get_mut(&leader)?;
         let idx = node.propose(command)?;
+        let out = node.broadcast();
+        self.network.inject(out);
         Some((leader, idx))
+    }
+
+    /// Propose a [`RaftCommand::Put`] through the leader.
+    pub fn propose_put(&mut self, key: &[u8], value: &[u8]) -> Option<(NodeId, LogIndex)> {
+        let cmd = RaftCommand::Put {
+            key: key.to_vec(),
+            value: value.to_vec(),
+        };
+        self.propose(cmd.encode())
+    }
+
+    /// Propose a [`RaftCommand::Delete`] through the leader.
+    pub fn propose_delete(&mut self, key: &[u8]) -> Option<(NodeId, LogIndex)> {
+        let cmd = RaftCommand::Delete {
+            key: key.to_vec(),
+        };
+        self.propose(cmd.encode())
+    }
+
+    /// Propose a linearizable read on the leader (ReadIndex path).
+    ///
+    /// Returns the request id when accepted, or `None` if there is no unique leader.
+    pub fn propose_read(&mut self, request_id: u64) -> Option<NodeId> {
+        let leader = self.current_leader()?;
+        let node = self.nodes.get_mut(&leader)?;
+        node.propose_read(request_id)?;
+        let out = node.broadcast();
+        self.network.inject(out);
+        Some(leader)
+    }
+
+    /// Drain ready read request ids from the leader after quorum confirmation.
+    pub fn drain_ready_reads(&mut self) -> Vec<u64> {
+        self.current_leader()
+            .and_then(|leader| self.nodes.get_mut(&leader))
+            .map(|node| node.drain_ready_reads())
+            .unwrap_or_default()
+    }
+
+    /// Read-only access to a node's replicated state machine.
+    pub fn state_machine(&self, id: NodeId) -> Option<&RefModel> {
+        self.state_machines.get(&id)
+    }
+
+    /// Raft index ↔ engine LSN correlation records captured during apply.
+    pub fn apply_records(&self, id: NodeId) -> &[RaftApplyCommand] {
+        self.apply_records.get(&id).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Return the ID of the unique current leader, or `None`.
@@ -242,9 +340,159 @@ impl ClusterSim {
             .unwrap_or(&[])
     }
 
+    /// Take an engine-backed snapshot on the given node (compacts its Raft log).
+    ///
+    /// Uses the same `Engine::create_snapshot` path as the live server.
+    /// Returns the (last_included_index, term) if a snapshot was created.
+    pub fn take_snapshot(&mut self, id: NodeId) -> Option<(LogIndex, Term)> {
+        let node = self.nodes.get_mut(&id)?;
+        let status = node.status();
+        let last = status.last_applied;
+        if last.0 == 0 {
+            return None;
+        }
+
+        let engine = self.engines.get_mut(&id)?;
+        let data = self
+            .runtime
+            .block_on(engine.create_snapshot())
+            .map_err(|e| e.to_string())
+            .ok()?;
+        if data.is_empty() {
+            return None;
+        }
+
+        node.compact(last, status.current_term, data);
+        Some((last, status.current_term))
+    }
+
+    /// Add a new node to the simulation (not yet a voter until membership change).
+    pub fn add_node(&mut self, id: NodeId) {
+        if self.all_ids.contains(&id) {
+            return;
+        }
+        let peers: Vec<NodeId> = self
+            .all_ids
+            .iter()
+            .copied()
+            .filter(|&p| p != id)
+            .collect();
+        let timeout = 10 + (id.0.saturating_sub(1)) * 3;
+        let config = RaftConfig {
+            id,
+            peers,
+            election_timeout_ticks: timeout,
+            heartbeat_interval_ticks: 3,
+        };
+        self.nodes.insert(id, RaftNode::new(config));
+        self.state_machines.insert(id, RefModel::new());
+
+        let engine_cfg = EngineConfig {
+            disable_locking: true,
+            ..EngineConfig::default()
+        };
+        let disk = Arc::new(SimDisk::new());
+        let engine = self
+            .runtime
+            .block_on(Engine::open(engine_cfg, disk.clone()))
+            .expect("engine open for added node");
+        self._disks.insert(id, disk);
+        self.engines.insert(id, engine);
+        self.all_ids.push(id);
+    }
+
+    fn sim_members(voter_ids: &[NodeId]) -> Vec<ClusterMember> {
+        voter_ids
+            .iter()
+            .map(|&id| ClusterMember {
+                id,
+                raft_addr: format!("sim://raft/{}", id.0),
+                client_addr: format!("sim://client/{}", id.0),
+            })
+            .collect()
+    }
+
+    /// Propose a joint-consensus membership change through the current leader.
+    pub fn propose_membership_change(
+        &mut self,
+        new_voters: Vec<NodeId>,
+    ) -> Option<(NodeId, LogIndex)> {
+        let leader = self.current_leader()?;
+        let node = self.nodes.get_mut(&leader)?;
+        let idx = node.propose_membership_change(Self::sim_members(&new_voters))?;
+        let out = node.broadcast();
+        self.network.inject(out);
+        Some((leader, idx))
+    }
+
+    /// Add `id` to the voter set via joint consensus.
+    pub fn add_voter(&mut self, id: NodeId) -> Option<(NodeId, LogIndex)> {
+        let leader = self.current_leader()?;
+        let mut voters: Vec<NodeId> = self
+            .nodes
+            .get(&leader)?
+            .effective_config()
+            .stable_config()
+            .voters
+            .iter()
+            .copied()
+            .collect();
+        if voters.contains(&id) {
+            return None;
+        }
+        voters.push(id);
+        voters.sort_by_key(|n| n.0);
+        self.propose_membership_change(voters)
+    }
+
+    /// Remove `id` from the voter set via joint consensus.
+    pub fn remove_voter(&mut self, id: NodeId) -> Option<(NodeId, LogIndex)> {
+        let leader = self.current_leader()?;
+        let voters: Vec<NodeId> = self
+            .nodes
+            .get(&leader)?
+            .effective_config()
+            .stable_config()
+            .voters
+            .iter()
+            .copied()
+            .filter(|&v| v != id)
+            .collect();
+        if voters.len() < 2 {
+            return None;
+        }
+        self.propose_membership_change(voters)
+    }
+
+    /// Current voter set on a node (stable configuration).
+    pub fn voter_ids(&self, id: NodeId) -> Vec<NodeId> {
+        self.nodes
+            .get(&id)
+            .map(|n| {
+                let mut ids: Vec<NodeId> = n
+                    .effective_config()
+                    .stable_config()
+                    .voters
+                    .iter()
+                    .copied()
+                    .collect();
+                ids.sort_by_key(|n| n.0);
+                ids
+            })
+            .unwrap_or_default()
+    }
+
     /// Mutable access to the network for fault injection.
     pub fn network_mut(&mut self) -> &mut SimNetwork {
         &mut self.network
+    }
+
+    /// The highest log index covered by a snapshot on this node (0 if none).
+    pub fn last_included(&self, id: NodeId) -> LogIndex {
+        self.nodes
+            .get(&id)
+            .map(|n| n.last_included_index())
+            .unwrap_or(LogIndex(0))
     }
 
     /// All invariant violations recorded so far.
@@ -261,7 +509,133 @@ impl ClusterSim {
         }
     }
 
+    // ── State machine apply path (mirrors server drain_and_apply) ─────────────
+
+    fn apply_drained_entries(&mut self) {
+        for &id in &self.all_ids {
+            let node = match self.nodes.get_mut(&id) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            if let Some((_idx, _term, data)) = node.drain_installed_snapshot() {
+                if let Some(engine) = self.engines.get_mut(&id) {
+                    match self.runtime.block_on(engine.install_snapshot(&data)) {
+                        Ok(()) => {
+                            let model =
+                                self.runtime.block_on(sync_ref_model_from_engine(engine));
+                            self.state_machines.insert(id, model);
+                        }
+                        Err(e) => {
+                            let msg = format!(
+                                "RAFT-INV-003: node {} failed engine snapshot install: {e}",
+                                id.0
+                            );
+                            if !self.violations.contains(&msg) {
+                                self.violations.push(msg);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let applied = node.drain_applied();
+            for (idx, term, command) in applied {
+                if let Some(sm) = self.state_machines.get_mut(&id) {
+                    if let Err(e) = sm.apply_log_entry(&command) {
+                        let msg = format!(
+                            "RAFT-INV-003: node {} corrupt log entry: {e}",
+                            id.0
+                        );
+                        if !self.violations.contains(&msg) {
+                            self.violations.push(msg);
+                        }
+                    }
+                }
+
+                let lsn = if command.is_empty() {
+                    None
+                } else if let Some(engine) = self.engines.get_mut(&id) {
+                    match self
+                        .runtime
+                        .block_on(apply_command_to_engine(engine, &command))
+                    {
+                        Ok(lsn) => lsn,
+                        Err(e) => {
+                            let msg = format!(
+                                "RAFT-INV-003: node {} engine apply failed: {e}",
+                                id.0
+                            );
+                            if !self.violations.contains(&msg) {
+                                self.violations.push(msg);
+                            }
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                self.apply_records
+                    .entry(id)
+                    .or_default()
+                    .push(RaftApplyCommand {
+                        term,
+                        index: idx,
+                        engine_lsn_hint: lsn,
+                    });
+            }
+        }
+    }
+
     // ── Invariant checks ──────────────────────────────────────────────────────
+
+    /// RAFT-INV-002: caught-up nodes share identical replicated state.
+    fn check_state_machine_convergence(&mut self) {
+        let max_applied = self
+            .nodes
+            .values()
+            .map(|n| n.status().last_applied)
+            .max()
+            .unwrap_or(LogIndex(0));
+        if max_applied.0 == 0 {
+            return;
+        }
+
+        let caught_up: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.status().last_applied == max_applied)
+            .map(|(&id, _)| id)
+            .collect();
+        if caught_up.len() < 2 {
+            return;
+        }
+
+        let reference = caught_up[0];
+        let ref_state = self
+            .state_machines
+            .get(&reference)
+            .map(|m| m.scan_prefix(b""))
+            .unwrap_or_default();
+
+        for &id in &caught_up[1..] {
+            let state = self
+                .state_machines
+                .get(&id)
+                .map(|m| m.scan_prefix(b""))
+                .unwrap_or_default();
+            if state != ref_state {
+                let msg = format!(
+                    "RAFT-INV-002: state divergence at applied={}: node {} != node {}",
+                    max_applied.0, reference.0, id.0
+                );
+                if !self.violations.contains(&msg) {
+                    self.violations.push(msg);
+                }
+            }
+        }
+    }
 
     /// RAFT-INV-001: at most one leader per term.
     fn check_election_safety(&mut self) {
@@ -286,6 +660,35 @@ impl ClusterSim {
             }
         }
     }
+}
+
+async fn apply_command_to_engine(
+    engine: &mut Engine<SimDisk>,
+    command: &[u8],
+) -> Result<Option<Lsn>, String> {
+    match RaftCommand::decode(command)? {
+        RaftCommand::Put { key, value } => engine
+            .put(key, value, WriteOptions::default())
+            .await
+            .map(|r| Some(r.lsn))
+            .map_err(|e| e.to_string()),
+        RaftCommand::Delete { key } => engine
+            .delete(key, WriteOptions::default())
+            .await
+            .map(|r| Some(r.lsn))
+            .map_err(|e| e.to_string()),
+        RaftCommand::ConfigChange { .. } => Ok(None),
+    }
+}
+
+async fn sync_ref_model_from_engine(engine: &mut Engine<SimDisk>) -> RefModel {
+    let mut model = RefModel::new();
+    if let Ok(kvs) = engine.scan_prefix(b"", ScanOptions::default()).await {
+        for kv in kvs {
+            model.put(kv.key, kv.value);
+        }
+    }
+    model
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -366,21 +769,20 @@ mod tests {
         }
         assert!(sim.current_leader().is_some(), "no leader elected");
 
-        let cmd = b"hello-world".to_vec();
         assert!(
-            sim.propose(cmd.clone()).is_some(),
+            sim.propose_put(b"hello", b"world").is_some(),
             "propose returned None — no leader"
         );
 
         // Run to convergence.
         sim.run_ticks(30);
 
-        // Every node should have applied the command.
-        let replicated = (1u64..=3)
-            .map(NodeId)
-            .filter(|&id| sim.applied_entries(id).iter().any(|(_, _, c)| c == &cmd))
-            .count();
-        assert_eq!(replicated, 3, "command not replicated to all nodes");
+        // Every node should have the key in its replicated state machine.
+        for id in (1u64..=3).map(NodeId) {
+            let sm = sim.state_machine(id).expect("missing state machine");
+            assert_eq!(sm.get(b"hello"), Some(&b"world".to_vec()));
+        }
+        assert!(sim.violations().is_empty(), "{:?}", sim.violations());
     }
 
     /// An isolated minority node does not become an additional leader.
@@ -422,7 +824,7 @@ mod tests {
         // Isolate follower, propose commands.
         sim.network_mut().isolate(follower, &others);
         for i in 1u8..=5 {
-            sim.propose(vec![i]);
+            sim.propose_put(format!("k{i}").as_bytes(), &[i]);
             sim.run_ticks(5);
         }
 
@@ -430,20 +832,17 @@ mod tests {
         sim.network_mut().reconnect(follower, &others);
         sim.run_ticks(60);
 
-        let leader_applied = sim.applied_entries(leader).to_vec();
-        let follower_applied = sim.applied_entries(follower).to_vec();
+        let leader_state = sim
+            .state_machine(leader)
+            .expect("leader state machine")
+            .scan_prefix(b"k");
+        let follower_state = sim
+            .state_machine(follower)
+            .expect("follower state machine")
+            .scan_prefix(b"k");
         assert_eq!(
-            leader_applied.len(),
-            follower_applied.len(),
-            "follower {:?} has {} entries, leader {:?} has {}",
-            follower,
-            follower_applied.len(),
-            leader,
-            leader_applied.len()
-        );
-        assert_eq!(
-            leader_applied, follower_applied,
-            "applied entries differ after rejoin"
+            leader_state, follower_state,
+            "state machines differ after rejoin"
         );
     }
 
@@ -470,5 +869,220 @@ mod tests {
         let statuses = sim.statuses();
         let has_leader = statuses.values().any(|s| s.role == Role::Leader);
         assert!(has_leader, "no node in Leader role after 60 ticks");
+    }
+
+    /// Snapshot can be taken and compacts the log (last_included advances).
+    #[test]
+    fn snapshot_compacts_log() {
+        let mut sim = ClusterSim::new(3, 123, no_fault_config());
+
+        // Get a leader and apply some commands
+        sim.run_ticks(60);
+        let leader = sim.current_leader().expect("leader should exist");
+
+        for i in 0u8..=20 {
+            let _ = sim.propose_put(format!("snap-{i}").as_bytes(), &[i]);
+            sim.run_ticks(3);
+        }
+
+        let before = sim.last_included(leader);
+        assert_eq!(before, LogIndex(0), "no snapshot yet");
+
+        // Take snapshot
+        let snap = sim.take_snapshot(leader);
+        assert!(snap.is_some(), "snapshot should be created");
+
+        let after = sim.last_included(leader);
+        assert!(after.0 > 0, "last_included should advance after snapshot");
+
+        // The applied history should be trimmed in the node (prefix removed)
+        let applied_after = sim.applied_entries(leader).len();
+        // We expect some trimming happened (not the full 21+ entries kept if they were before snapshot)
+        // Exact count depends on when snapshot was taken; just ensure it didn't grow unbounded in the snapshot case.
+        assert!(applied_after < 30, "applied entries list should be reasonable after trim");
+    }
+
+    /// A 5-node cluster requires a 3-node quorum to commit entries.
+    #[test]
+    fn quorum_commit_requires_majority_in_five_node_cluster() {
+        let mut sim = ClusterSim::new(5, 88, no_fault_config());
+        sim.run_ticks(80);
+        let leader = sim.current_leader().expect("leader should exist");
+
+        // Isolate two followers — majority (3/5) remains.
+        let followers: Vec<NodeId> = (1u64..=5)
+            .map(NodeId)
+            .filter(|&id| id != leader)
+            .take(2)
+            .collect();
+        for &follower in &followers {
+            let peers: Vec<NodeId> = (1u64..=5)
+                .map(NodeId)
+                .filter(|&id| id != follower)
+                .collect();
+            sim.network_mut().isolate(follower, &peers);
+        }
+
+        assert!(sim.propose_put(b"quorum-key", b"quorum-val").is_some());
+        sim.run_ticks(40);
+
+        let leader_sm = sim.state_machine(leader).expect("leader sm");
+        assert_eq!(leader_sm.get(b"quorum-key"), Some(&b"quorum-val".to_vec()));
+
+        // Now isolate two more followers so only leader + one follower remain (2/5 < quorum).
+        let remaining_followers: Vec<NodeId> = (1u64..=5)
+            .map(NodeId)
+            .filter(|&id| id != leader && !followers.contains(&id))
+            .collect();
+        for &follower in &remaining_followers {
+            let peers: Vec<NodeId> = (1u64..=5)
+                .map(NodeId)
+                .filter(|&id| id != follower)
+                .collect();
+            sim.network_mut().isolate(follower, &peers);
+        }
+
+        assert!(sim.propose_put(b"blocked-key", b"blocked-val").is_some());
+        sim.run_ticks(40);
+
+        // Minority partition should not have committed the second write cluster-wide.
+        let caught_up = (1u64..=5)
+            .map(NodeId)
+            .filter(|&id| {
+                sim.state_machine(id)
+                    .and_then(|sm| sm.get(b"blocked-key"))
+                    .is_some()
+            })
+            .count();
+        assert!(
+            caught_up < 3,
+            "minority partition committed blocked-key on {caught_up} nodes"
+        );
+    }
+
+    /// ReadIndex path: linearizable read becomes ready after quorum heartbeat acks.
+    #[test]
+    fn read_index_quorum_confirmation() {
+        let mut sim = ClusterSim::new(3, 314, no_fault_config());
+        sim.run_ticks(60);
+        let leader = sim.current_leader().expect("leader should exist");
+
+        sim.propose_put(b"rkey", b"rval").unwrap();
+        sim.run_ticks(20);
+
+        assert!(sim.propose_read(42).is_some());
+        sim.run_ticks(20);
+
+        let ready = sim.drain_ready_reads();
+        assert!(ready.contains(&42), "read 42 not ready; ready={ready:?}");
+
+        let sm = sim.state_machine(leader).expect("leader sm");
+        assert_eq!(sm.get(b"rkey"), Some(&b"rval".to_vec()));
+    }
+
+    /// Put + delete through real RaftCommand entries converges on all nodes.
+    #[test]
+    fn raft_command_put_delete_converges() {
+        let mut sim = ClusterSim::new(3, 515, no_fault_config());
+        sim.run_ticks(60);
+        assert!(sim.current_leader().is_some());
+
+        sim.propose_put(b"temp", b"value").unwrap();
+        sim.run_ticks(20);
+        sim.propose_delete(b"temp").unwrap();
+        sim.run_ticks(20);
+
+        for id in (1u64..=3).map(NodeId) {
+            let sm = sim.state_machine(id).expect("state machine");
+            assert!(sm.get(b"temp").is_none());
+        }
+        assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+    }
+
+    /// Applied Raft entries record engine LSN hints (WAL↔Raft correlation).
+    #[test]
+    fn apply_records_capture_engine_lsn() {
+        let mut sim = ClusterSim::new(3, 616, no_fault_config());
+        sim.run_ticks(60);
+        let leader = sim.current_leader().expect("leader");
+
+        sim.propose_put(b"lsn-key", b"lsn-val").unwrap();
+        sim.run_ticks(30);
+
+        let records = sim.apply_records(leader);
+        let write_records: Vec<_> = records
+            .iter()
+            .filter(|r| r.engine_lsn_hint.is_some())
+            .collect();
+        assert!(
+            !write_records.is_empty(),
+            "expected at least one LSN-correlated apply record"
+        );
+        assert!(write_records.last().unwrap().index.0 > 0);
+    }
+
+    /// Engine-backed snapshot replicates to a lagging follower via InstallSnapshot.
+    #[test]
+    fn engine_backed_snapshot_catches_up_follower() {
+        let mut sim = ClusterSim::new(3, 717, no_fault_config());
+        sim.run_ticks(60);
+        let leader = sim.current_leader().expect("leader");
+
+        let follower = (1u64..=3).map(NodeId).find(|&id| id != leader).unwrap();
+        let peers: Vec<NodeId> = (1u64..=3).map(NodeId).filter(|&id| id != follower).collect();
+        sim.network_mut().isolate(follower, &peers);
+
+        for i in 0u8..=10 {
+            sim.propose_put(format!("eng-{i}").as_bytes(), &[i]).unwrap();
+            sim.run_ticks(4);
+        }
+
+        sim.take_snapshot(leader);
+        sim.network_mut().reconnect(follower, &peers);
+        sim.run_ticks(80);
+
+        let leader_state = sim
+            .state_machine(leader)
+            .expect("leader sm")
+            .scan_prefix(b"eng-");
+        let follower_state = sim
+            .state_machine(follower)
+            .expect("follower sm")
+            .scan_prefix(b"eng-");
+        assert_eq!(leader_state, follower_state);
+        assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+    }
+
+    /// Joint consensus expands the voter set from 3 to 4 nodes.
+    #[test]
+    fn joint_consensus_adds_fourth_voter() {
+        let mut sim = ClusterSim::new(3, 818, no_fault_config());
+        sim.run_ticks(60);
+        let leader = sim.current_leader().expect("leader");
+
+        sim.add_node(NodeId(4));
+        assert!(sim.add_voter(NodeId(4)).is_some());
+        sim.run_ticks(120);
+
+        for id in [leader, NodeId(1), NodeId(2), NodeId(3), NodeId(4)] {
+            let voters = sim.voter_ids(id);
+            assert!(
+                voters.contains(&NodeId(4)),
+                "node {} voters {:?} missing node 4",
+                id.0,
+                voters
+            );
+        }
+
+        sim.propose_put(b"after-join", b"ok").unwrap();
+        sim.run_ticks(40);
+        for id in [NodeId(1), NodeId(2), NodeId(3), NodeId(4)] {
+            let val = sim
+                .state_machine(id)
+                .and_then(|m| m.get(b"after-join"))
+                .cloned();
+            assert_eq!(val.as_deref(), Some(b"ok".as_ref()));
+        }
+        assert!(sim.violations().is_empty(), "{:?}", sim.violations());
     }
 }

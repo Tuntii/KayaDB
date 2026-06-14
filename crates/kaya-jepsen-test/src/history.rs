@@ -52,17 +52,29 @@ impl History {
         }
     }
 
-    /// Record a completed operation.
+    /// Record a completed operation (start and end times set to the same instant).
     pub fn record(&self, client_id: usize, op: Op, result: OperationResult) {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let now = Instant::now();
+        self.record_timed(client_id, op, result, now, now);
+    }
+
+    /// Record a completed operation with explicit wall-clock interval.
+    pub fn record_timed(
+        &self,
+        client_id: usize,
+        op: Op,
+        result: OperationResult,
+        start_time: Instant,
+        end_time: Instant,
+    ) {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         self.operations.lock().unwrap().push(Operation {
             id,
             client_id,
             op,
             result,
-            start_time: now, // Simplified: use same time for start/end
-            end_time: now,
+            start_time,
+            end_time,
         });
     }
 
@@ -94,6 +106,44 @@ impl History {
         }
 
         checker.check_sequential()
+    }
+
+    /// Verify linearizability of a concurrent history (WGL algorithm).
+    ///
+    /// Uses wall-clock `start_time`/`end_time` on each operation, converted to
+    /// logical ticks for overlap detection.
+    pub fn check_concurrent(&self) -> Result<(), Vec<String>> {
+        let ops = self.operations.lock().unwrap();
+        if ops.is_empty() {
+            return Ok(());
+        }
+
+        let base = ops
+            .iter()
+            .map(|op| op.start_time)
+            .min()
+            .unwrap_or(self.start_time);
+
+        let mut checker = LinearizabilityChecker::new();
+        for op in ops.iter() {
+            let start_tick = op.start_time.duration_since(base).as_micros() as u64;
+            let end_tick = op.end_time.duration_since(base).as_micros() as u64;
+            let sim_result = match &op.result {
+                OperationResult::Ok => OpResult::Ok,
+                OperationResult::Value(v) => OpResult::Value(v.clone()),
+                OperationResult::Scan(items) => OpResult::Scan(items.clone()),
+                OperationResult::Error(e) => OpResult::Error(e.clone()),
+            };
+            checker.record_interval(
+                start_tick,
+                end_tick.max(start_tick + 1),
+                Some(op.client_id as u32),
+                op.op.clone(),
+                sim_result,
+            );
+        }
+
+        checker.check_concurrent()
     }
 
     /// Export history as JSONL trace.
@@ -163,6 +213,53 @@ pub struct HistoryStats {
     pub scans: usize,
     pub errors: usize,
     pub duration_ms: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kaya_sim::Op;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn check_concurrent_accepts_overlapping_puts() {
+        let history = History::new();
+        let t0 = Instant::now();
+        history.record_timed(
+            0,
+            Op::Put {
+                key: b"k".to_vec(),
+                value: b"v1".to_vec(),
+            },
+            OperationResult::Ok,
+            t0,
+            t0 + Duration::from_micros(10),
+        );
+        thread::sleep(Duration::from_micros(5));
+        let t1 = Instant::now();
+        history.record_timed(
+            1,
+            Op::Put {
+                key: b"k".to_vec(),
+                value: b"v2".to_vec(),
+            },
+            OperationResult::Ok,
+            t1,
+            t1 + Duration::from_micros(10),
+        );
+        let t2 = Instant::now();
+        history.record_timed(
+            0,
+            Op::Get {
+                key: b"k".to_vec(),
+            },
+            OperationResult::Value(Some(b"v2".to_vec())),
+            t2,
+            t2 + Duration::from_micros(5),
+        );
+        assert!(history.check_concurrent().is_ok());
+    }
 }
 
 impl std::fmt::Display for HistoryStats {

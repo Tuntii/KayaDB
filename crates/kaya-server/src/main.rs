@@ -17,12 +17,23 @@
 //!   # Node 3
 //!   kayadb-server --node-id 3 --raft-addr 127.0.0.1:7483 --client-addr 127.0.0.1:7381 \
 //!       --peer 1=127.0.0.1:7481 --peer 2=127.0.0.1:7482 --data ./data3
+//!
+//! ## Joining an existing cluster (node 4)
+//!
+//!   kayadb-server --join-cluster --node-id 4 --raft-addr 127.0.0.1:7484 \
+//!       --client-addr 127.0.0.1:7383 \
+//!       --peer 1=127.0.0.1:7481,127.0.0.1:7379 \
+//!       --peer 2=127.0.0.1:7482,127.0.0.1:7380 \
+//!       --peer 3=127.0.0.1:7483,127.0.0.1:7381 --data ./data4
+//!
+//! Then ask the leader to add the node (client opcode 7 / ADD_MEMBER).
 
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process;
 
+use kaya_server::security::{security_banner, validate_bind_addr};
 use kaya_server::ClusterConfig;
 use kaya_server::ClusterNode;
 
@@ -53,6 +64,20 @@ fn run() -> Result<(), String> {
 
     let data_dir = take_value(&mut args, "--data").unwrap_or_else(|| "./data".to_owned());
 
+    let allow_public_bind = args.iter().any(|a| a == "--allow-public-bind");
+    if allow_public_bind {
+        args.retain(|a| a != "--allow-public-bind");
+    }
+
+    let join_cluster = args.iter().any(|a| a == "--join-cluster");
+    if join_cluster {
+        args.retain(|a| a != "--join-cluster");
+    }
+
+    validate_bind_addr(raft_addr, allow_public_bind)?;
+    validate_bind_addr(client_addr, allow_public_bind)?;
+    eprintln!("{}", security_banner(allow_public_bind));
+
     // --peer <id>=<raft_addr>,<client_addr>  (may appear multiple times)
     let mut peers: Vec<(u64, SocketAddr, SocketAddr)> = Vec::new();
     loop {
@@ -65,17 +90,24 @@ fn run() -> Result<(), String> {
         }
     }
 
+    if join_cluster && peers.is_empty() {
+        return Err("--join-cluster requires at least one --peer seed address".to_owned());
+    }
+
     if !args.is_empty() {
         return Err(format!("unexpected arguments: {:?}", args));
     }
 
-    let config = ClusterConfig::new(
+    let mut config = ClusterConfig::new(
         node_id,
         PathBuf::from(data_dir),
         raft_addr,
         client_addr,
         peers,
     );
+    if join_cluster {
+        config = config.with_join_cluster();
+    }
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

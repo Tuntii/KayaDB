@@ -24,8 +24,9 @@ That split makes the implementation easier to test and pair naturally with the s
 - `RaftStatus`
 - `Role`
 - `Envelope` and message types
+- `RaftCommand` (Put/Delete log entry wire format)
 - `MemLog`
-- typed IDs such as `NodeId`, `Term`, and `LogIndex`
+- typed IDs such as `NodeId`, `Term`, `LogIndex`, and `RaftApplyCommand`
 
 ## Example shape
 
@@ -60,6 +61,12 @@ let _ = outbound;
 
 ## Scope and limitations
 
-This crate focuses on the current KayaDB prototype’s consensus loop. Features such as membership changes and snapshot/log compaction are outside the present scope.
+This crate focuses on the current KayaDB prototype’s consensus loop.
+
+**Work in progress (as of 2026-06-14):**
+- Raft log snapshots + compaction (`InstallSnapshot` RPC, compacted log prefix in `MemLog`).
+- Once stable, dynamic membership will be the next major addition.
+
+See ROADMAP.md and the production readiness items in `memory/TODOLIST.md`.
 
 See the [workspace README](../../README.md) and [architecture docs](../../docs/architecture.md) for the larger system context.

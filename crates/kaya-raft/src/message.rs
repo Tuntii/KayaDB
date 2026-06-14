@@ -47,6 +47,43 @@ pub enum Message {
     VoteResponse(VoteResponse),
     AppendRequest(AppendRequest),
     AppendResponse(AppendResponse),
+    InstallSnapshotRequest(InstallSnapshotRequest),
+    InstallSnapshotResponse(InstallSnapshotResponse),
+    // Dynamic membership (prototype scaffolding)
+    ConfigChangeRequest(ConfigChangeRequest),
+    ConfigChangeResponse(ConfigChangeResponse),
+}
+
+/// Simple membership change request (prototype; full joint consensus later).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigChangeRequest {
+    pub term: Term,
+    pub old_peers: Vec<NodeId>,
+    pub new_peers: Vec<NodeId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigChangeResponse {
+    pub term: Term,
+    pub success: bool,
+}
+
+/// Sent by leader to install a snapshot on a follower that is far behind
+/// or is a new node (Raft §7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallSnapshotRequest {
+    pub term: Term,
+    pub leader_id: NodeId,
+    pub last_included_index: LogIndex,
+    pub last_included_term: Term,
+    /// Opaque bytes representing the state machine snapshot at `last_included_index`.
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallSnapshotResponse {
+    pub term: Term,
+    pub success: bool,
 }
 
 /// A directed message between two Raft nodes.

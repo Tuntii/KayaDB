@@ -12,6 +12,9 @@
 - [Using KayaDB](cli-reference.md)
   - [CLI Reference (kayactl)](cli-reference.md)
   - [Client Library](getting-started.md#tcp-client)
+  - [Client Protocol Spec](clients/client-protocol-spec.md)
+  - [Wire Protocol](clients/client-wire-protocol.md)
+  - [Go Client Guide](clients/go-client.md)
 
 - [Architecture & Internals](architecture.md)
   - [Architecture Overview](architecture.md)

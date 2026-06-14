@@ -1,5 +1,8 @@
+pub mod apply_index;
 pub mod cluster;
 pub mod command;
+pub mod membership;
+pub mod security;
 
 #[cfg(test)]
 mod integration_tests;

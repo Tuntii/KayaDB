@@ -10,6 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 publish = false
 
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
 kaya-core.workspace = true
 kaya-io.workspace = true

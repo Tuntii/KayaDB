@@ -1,1 +1,5 @@
-// Benchmark-only crate. All benchmarks are in benches/.
+//! Benchmark harness and reporting utilities for KayaDB.
+
+pub mod report;
+
+pub use report::BenchmarkReport;

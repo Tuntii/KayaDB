@@ -1,7 +1,10 @@
 #[cfg(test)]
 mod tests {
     use crate::cluster::{ClusterConfig, ClusterNode};
-    use kaya_net::{decode_value_payload, encode_key_payload, encode_put_payload, roundtrip};
+    use kaya_net::{
+        decode_value_payload, encode_key_payload, encode_member_payload, encode_put_payload,
+        encode_remove_member_payload, roundtrip,
+    };
     use kaya_sim::{LinearizabilityChecker, Op, OpResult};
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
@@ -18,6 +21,16 @@ mod tests {
             }
         }
         None
+    }
+
+    fn applied_index_from_stats(stats: &str) -> Option<u64> {
+        let needle = "\"applied_index\":";
+        let start = stats.find(needle)? + needle.len();
+        let rest = &stats[start..];
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        rest[..end].parse().ok()
     }
 
     #[tokio::test]
@@ -495,5 +508,299 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir1);
         let _ = std::fs::remove_dir_all(&data_dir2);
         let _ = std::fs::remove_dir_all(&data_dir3);
+    }
+
+    #[tokio::test]
+    async fn test_install_snapshot_over_tcp() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir1 = std::env::temp_dir().join(format!("kayadb_snap_n1_{}", test_id));
+        let data_dir2 = std::env::temp_dir().join(format!("kayadb_snap_n2_{}", test_id));
+        let data_dir3 = std::env::temp_dir().join(format!("kayadb_snap_n3_{}", test_id));
+
+        let r1 = get_free_port().await;
+        let c1 = get_free_port().await;
+        let r2 = get_free_port().await;
+        let c2 = get_free_port().await;
+        let r3 = get_free_port().await;
+        let c3 = get_free_port().await;
+
+        let raft_addr1: SocketAddr = format!("127.0.0.1:{}", r1).parse().unwrap();
+        let client_addr1: SocketAddr = format!("127.0.0.1:{}", c1).parse().unwrap();
+        let raft_addr2: SocketAddr = format!("127.0.0.1:{}", r2).parse().unwrap();
+        let client_addr2: SocketAddr = format!("127.0.0.1:{}", c2).parse().unwrap();
+        let raft_addr3: SocketAddr = format!("127.0.0.1:{}", r3).parse().unwrap();
+        let client_addr3: SocketAddr = format!("127.0.0.1:{}", c3).parse().unwrap();
+
+        let peers1 = vec![(2, raft_addr2, client_addr2), (3, raft_addr3, client_addr3)];
+        let peers2 = vec![(1, raft_addr1, client_addr1), (3, raft_addr3, client_addr3)];
+        let peers3 = vec![(1, raft_addr1, client_addr1), (2, raft_addr2, client_addr2)];
+
+        let config1 = ClusterConfig::new(1, &data_dir1, raft_addr1, client_addr1, peers1);
+        let config2 = ClusterConfig::new(2, &data_dir2, raft_addr2, client_addr2, peers2);
+        let config3 = ClusterConfig::new(3, &data_dir3, raft_addr3, client_addr3, peers3);
+
+        let handle1 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config1).run().await;
+        });
+        let mut handle2 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config2).run().await;
+        });
+        let mut handle3 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config3).run().await;
+        });
+
+        let mut leader_addr = None;
+        let mut leader_id = None;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr1).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr1);
+                leader_id = Some(1);
+                break;
+            }
+            if check_health(client_addr2).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr2);
+                leader_id = Some(2);
+                break;
+            }
+            if check_health(client_addr3).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr3);
+                leader_id = Some(3);
+                break;
+            }
+        }
+        let leader_addr = leader_addr.expect("no leader elected");
+        let leader_id = leader_id.unwrap();
+
+        // Stop one follower while the leader compacts a large write batch.
+        let (crashed_client_addr, restart_config) = if leader_id == 3 {
+            handle2.abort();
+            (client_addr2, ClusterConfig::new(
+                2,
+                &data_dir2,
+                raft_addr2,
+                client_addr2,
+                vec![(1, raft_addr1, client_addr1), (3, raft_addr3, client_addr3)],
+            ))
+        } else {
+            handle3.abort();
+            (client_addr3, ClusterConfig::new(
+                3,
+                &data_dir3,
+                raft_addr3,
+                client_addr3,
+                vec![(1, raft_addr1, client_addr1), (2, raft_addr2, client_addr2)],
+            ))
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let mut client = kaya_client::KayaClient::connect(leader_addr)
+            .await
+            .unwrap();
+        for i in 0..128u16 {
+            let key = format!("snap-{i}");
+            let val = format!("v{i}");
+            client.put(key.as_bytes(), val.as_bytes()).await.unwrap();
+        }
+
+        let mut leader_compacted = false;
+        for _ in 0..80 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Ok(mut leader_client) = kaya_client::KayaClient::connect(leader_addr).await {
+                if let Ok(stats) = leader_client.stats().await {
+                    if applied_index_from_stats(&stats).unwrap_or(0) >= 64 {
+                        leader_compacted = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(leader_compacted, "leader did not reach compaction threshold");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let restart_handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(restart_config).run().await;
+        });
+        if leader_id == 3 {
+            handle2 = restart_handle;
+        } else {
+            handle3 = restart_handle;
+        }
+
+        let mut follower_caught_up = false;
+        let mut last_follower_applied = 0u64;
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Ok(mut follower_client) =
+                kaya_client::KayaClient::connect(crashed_client_addr).await
+            {
+                if let Ok(stats) = follower_client.stats().await {
+                    last_follower_applied = applied_index_from_stats(&stats).unwrap_or(0);
+                    if last_follower_applied >= 64 {
+                        follower_caught_up = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            follower_caught_up,
+            "follower did not catch up via InstallSnapshot within timeout (last applied={last_follower_applied})"
+        );
+
+        let val = client.get(b"snap-127").await.unwrap();
+        assert_eq!(val, Some(b"v127".to_vec()));
+
+        handle1.abort();
+        handle2.abort();
+        handle3.abort();
+        let _ = std::fs::remove_dir_all(&data_dir1);
+        let _ = std::fs::remove_dir_all(&data_dir2);
+        let _ = std::fs::remove_dir_all(&data_dir3);
+    }
+
+    #[tokio::test]
+    async fn test_join_cluster_membership_over_tcp() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir1 = std::env::temp_dir().join(format!("kayadb_mem_n1_{}", test_id));
+        let data_dir2 = std::env::temp_dir().join(format!("kayadb_mem_n2_{}", test_id));
+        let data_dir3 = std::env::temp_dir().join(format!("kayadb_mem_n3_{}", test_id));
+        let data_dir4 = std::env::temp_dir().join(format!("kayadb_mem_n4_{}", test_id));
+
+        let r1 = get_free_port().await;
+        let c1 = get_free_port().await;
+        let r2 = get_free_port().await;
+        let c2 = get_free_port().await;
+        let r3 = get_free_port().await;
+        let c3 = get_free_port().await;
+        let r4 = get_free_port().await;
+        let c4 = get_free_port().await;
+
+        let raft_addr1: SocketAddr = format!("127.0.0.1:{}", r1).parse().unwrap();
+        let client_addr1: SocketAddr = format!("127.0.0.1:{}", c1).parse().unwrap();
+        let raft_addr2: SocketAddr = format!("127.0.0.1:{}", r2).parse().unwrap();
+        let client_addr2: SocketAddr = format!("127.0.0.1:{}", c2).parse().unwrap();
+        let raft_addr3: SocketAddr = format!("127.0.0.1:{}", r3).parse().unwrap();
+        let client_addr3: SocketAddr = format!("127.0.0.1:{}", c3).parse().unwrap();
+        let raft_addr4: SocketAddr = format!("127.0.0.1:{}", r4).parse().unwrap();
+        let client_addr4: SocketAddr = format!("127.0.0.1:{}", c4).parse().unwrap();
+
+        let peers1 = vec![(2, raft_addr2, client_addr2), (3, raft_addr3, client_addr3)];
+        let peers2 = vec![(1, raft_addr1, client_addr1), (3, raft_addr3, client_addr3)];
+        let peers3 = vec![(1, raft_addr1, client_addr1), (2, raft_addr2, client_addr2)];
+
+        let config1 = ClusterConfig::new(1, &data_dir1, raft_addr1, client_addr1, peers1);
+        let config2 = ClusterConfig::new(2, &data_dir2, raft_addr2, client_addr2, peers2);
+        let config3 = ClusterConfig::new(3, &data_dir3, raft_addr3, client_addr3, peers3);
+
+        let handle1 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config1).run().await;
+        });
+        let handle2 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config2).run().await;
+        });
+        let handle3 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config3).run().await;
+        });
+
+        let mut leader_addr = None;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr1).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr1);
+                break;
+            }
+            if check_health(client_addr2).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr2);
+                break;
+            }
+            if check_health(client_addr3).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr3);
+                break;
+            }
+        }
+        let leader_addr = leader_addr.expect("no leader elected");
+
+        let seeds = vec![
+            (1, raft_addr1, client_addr1),
+            (2, raft_addr2, client_addr2),
+            (3, raft_addr3, client_addr3),
+        ];
+        let config4 = ClusterConfig::new(4, &data_dir4, raft_addr4, client_addr4, seeds)
+            .with_join_cluster();
+        let handle4 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config4).run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let add_payload = encode_member_payload(
+            4,
+            &raft_addr4.to_string(),
+            &client_addr4.to_string(),
+        );
+        let (status, body) = roundtrip(leader_addr, 7, &add_payload).await.unwrap();
+        assert_eq!(status, 0, "ADD_MEMBER failed: {:?}", String::from_utf8(body));
+
+        let mut joined = false;
+        for _ in 0..150 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Ok(mut n4) = kaya_client::KayaClient::connect(client_addr4).await {
+                if let Ok(stats) = n4.stats().await {
+                    if stats.contains("\"peer_count\":3") {
+                        joined = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(joined, "node 4 was not included in the cluster roster");
+
+        let mut client = kaya_client::KayaClient::connect(leader_addr)
+            .await
+            .unwrap();
+        client
+            .put(b"membership-key", b"membership-val")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let got = client.get(b"membership-key").await.unwrap();
+        assert_eq!(got, Some(b"membership-val".to_vec()));
+
+        let remove_payload = encode_remove_member_payload(4);
+        let (status, body) = roundtrip(leader_addr, 8, &remove_payload).await.unwrap();
+        assert_eq!(
+            status, 0,
+            "REMOVE_MEMBER failed: {:?}",
+            String::from_utf8(body)
+        );
+
+        let mut removed = false;
+        for _ in 0..150 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Ok(mut n1) = kaya_client::KayaClient::connect(client_addr1).await {
+                if let Ok(stats) = n1.stats().await {
+                    if stats.contains("\"peer_count\":2") {
+                        removed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(removed, "node 4 was not removed from the cluster roster");
+
+        handle1.abort();
+        handle2.abort();
+        handle3.abort();
+        handle4.abort();
+        let _ = std::fs::remove_dir_all(&data_dir1);
+        let _ = std::fs::remove_dir_all(&data_dir2);
+        let _ = std::fs::remove_dir_all(&data_dir3);
+        let _ = std::fs::remove_dir_all(&data_dir4);
     }
 }

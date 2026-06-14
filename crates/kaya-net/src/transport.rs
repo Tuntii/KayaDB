@@ -28,6 +28,7 @@ use kaya_raft::{Envelope, NodeId};
 
 use crate::codec::{decode_envelope, encode_envelope};
 use crate::roster::NodeRoster;
+use crate::DEFAULT_MAX_FRAME_LEN;
 
 // ── response status codes ─────────────────────────────────────────────────────
 
@@ -127,7 +128,7 @@ async fn accept_raft_loop(listener: TcpListener, tx: mpsc::Sender<Envelope>) {
 /// Wire: `frame_len(u32 LE) | payload(frame_len bytes)`.
 async fn read_raft_envelope(stream: &mut TcpStream) -> std::io::Result<Envelope> {
     let len = stream.read_u32_le().await? as usize;
-    if len > 32 * 1024 * 1024 {
+    if len > DEFAULT_MAX_FRAME_LEN as usize {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("raft frame too large: {len}"),
@@ -151,7 +152,7 @@ pub async fn read_client_frame(stream: &mut TcpStream) -> std::io::Result<(u8, V
             "empty client frame",
         ));
     }
-    if len > 64 * 1024 * 1024 {
+    if len > DEFAULT_MAX_FRAME_LEN as usize {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "client frame too large",

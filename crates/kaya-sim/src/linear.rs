@@ -45,6 +45,8 @@ pub struct HistoryEntry {
     pub start_tick: u64,
     /// Logical tick when the operation's result was observed.
     pub end_tick: u64,
+    /// Optional client identifier for concurrent histories.
+    pub client_id: Option<u32>,
     pub op: Op,
     pub result: OpResult,
 }
@@ -85,6 +87,7 @@ impl LinearizabilityChecker {
         self.history.push(HistoryEntry {
             start_tick,
             end_tick,
+            client_id: None,
             op,
             result,
         });
@@ -92,12 +95,39 @@ impl LinearizabilityChecker {
 
     /// Append one complete operation using auto-incrementing ticks.
     pub fn record_next(&mut self, op: Op, result: OpResult) {
+        self.record_next_with_client(op, result, None);
+    }
+
+    /// Append with explicit client id and tick interval (for concurrent histories).
+    pub fn record_interval(
+        &mut self,
+        start_tick: u64,
+        end_tick: u64,
+        client_id: Option<u32>,
+        op: Op,
+        result: OpResult,
+    ) {
+        if end_tick > self.next_tick {
+            self.next_tick = end_tick + 1;
+        }
+        self.history.push(HistoryEntry {
+            start_tick,
+            end_tick,
+            client_id,
+            op,
+            result,
+        });
+    }
+
+    /// Append using auto ticks with optional client id.
+    pub fn record_next_with_client(&mut self, op: Op, result: OpResult, client_id: Option<u32>) {
         let start = self.next_tick;
         let end = start + 1;
         self.next_tick = end + 1;
         self.history.push(HistoryEntry {
             start_tick: start,
             end_tick: end,
+            client_id,
             op,
             result,
         });
@@ -213,6 +243,112 @@ impl LinearizabilityChecker {
         }
     }
 
+    /// Verify a concurrent history using the Wing-Gong linearization search.
+    ///
+    /// Operations `i` and `j` where `i.end_tick < j.start_tick` must appear before `j`
+    /// in any valid linearization. Returns `Ok(())` when at least one linearization
+    /// matches all observed GET/SCAN results.
+    pub fn check_concurrent(&self) -> Result<(), Vec<String>> {
+        const MAX_OPS: usize = 14;
+        if self.history.len() > MAX_OPS {
+            return Err(vec![format!(
+                "concurrent check supports at most {MAX_OPS} ops (have {})",
+                self.history.len()
+            )]);
+        }
+        if self.history.is_empty() {
+            return Ok(());
+        }
+
+        // Non-overlapping histories can use the fast sequential path.
+        let mut sequential = true;
+        for i in 0..self.history.len() {
+            for j in (i + 1)..self.history.len() {
+                let a = &self.history[i];
+                let b = &self.history[j];
+                if a.start_tick < b.end_tick && b.start_tick < a.end_tick {
+                    sequential = false;
+                    break;
+                }
+            }
+            if !sequential {
+                break;
+            }
+        }
+        if sequential {
+            return self.check_sequential();
+        }
+
+        let n = self.history.len();
+        let mut must_before = vec![vec![false; n]; n];
+        for i in 0..n {
+            for j in 0..n {
+                if i != j && self.history[i].end_tick < self.history[j].start_tick {
+                    must_before[i][j] = true;
+                }
+            }
+        }
+
+        let mut order = Vec::with_capacity(n);
+        let mut used = vec![false; n];
+        let mut found = false;
+        let mut last_error: Vec<String> = Vec::new();
+
+        fn dfs(
+            history: &[HistoryEntry],
+            must_before: &[Vec<bool>],
+            order: &mut Vec<usize>,
+            used: &mut [bool],
+            found: &mut bool,
+            last_error: &mut Vec<String>,
+        ) {
+            if *found {
+                return;
+            }
+            if order.len() == history.len() {
+                match verify_linearization(history, order) {
+                    Ok(()) => *found = true,
+                    Err(e) => *last_error = e,
+                }
+                return;
+            }
+            for i in 0..history.len() {
+                if used[i] {
+                    continue;
+                }
+                let blocked = order.iter().any(|&j| must_before[j][i]);
+                if blocked {
+                    continue;
+                }
+                used[i] = true;
+                order.push(i);
+                dfs(history, must_before, order, used, found, last_error);
+                order.pop();
+                used[i] = false;
+                if *found {
+                    return;
+                }
+            }
+        }
+
+        dfs(
+            &self.history,
+            &must_before,
+            &mut order,
+            &mut used,
+            &mut found,
+            &mut last_error,
+        );
+
+        if found {
+            Ok(())
+        } else if last_error.is_empty() {
+            Err(vec!["no linearization extends the real-time order".to_owned()])
+        } else {
+            Err(last_error)
+        }
+    }
+
     /// Convert the recorded history into a JSONL trace string compatible with simulation replayer.
     pub fn to_trace_string(&self, seed: u64) -> String {
         let mut lines = Vec::new();
@@ -291,6 +427,63 @@ impl LinearizabilityChecker {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn verify_linearization(history: &[HistoryEntry], order: &[usize]) -> Result<(), Vec<String>> {
+    let ordered: Vec<&HistoryEntry> = order.iter().map(|&i| &history[i]).collect();
+    let mut model: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+    let mut violations = Vec::new();
+
+    for (idx, entry) in ordered.iter().enumerate() {
+        match &entry.op {
+            Op::Put { key, value } => {
+                if entry.result == OpResult::Ok {
+                    model.insert(key.clone(), value.clone());
+                }
+            }
+            Op::Delete { key } => {
+                if entry.result == OpResult::Ok {
+                    model.remove(key.as_slice());
+                }
+            }
+            Op::Get { key } => {
+                if let OpResult::Value(observed) = &entry.result {
+                    let expected = model.get(key.as_slice()).cloned();
+                    if *observed != expected {
+                        violations.push(format!(
+                            "lin[{idx}] GET key={} expected={} observed={}",
+                            hex_enc(key),
+                            option_hex(expected.as_deref()),
+                            option_hex(observed.as_deref()),
+                        ));
+                    }
+                }
+            }
+            Op::Scan { prefix } => {
+                if let OpResult::Scan(observed) = &entry.result {
+                    let expected: Vec<(Vec<u8>, Vec<u8>)> = model
+                        .range(prefix.clone()..)
+                        .take_while(|(k, _)| k.starts_with(prefix.as_slice()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    if *observed != expected {
+                        violations.push(format!(
+                            "lin[{idx}] SCAN prefix={} expected {} pairs got {}",
+                            hex_enc(prefix),
+                            expected.len(),
+                            observed.len(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations)
+    }
+}
 
 fn hex_enc(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -408,6 +601,23 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_overlapping_put_get_consistent() {
+        let mut checker = LinearizabilityChecker::new();
+        // Two overlapping puts to different keys, then concurrent gets.
+        checker.record_interval(0, 2, Some(1), Op::Put { key: b"a".to_vec(), value: b"1".to_vec() }, OpResult::Ok);
+        checker.record_interval(1, 3, Some(2), Op::Put { key: b"b".to_vec(), value: b"2".to_vec() }, OpResult::Ok);
+        checker.record_interval(2, 4, Some(1), Op::Get { key: b"a".to_vec() }, OpResult::Value(Some(b"1".to_vec())));
+        checker.record_interval(2, 4, Some(2), Op::Get { key: b"b".to_vec() }, OpResult::Value(Some(b"2".to_vec())));
+        assert!(checker.check_concurrent().is_ok());
+    }
+
+    fn concurrent_stale_read_is_violation() {
+        let mut checker = LinearizabilityChecker::new();
+        checker.record_interval(0, 2, Some(1), Op::Put { key: b"k".to_vec(), value: b"v2".to_vec() }, OpResult::Ok);
+        checker.record_interval(1, 3, Some(2), Op::Get { key: b"k".to_vec() }, OpResult::Value(Some(b"v1".to_vec())));
+        assert!(checker.check_concurrent().is_err());
+    }
+
     fn scan_missing_entry_is_violation() {
         let mut checker = LinearizabilityChecker::new();
         checker.record_next(

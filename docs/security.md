@@ -54,6 +54,20 @@ If any of those assumptions are false in your environment, treat KayaDB as a loc
 
 For local demos, bind to `127.0.0.1`. For multi-host experiments, bind to a private subnet address and enforce firewall rules before starting the node.
 
+### Server enforcement (M11)
+
+| Control | Default | Override | Effect |
+|---|---|---|---|
+| Bind address | `127.0.0.1` | `--raft-addr` / `--client-addr` | Loopback-only unless explicitly widened |
+| Public bind guard | rejects `0.0.0.0` / `::` / non-loopback | `--allow-public-bind` | Prints security banner; still no auth/TLS |
+| Raft frame size | 64 MiB max | none (compile-time) | Oversized frames rejected at decode |
+| Client frame size | 64 MiB max | none (compile-time) | Malformed or huge payloads return errors |
+| Roster trust | static at startup | — | Unknown Raft `from` ids are dropped |
+
+`kayadb-server` validates bind addresses in `security.rs` before listeners start.
+Treat `--allow-public-bind` as an explicit operator acknowledgement that perimeter
+security (firewall, mTLS proxy, private VPC) is in place.
+
 ---
 
 ## 3. Transport Layer Encryption (TLS Wrapper)
@@ -148,7 +162,7 @@ Never paste inspection output from real datasets into public issue trackers unle
 - TLS/mTLS built into the server.
 - Encrypted storage files.
 - Multi-tenant isolation.
-- Dynamic cluster membership controls.
+- Automatic TLS or auth on membership/admin RPCs (ADD_MEMBER is leader-only but unauthenticated).
 - Audit logging suitable for compliance.
 - A hardened remote administration API.
 

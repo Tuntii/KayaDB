@@ -66,10 +66,10 @@ This README contains only a high-level overview + quick start.
 | Simulator | ✅ Implemented | Seeded workloads, trace replay, reference-model checks |
 | Fuzz targets | ✅ Implemented | WAL, SSTable, manifest, server command frame decoders |
 | Raft state machine | ✅ Prototype | Election, AppendEntries, commit index, simulation coverage |
-| TCP cluster mode | ✅ Prototype | Static membership, leader-routed client operations |
+| TCP cluster mode | ✅ Prototype | Joint-consensus membership, leader-routed client operations |
 | Async Rust client | ✅ Implemented | `kaya-client` with leader redirection support |
-| Operator CLI | ✅ Implemented | Local mode, server mode, inspect, stats, dry-run recovery |
-| Production hardening | 🚧 Planned | TLS/auth, dynamic membership, snapshots, Jepsen, eBPF |
+| Operator CLI | ✅ Implemented | Local mode, server mode, inspect, stats, `add-node`/`remove-node` |
+| Production hardening | 🚧 Planned | TLS/auth, authenticated admin RPCs, Jepsen Clojure suite, eBPF |
 
 > KayaDB is experimental. It is a serious systems project, but not yet a production database. See [security and deployment notes](docs/security.md) before exposing anything outside localhost.
 

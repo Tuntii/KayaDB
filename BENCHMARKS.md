@@ -58,7 +58,39 @@ KayaDB is designed from the ground up for maximum correctness and premium perfor
 
 ---
 
-## 4. Comparison to Baselines
+## 4. Benchmark Report Metadata (M11)
+
+Reproducible benchmark runs should capture environment context alongside raw timings.
+Use `kaya-bench::BenchmarkReport` or the helper scripts:
+
+```powershell
+.\scripts\bench-report.ps1
+```
+
+```bash
+./scripts/bench-report.sh
+```
+
+Each report row should include:
+
+| Field | Source |
+|---|---|
+| KayaDB commit | `KAYADB_GIT_COMMIT` env var or `git rev-parse HEAD` |
+| Build profile | `release` / `debug` |
+| OS / Arch | `env::consts::OS`, `env::consts::ARCH` |
+| Rustc version | `KAYADB_RUSTC` or `rustc -V` |
+| Bench name | e.g. `engine_workload`, `wal_append` |
+| Durability mode | `Relaxed` or `Strict` |
+| Dataset ops | operation count in the run |
+| Throughput | derived ops/sec |
+| Avg latency | nanoseconds per op |
+
+CI runs a smoke benchmark step (see `.github/workflows/ci.yml`) to ensure the
+bench crate and report helpers compile and execute.
+
+---
+
+## 5. Comparison to Baselines
 
 Compared to standard database engines:
 * **SQLite / Sled**: Sled and SQLite typically average around `10,000` to `20,000` writes/second under strict synchronous transaction modes on comparable hardware due to heavy transactional ACID isolation locks. KayaDB's LSM architecture achieves **159,870 writes/second** under strict durability, outperforming baseline KV stores by **`5x to 8x`**.

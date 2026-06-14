@@ -302,6 +302,20 @@ The status payload includes:
 
 Followers may return `NOT_LEADER` for some client operations. When a leader hint is available, `kayactl` retries a limited number of times against the hinted address.
 
+### `add-node` / `remove-node`
+
+Propose a joint-consensus membership change on the current leader (requires `--server`).
+
+```bash
+# Add node 4 after it has started with --join-cluster and seed peers
+kayactl --server 127.0.0.1:7379 add-node 4 127.0.0.1:7484 127.0.0.1:7383
+
+# Remove node 4 from the voter set (cannot shrink below 2 voters)
+kayactl --server 127.0.0.1:7379 remove-node 4
+```
+
+These map to client opcodes `ADD_MEMBER` (7) and `REMOVE_MEMBER` (8). The change commits asynchronously; poll `status` on all nodes until `peer_count` reflects the new roster.
+
 ---
 
 ## Exit codes

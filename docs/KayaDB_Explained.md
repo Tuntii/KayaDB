@@ -204,7 +204,7 @@ There is a complete Rust-native harness (`kaya-jepsen-test`) with:
 - History recording + linearizability checking
 - Process control scripts (cross-platform .sh/.ps1)
 
-Full external Jepsen (Clojure) is planned but deferred until snapshots and dynamic membership exist.
+Full external Jepsen (Clojure) is planned but deferred until the Rust-native harness and production hardening mature (snapshots and dynamic membership are now in place).
 
 ---
 

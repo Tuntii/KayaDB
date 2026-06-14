@@ -21,6 +21,9 @@
   * [Inspect Commands](cli-reference.md#inspect-commands)
   * [Recovery & Diagnostics](cli-reference.md#recovery)
 * [Client Library (kaya-client)](getting-started.md#tcp-client)
+* [Client Protocol Specification](clients/client-protocol-spec.md) — Multi-language client behavior (leader redirection, errors, operations)
+* [Client Wire Protocol](clients/client-wire-protocol.md) — Exact TCP framing & payloads (for client implementers)
+* [Go Client Guide](clients/go-client.md) — Bootstrap a correct Go client (reference implementation + code)
 
 ## Architecture & Internals
 

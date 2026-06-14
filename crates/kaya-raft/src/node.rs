@@ -1,6 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::{
+    cluster_config::{ClusterConfiguration, EffectiveConfig},
+    command::{ClusterMember, ConfigChangePhase, RaftCommand},
     log::{LogEntry, MemLog},
     message::{AppendRequest, AppendResponse, Envelope, Message, VoteRequest, VoteResponse},
     types::{LogIndex, NodeId, Term},
@@ -87,10 +89,21 @@ pub struct RaftNode {
     current_ack_seq: u64,
     last_sent_ack_seq: HashMap<NodeId, u64>,
     ready_reads: Vec<u64>,
+
+    // ── Snapshot state (for state machine to consume) ─────────────────────────
+    pending_snapshot: Option<(LogIndex, Term, Vec<u8>)>,
+
+    // ── Joint-consensus membership ────────────────────────────────────────────
+    effective_config: EffectiveConfig,
+    /// Target member set while a joint→final change is in flight.
+    pending_membership: Option<Vec<ClusterMember>>,
 }
 
 impl RaftNode {
     pub fn new(config: RaftConfig) -> Self {
+        let mut voters: BTreeSet<NodeId> = config.peers.iter().copied().collect();
+        voters.insert(config.id);
+        let effective_config = EffectiveConfig::stable(voters);
         Self {
             config,
             current_term: Term(0),
@@ -110,6 +123,9 @@ impl RaftNode {
             current_ack_seq: 0,
             last_sent_ack_seq: HashMap::new(),
             ready_reads: Vec::new(),
+            pending_snapshot: None,
+            effective_config,
+            pending_membership: None,
         }
     }
 
@@ -199,7 +215,7 @@ impl RaftNode {
                 }
             }
         }
-        self.try_advance_apply();
+        out.extend(self.try_advance_apply());
         out
     }
 
@@ -213,6 +229,10 @@ impl RaftNode {
             Message::VoteResponse(m) => m.term,
             Message::AppendRequest(m) => m.term,
             Message::AppendResponse(m) => m.term,
+            Message::InstallSnapshotRequest(m) => m.term,
+            Message::InstallSnapshotResponse(m) => m.term,
+            Message::ConfigChangeRequest(m) => m.term,
+            Message::ConfigChangeResponse(m) => m.term,
         };
         if msg_term > self.current_term {
             self.step_down(msg_term);
@@ -223,17 +243,92 @@ impl RaftNode {
             Message::VoteResponse(m) => self.on_vote_response(env.from, m, &mut out),
             Message::AppendRequest(m) => self.on_append_request(env.from, m, &mut out),
             Message::AppendResponse(m) => self.on_append_response(env.from, m, &mut out),
+            Message::InstallSnapshotRequest(m) => self.on_install_snapshot_request(env.from, m, &mut out),
+            Message::InstallSnapshotResponse(m) => self.on_install_snapshot_response(env.from, m, &mut out),
+            Message::ConfigChangeRequest(m) => self.on_config_change_request(env.from, m, &mut out),
+            Message::ConfigChangeResponse(m) => self.on_config_change_response(env.from, m, &mut out),
         }
 
-        self.try_advance_apply();
+        out.extend(self.try_advance_apply());
         out
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    /// Majority quorum size for this cluster (including self).
+    /// Majority quorum size for the current effective configuration.
     fn quorum(&self) -> usize {
-        self.config.peers.len().div_ceil(2)
+        self.effective_config.stable_config().quorum()
+    }
+
+    /// Cluster size (self + peers).
+    pub fn cluster_size(&self) -> usize {
+        self.effective_config.stable_config().voters.len()
+    }
+
+    /// Required majority vote/replication count for this cluster.
+    pub fn quorum_size(&self) -> usize {
+        self.quorum()
+    }
+
+    /// Current effective configuration (stable or joint).
+    pub fn effective_config(&self) -> &EffectiveConfig {
+        &self.effective_config
+    }
+
+    fn sync_peers_from_effective_config(&mut self) {
+        self.config.peers = self
+            .effective_config
+            .stable_config()
+            .peers_of(self.config.id);
+    }
+
+    fn apply_config_command(
+        &mut self,
+        phase: ConfigChangePhase,
+        members: Vec<ClusterMember>,
+        out: &mut Vec<Envelope>,
+    ) {
+        let voter_set: BTreeSet<NodeId> = members.iter().map(|m| m.id).collect();
+        match phase {
+            ConfigChangePhase::Joint => {
+                let outgoing = self.effective_config.stable_config().clone();
+                let incoming = ClusterConfiguration::from_voters(voter_set);
+                self.effective_config = EffectiveConfig::Joint {
+                    outgoing,
+                    incoming,
+                };
+                self.sync_peers_from_effective_config();
+                if self.role == Role::Leader {
+                    if let Some(final_members) = self.pending_membership.take() {
+                        let cmd = RaftCommand::ConfigChange {
+                            phase: ConfigChangePhase::Final,
+                            members: final_members,
+                        };
+                        let idx = self.log.append(LogEntry {
+                            term: self.current_term,
+                            command: cmd.encode(),
+                        });
+                        self.match_index.insert(self.config.id, idx);
+                        self.next_index
+                            .insert(self.config.id, LogIndex(idx.0 + 1));
+                        self.send_append_to_all(out);
+                    }
+                }
+            }
+            ConfigChangePhase::Final => {
+                self.effective_config =
+                    EffectiveConfig::Stable(ClusterConfiguration::from_voters(voter_set));
+                self.sync_peers_from_effective_config();
+                self.pending_membership = None;
+                let last = self.log.last_index();
+                for &peer in &self.config.peers {
+                    self.next_index
+                        .entry(peer)
+                        .or_insert(LogIndex(last.0 + 1));
+                    self.match_index.entry(peer).or_insert(LogIndex(0));
+                }
+            }
+        }
     }
 
     /// Revert to follower, adopting `new_term`.
@@ -315,6 +410,26 @@ impl RaftNode {
             .get(&peer)
             .copied()
             .unwrap_or(LogIndex(self.log.last_index().0 + 1));
+
+        // If the follower is behind our snapshot, send a snapshot instead of log entries.
+        let snap_idx = self.log.last_included_index();
+        if next <= snap_idx && snap_idx.0 > 0 {
+            if let Some((idx, term, data)) = self.snapshot() {
+                out.push(Envelope::new(
+                    self.config.id,
+                    peer,
+                    Message::InstallSnapshotRequest(crate::InstallSnapshotRequest {
+                        term: self.current_term,
+                        leader_id: self.config.id,
+                        last_included_index: idx,
+                        last_included_term: term,
+                        data,
+                    }),
+                ));
+                return;
+            }
+        }
+
         let prev_idx = LogIndex(next.0.saturating_sub(1));
         let prev_term = self.log.term_at(prev_idx).unwrap_or(Term(0));
         let entries = self.log.entries_from(next).to_vec();
@@ -364,7 +479,7 @@ impl RaftNode {
         }
         if resp.vote_granted {
             self.votes_received.insert(from);
-            if self.votes_received.len() >= self.quorum() {
+            if self.votes_received.len() >= self.effective_config.election_quorum() {
                 self.become_leader(out);
             }
         }
@@ -475,8 +590,14 @@ impl RaftNode {
                 if self.log.term_at(n_idx) != Some(self.current_term) {
                     continue;
                 }
-                let count = self.match_index.values().filter(|&&m| m >= n_idx).count();
-                if count >= self.quorum() {
+                let met = self.effective_config.commit_quorum_met(|id| {
+                    self.match_index
+                        .get(id)
+                        .copied()
+                        .unwrap_or(LogIndex(0))
+                        >= n_idx
+                });
+                if met {
                     self.commit_index = n_idx;
                 }
             }
@@ -501,6 +622,13 @@ impl RaftNode {
         self.applied_entries.drain(..).collect()
     }
 
+    /// If a snapshot was installed on this node (via InstallSnapshot RPC or direct compact),
+    /// return it so the state machine can be brought to that point.
+    /// The data is opaque to Raft; the state machine (Engine) must know how to interpret it.
+    pub fn drain_installed_snapshot(&mut self) -> Option<(LogIndex, Term, Vec<u8>)> {
+        self.pending_snapshot.take()
+    }
+
     /// Immediately send `AppendEntries` to all peers (only when leader).
     ///
     /// Useful after [`propose`] to trigger replication without waiting for the
@@ -513,16 +641,134 @@ impl RaftNode {
         out
     }
 
+    /// Compact the local log up to (and including) the given index by installing a snapshot.
+    ///
+    /// This is called by the state machine applier (Engine / simulator RefModel) once it has
+    /// produced a durable snapshot of its state at `up_to_index`.
+    /// The Raft node will drop the corresponding prefix of the log.
+    pub fn compact(&mut self, up_to_index: LogIndex, up_to_term: Term, data: Vec<u8>) {
+        self.log.install_snapshot(up_to_index, up_to_term, data);
+        if up_to_index > self.commit_index {
+            self.commit_index = up_to_index;
+        }
+        if up_to_index > self.last_applied {
+            self.last_applied = up_to_index;
+        }
+
+        // Trim applied_entries history that is now covered by the snapshot.
+        // Keep only entries after the snapshot for visibility to the caller.
+        if !self.applied_entries.is_empty() {
+            let keep_from = self
+                .applied_entries
+                .iter()
+                .position(|(i, _, _)| *i > up_to_index)
+                .unwrap_or(self.applied_entries.len());
+            self.applied_entries.drain(0..keep_from);
+        }
+    }
+
+    /// Return the currently installed snapshot (if any) as (index, term, data).
+    pub fn snapshot(&self) -> Option<(LogIndex, Term, Vec<u8>)> {
+        self.log.snapshot().map(|(i, t, d)| (i, t, d.to_vec()))
+    }
+
+    /// Highest log index covered by the current snapshot (0 if no snapshot has been installed).
+    pub fn last_included_index(&self) -> LogIndex {
+        self.log.last_included_index()
+    }
+
+    /// Propose a joint-consensus membership change. Only valid on leader.
+    ///
+    /// Appends a joint-configuration log entry; once committed and applied the
+    /// leader automatically appends the final-configuration entry.
+    pub fn propose_membership_change(&mut self, new_members: Vec<ClusterMember>) -> Option<LogIndex> {
+        if self.role != Role::Leader {
+            return None;
+        }
+        if matches!(self.effective_config, EffectiveConfig::Joint { .. }) {
+            return None;
+        }
+        if self.pending_membership.is_some() {
+            return None;
+        }
+        let mut by_id: BTreeSet<NodeId> = new_members.iter().map(|m| m.id).collect();
+        by_id.insert(self.config.id);
+        let mut members: Vec<ClusterMember> = new_members;
+        if !members.iter().any(|m| m.id == self.config.id) {
+            members.push(ClusterMember {
+                id: self.config.id,
+                raft_addr: String::new(),
+                client_addr: String::new(),
+            });
+        }
+        members.sort_by_key(|m| m.id.0);
+        members.retain(|m| by_id.contains(&m.id));
+        self.pending_membership = Some(members.clone());
+        let cmd = RaftCommand::ConfigChange {
+            phase: ConfigChangePhase::Joint,
+            members,
+        };
+        let idx = self.log.append(LogEntry {
+            term: self.current_term,
+            command: cmd.encode(),
+        });
+        self.match_index.insert(self.config.id, idx);
+        self.next_index
+            .insert(self.config.id, LogIndex(idx.0 + 1));
+        Some(idx)
+    }
+
+    // Dynamic membership stubs (prototype scaffolding)
+    fn on_config_change_request(&mut self, from: NodeId, req: crate::ConfigChangeRequest, out: &mut Vec<Envelope>) {
+        if req.term < self.current_term {
+            out.push(Envelope::new(
+                self.config.id,
+                from,
+                Message::ConfigChangeResponse(crate::ConfigChangeResponse { term: self.current_term, success: false }),
+            ));
+            return;
+        }
+        if req.term > self.current_term {
+            self.step_down(req.term);
+        }
+        if self.role == Role::Leader {
+            self.config.peers = req.new_peers.clone();
+        }
+        out.push(Envelope::new(
+            self.config.id,
+            from,
+            Message::ConfigChangeResponse(crate::ConfigChangeResponse { term: self.current_term, success: true }),
+        ));
+    }
+
+    fn on_config_change_response(&mut self, _from: NodeId, _resp: crate::ConfigChangeResponse, _out: &mut Vec<Envelope>) {
+        // TODO: track for quorum on config change
+    }
+
     /// Apply all committed but not yet applied log entries.
-    fn try_advance_apply(&mut self) {
+    ///
+    /// Returns outbound envelopes produced while applying membership changes
+    /// (e.g. replication of the final-configuration entry).
+    fn try_advance_apply(&mut self) -> Vec<Envelope> {
+        let mut out = Vec::new();
         while self.last_applied < self.commit_index {
             self.last_applied = LogIndex(self.last_applied.0 + 1);
-            if let Some(entry) = self.log.get(self.last_applied) {
+            let entry = self
+                .log
+                .get(self.last_applied)
+                .map(|e| (e.term, e.command.clone()));
+            if let Some((term, command)) = entry {
+                if let Ok(RaftCommand::ConfigChange { phase, members }) =
+                    RaftCommand::decode(&command)
+                {
+                    self.apply_config_command(phase, members, &mut out);
+                }
                 self.applied_entries
-                    .push((self.last_applied, entry.term, entry.command.clone()));
+                    .push((self.last_applied, term, command));
             }
         }
         self.check_pending_reads();
+        out
     }
 
     fn check_pending_reads(&mut self) {
@@ -544,6 +790,61 @@ impl RaftNode {
         });
 
         self.ready_reads.extend(ready);
+    }
+
+    // ── Snapshot support (MVP scaffolding) ─────────────────────────────────────
+
+    fn on_install_snapshot_request(&mut self, from: NodeId, req: crate::InstallSnapshotRequest, out: &mut Vec<Envelope>) {
+        // Basic term handling and snapshot installation (to be expanded).
+        if req.term < self.current_term {
+            out.push(Envelope::new(
+                self.config.id,
+                from,
+                Message::InstallSnapshotResponse(crate::InstallSnapshotResponse {
+                    term: self.current_term,
+                    success: false,
+                }),
+            ));
+            return;
+        }
+        if req.term > self.current_term {
+            self.step_down(req.term);
+        }
+
+        // Accept the snapshot and truncate our log accordingly.
+        self.log.install_snapshot(req.last_included_index, req.last_included_term, req.data.clone());
+
+        // Advance our tracking.
+        if req.last_included_index > self.commit_index {
+            self.commit_index = req.last_included_index;
+        }
+        if req.last_included_index > self.last_applied {
+            self.last_applied = req.last_included_index;
+        }
+
+        // Make the snapshot data available for the state machine (engine) to consume.
+        self.pending_snapshot = Some((req.last_included_index, req.last_included_term, req.data));
+
+        out.push(Envelope::new(
+            self.config.id,
+            from,
+            Message::InstallSnapshotResponse(crate::InstallSnapshotResponse {
+                term: self.current_term,
+                success: true,
+            }),
+        ));
+    }
+
+    fn on_install_snapshot_response(&mut self, from: NodeId, resp: crate::InstallSnapshotResponse, _out: &mut Vec<Envelope>) {
+        if self.role != Role::Leader || resp.term < self.current_term {
+            return;
+        }
+        if resp.success {
+            // Follower now has at least up to our current snapshot.
+            let snap_idx = self.log.last_included_index();
+            self.match_index.insert(from, snap_idx);
+            self.next_index.insert(from, LogIndex(snap_idx.0 + 1));
+        }
     }
 }
 
@@ -618,6 +919,51 @@ mod tests {
         // and read_index is 1 (the no-op), last_applied >= read_index is true!
         let ready = node.drain_ready_reads();
         assert_eq!(ready, vec![456]);
+    }
+
+    #[test]
+    fn quorum_size_matches_cluster_majority() {
+        let three = make_node(1, vec![2, 3]);
+        assert_eq!(three.cluster_size(), 3);
+        assert_eq!(three.quorum_size(), 2);
+
+        let five = make_node(1, vec![2, 3, 4, 5]);
+        assert_eq!(five.cluster_size(), 5);
+        assert_eq!(five.quorum_size(), 3);
+    }
+
+    #[test]
+    fn five_node_election_requires_three_votes() {
+        let mut node = make_node(1, vec![2, 3, 4, 5]);
+        let mut out = Vec::new();
+        node.start_election(&mut out);
+        assert_eq!(node.role, Role::Candidate);
+
+        node.handle(Envelope::new(
+            NodeId(2),
+            NodeId(1),
+            Message::VoteResponse(VoteResponse {
+                term: Term(1),
+                vote_granted: true,
+            }),
+        ));
+        assert_eq!(
+            node.role,
+            Role::Candidate,
+            "self + one peer is not a majority of five"
+        );
+
+        for peer in [3u64, 4] {
+            node.handle(Envelope::new(
+                NodeId(peer),
+                NodeId(1),
+                Message::VoteResponse(VoteResponse {
+                    term: Term(1),
+                    vote_granted: true,
+                }),
+            ));
+        }
+        assert_eq!(node.role, Role::Leader);
     }
 
     #[test]

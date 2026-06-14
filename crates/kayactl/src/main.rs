@@ -14,8 +14,9 @@ use kaya_io::FileDisk;
 use kaya_lsm::{inspect_manifest_path, inspect_sstable_path, ManifestInspection, SstInspection};
 use kaya_net::{
     decode_error_payload, decode_scan_response, decode_value_payload, encode_key_payload,
-    encode_put_payload, encode_scan_payload, roundtrip, STATUS_ERROR, STATUS_INVALID_ARGUMENT,
-    STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
+    encode_member_payload, encode_put_payload, encode_remove_member_payload, encode_scan_payload,
+    roundtrip, STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER,
+    STATUS_OK,
 };
 use kaya_wal::{inspect_wal_path, WalInspection};
 
@@ -495,9 +496,58 @@ async fn run_server_mode_async(
                 Err(KayaError::internal("status check failed"))
             }
         }
+        [cmd] if cmd == "add-node" => Err(KayaError::invalid_argument(
+            "usage: kayactl --server <addr> add-node <id> <raft-addr> <client-addr>",
+        )),
+        [cmd, id, raft_addr, client_addr] if cmd == "add-node" => {
+            let node_id: u64 = id
+                .parse()
+                .map_err(|e| KayaError::invalid_argument(format!("node id: {e}")))?;
+            let payload = encode_member_payload(node_id, raft_addr, client_addr);
+            let (status, body) = roundtrip_with_retry(&endpoints, 7, &payload, timeout).await?;
+            handle_membership_response(status, &body, json, "add-node")
+        }
+        [cmd] if cmd == "remove-node" => Err(KayaError::invalid_argument(
+            "usage: kayactl --server <addr> remove-node <id>",
+        )),
+        [cmd, id] if cmd == "remove-node" => {
+            let node_id: u64 = id
+                .parse()
+                .map_err(|e| KayaError::invalid_argument(format!("node id: {e}")))?;
+            let payload = encode_remove_member_payload(node_id);
+            let (status, body) = roundtrip_with_retry(&endpoints, 8, &payload, timeout).await?;
+            handle_membership_response(status, &body, json, "remove-node")
+        }
         _ => Err(KayaError::invalid_argument(
             "unknown command for --server mode",
         )),
+    }
+}
+
+fn handle_membership_response(
+    status: u16,
+    body: &[u8],
+    json: bool,
+    op: &str,
+) -> Result<()> {
+    match status {
+        STATUS_OK => {
+            let msg = String::from_utf8_lossy(body);
+            if json {
+                println!("{{\"ok\":true,\"op\":\"{op}\",\"message\":{}}}", json_string(&msg));
+            } else {
+                println!("OK {msg}");
+            }
+            Ok(())
+        }
+        STATUS_NOT_LEADER => Err(KayaError::internal(
+            "not leader — retry on a different node",
+        )),
+        STATUS_ERROR | STATUS_INVALID_ARGUMENT => {
+            let msg = decode_error_payload(body).unwrap_or_else(|_| "unknown".into());
+            Err(KayaError::invalid_argument(msg))
+        }
+        s => Err(KayaError::internal(format!("unexpected status: {s}"))),
     }
 }
 
@@ -559,6 +609,8 @@ fn print_usage() {
     );
     println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] health");
     println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] status");
+    println!("  kayactl --server <addr> add-node <id> <raft-addr> <client-addr>");
+    println!("  kayactl --server <addr> remove-node <id>");
     println!();
     println!("INSPECT COMMANDS");
     println!("  kayactl [--json] inspect wal <path>");

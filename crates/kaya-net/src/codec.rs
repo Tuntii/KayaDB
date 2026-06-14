@@ -15,14 +15,21 @@
 //! `term(u64) | cmd_len(u32) | cmd_bytes`.
 
 use kaya_raft::{
-    AppendRequest, AppendResponse, Envelope, LogEntry, LogIndex, Message, NodeId, Term,
-    VoteRequest, VoteResponse,
+    AppendRequest, AppendResponse, Envelope, InstallSnapshotRequest, InstallSnapshotResponse,
+    LogEntry, LogIndex, Message, NodeId, Term, VoteRequest, VoteResponse,
 };
+
+use crate::DEFAULT_MAX_FRAME_LEN;
 
 const MSG_VOTE_REQUEST: u8 = 1;
 const MSG_VOTE_RESPONSE: u8 = 2;
 const MSG_APPEND_REQUEST: u8 = 3;
 const MSG_APPEND_RESPONSE: u8 = 4;
+const MSG_INSTALL_SNAPSHOT_REQUEST: u8 = 5;
+const MSG_INSTALL_SNAPSHOT_RESPONSE: u8 = 6;
+
+/// Max snapshot payload bytes on the wire (frame budget minus headers).
+pub const MAX_SNAPSHOT_DATA_LEN: u32 = DEFAULT_MAX_FRAME_LEN.saturating_sub(64);
 
 // ── tiny write helpers ────────────────────────────────────────────────────────
 
@@ -125,6 +132,23 @@ pub fn encode_envelope(env: &Envelope) -> Vec<u8> {
             push_u8(&mut body, m.success as u8);
             push_u64(&mut body, m.match_index.0);
         }
+        Message::InstallSnapshotRequest(m) => {
+            push_u8(&mut body, MSG_INSTALL_SNAPSHOT_REQUEST);
+            push_u64(&mut body, m.term.0);
+            push_u64(&mut body, m.leader_id.0);
+            push_u64(&mut body, m.last_included_index.0);
+            push_u64(&mut body, m.last_included_term.0);
+            push_u32(&mut body, m.data.len() as u32);
+            body.extend_from_slice(&m.data);
+        }
+        Message::InstallSnapshotResponse(m) => {
+            push_u8(&mut body, MSG_INSTALL_SNAPSHOT_RESPONSE);
+            push_u64(&mut body, m.term.0);
+            push_u8(&mut body, m.success as u8);
+        }
+        Message::ConfigChangeRequest(_) | Message::ConfigChangeResponse(_) => {
+            panic!("ConfigChange messages not yet supported on kaya-net wire codec");
+        }
     }
 
     let mut out = Vec::with_capacity(4 + body.len());
@@ -192,6 +216,30 @@ pub fn decode_envelope(data: &[u8]) -> Result<Envelope, String> {
             match_index: LogIndex(take_u64(&mut cur)?),
         }),
 
+        MSG_INSTALL_SNAPSHOT_REQUEST => {
+            let term = Term(take_u64(&mut cur)?);
+            let leader_id = NodeId(take_u64(&mut cur)?);
+            let last_included_index = LogIndex(take_u64(&mut cur)?);
+            let last_included_term = Term(take_u64(&mut cur)?);
+            let data_len = take_u32(&mut cur)?;
+            if data_len > MAX_SNAPSHOT_DATA_LEN {
+                return Err(format!("snapshot data too large: {data_len}"));
+            }
+            let data = take_bytes(&mut cur, data_len as usize)?;
+            Message::InstallSnapshotRequest(InstallSnapshotRequest {
+                term,
+                leader_id,
+                last_included_index,
+                last_included_term,
+                data,
+            })
+        }
+
+        MSG_INSTALL_SNAPSHOT_RESPONSE => Message::InstallSnapshotResponse(InstallSnapshotResponse {
+            term: Term(take_u64(&mut cur)?),
+            success: take_u8(&mut cur)? != 0,
+        }),
+
         t => return Err(format!("unknown Raft message type: {t}")),
     };
 
@@ -233,6 +281,45 @@ pub fn decode_key_payload(data: &[u8]) -> Result<Vec<u8>, String> {
     let mut cur = data;
     let key_len = take_u32(&mut cur)? as usize;
     take_bytes(&mut cur, key_len)
+}
+
+/// Encode ADD_MEMBER payload: `node_id(u64) | raft_len | raft | client_len | client`.
+pub fn encode_member_payload(node_id: u64, raft_addr: &str, client_addr: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&node_id.to_le_bytes());
+    push_u32(&mut out, raft_addr.len() as u32);
+    out.extend_from_slice(raft_addr.as_bytes());
+    push_u32(&mut out, client_addr.len() as u32);
+    out.extend_from_slice(client_addr.as_bytes());
+    out
+}
+
+/// Encode REMOVE_MEMBER payload: `node_id(u64)`.
+pub fn encode_remove_member_payload(node_id: u64) -> Vec<u8> {
+    node_id.to_le_bytes().to_vec()
+}
+
+/// Decode REMOVE_MEMBER payload.
+pub fn decode_remove_member_payload(data: &[u8]) -> Result<u64, String> {
+    if data.len() < 8 {
+        return Err("truncated REMOVE_MEMBER payload".to_owned());
+    }
+    Ok(u64::from_le_bytes([
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+    ]))
+}
+
+/// Decode ADD_MEMBER payload.
+pub fn decode_member_payload(data: &[u8]) -> Result<(u64, String, String), String> {
+    let mut cur = data;
+    let node_id = take_u64(&mut cur)?;
+    let raft_len = take_u32(&mut cur)? as usize;
+    let raft = String::from_utf8(take_bytes(&mut cur, raft_len)?)
+        .map_err(|e| format!("invalid raft addr utf-8: {e}"))?;
+    let client_len = take_u32(&mut cur)? as usize;
+    let client = String::from_utf8(take_bytes(&mut cur, client_len)?)
+        .map_err(|e| format!("invalid client addr utf-8: {e}"))?;
+    Ok((node_id, raft, client))
 }
 
 /// Encode a SCAN request payload: `prefix_len(u32) | prefix`.
@@ -398,6 +485,53 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_install_snapshot_request() {
+        use kaya_raft::{InstallSnapshotRequest, Term};
+
+        let data = b"snapshot-bytes-v1".to_vec();
+        let env = Envelope {
+            from: NodeId(1),
+            to: NodeId(3),
+            message: Message::InstallSnapshotRequest(InstallSnapshotRequest {
+                term: Term(4),
+                leader_id: NodeId(1),
+                last_included_index: LogIndex(64),
+                last_included_term: Term(3),
+                data: data.clone(),
+            }),
+        };
+        let encoded = encode_envelope(&env);
+        let decoded = decode_envelope(&encoded[4..]).unwrap();
+        if let Message::InstallSnapshotRequest(req) = decoded.message {
+            assert_eq!(req.last_included_index, LogIndex(64));
+            assert_eq!(req.data, data);
+        } else {
+            panic!("wrong message type");
+        }
+    }
+
+    #[test]
+    fn round_trip_install_snapshot_response() {
+        use kaya_raft::InstallSnapshotResponse;
+
+        let env = Envelope {
+            from: NodeId(3),
+            to: NodeId(1),
+            message: Message::InstallSnapshotResponse(InstallSnapshotResponse {
+                term: Term(4),
+                success: true,
+            }),
+        };
+        let encoded = encode_envelope(&env);
+        let decoded = decode_envelope(&encoded[4..]).unwrap();
+        if let Message::InstallSnapshotResponse(resp) = decoded.message {
+            assert!(resp.success);
+        } else {
+            panic!("wrong message type");
+        }
+    }
+
+    #[test]
     fn round_trip_append_response() {
         let env = Envelope {
             from: NodeId(2),
@@ -416,6 +550,13 @@ mod tests {
         } else {
             panic!("wrong type");
         }
+    }
+
+    #[test]
+    fn round_trip_remove_member_payload() {
+        use super::{decode_remove_member_payload, encode_remove_member_payload};
+        let payload = encode_remove_member_payload(42);
+        assert_eq!(decode_remove_member_payload(&payload).unwrap(), 42);
     }
 
     #[test]

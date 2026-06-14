@@ -105,6 +105,69 @@ impl NodeRoster {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Insert or replace a node's addresses.
+    pub fn upsert(&mut self, id: NodeId, raft_addr: SocketAddr, client_addr: SocketAddr) {
+        self.entries.insert(
+            id,
+            RosterEntry {
+                raft_addr,
+                client_addr,
+            },
+        );
+    }
+
+    /// Replace the roster with exactly `members`, parsing `host:port` strings.
+    pub fn replace_from_members(
+        &mut self,
+        members: &[(NodeId, String, String)],
+    ) -> Result<(), String> {
+        let mut next = HashMap::new();
+        for &(id, ref raft, ref client) in members {
+            let raft_addr = raft
+                .parse::<SocketAddr>()
+                .map_err(|e| format!("invalid raft addr for node {}: {e}", id.0))?;
+            let client_addr = client
+                .parse::<SocketAddr>()
+                .map_err(|e| format!("invalid client addr for node {}: {e}", id.0))?;
+            next.insert(
+                id,
+                RosterEntry {
+                    raft_addr,
+                    client_addr,
+                },
+            );
+        }
+        self.entries = next;
+        Ok(())
+    }
+
+    /// Keep only `voters` plus `self_id` in the roster (legacy config changes).
+    pub fn retain_voters(
+        &mut self,
+        voters: &std::collections::BTreeSet<NodeId>,
+        self_id: NodeId,
+        self_raft: SocketAddr,
+        self_client: SocketAddr,
+    ) {
+        self.entries
+            .retain(|id, _| voters.contains(id) || *id == self_id);
+        self.upsert(self_id, self_raft, self_client);
+    }
+
+    /// Merge members that carry non-empty address strings into the roster.
+    pub fn merge_member_addresses(&mut self, members: &[(NodeId, String, String)]) {
+        for &(id, ref raft, ref client) in members {
+            if raft.is_empty() || client.is_empty() {
+                continue;
+            }
+            if let (Ok(raft_addr), Ok(client_addr)) =
+                (raft.parse::<SocketAddr>(), client.parse::<SocketAddr>())
+            {
+                self.upsert(id, raft_addr, client_addr);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

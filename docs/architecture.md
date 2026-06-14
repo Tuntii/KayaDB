@@ -250,7 +250,7 @@ client PUT/DELETE
 
 Reads are currently leader-routed. Followers should either redirect clients with a leader hint or reject the request rather than serving potentially stale local state.
 
-Cluster membership is static in the current prototype. Each node is started with explicit `--peer` entries, and changing the roster requires coordinated restarts.
+Cluster membership uses Raft joint consensus (M11). Nodes start with `--peer` seeds; new members join via `--join-cluster` and are added with the `ADD_MEMBER` client opcode (7) or `kayactl add-node`. The server hot-reloads `NodeRoster` from committed config-change log entries and persists addresses to `data_dir/cluster-roster.json`. Removals use opcode 8 / `kayactl remove-node`. Raft state itself is still in-memory on restart.
 
 ---
 
