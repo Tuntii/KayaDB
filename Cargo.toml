@@ -28,6 +28,7 @@ categories = ["database-implementations", "data-structures"]
 
 [workspace.dependencies]
 kaya-core = { path = "crates/kaya-core", version = "0.1.12" }
+thiserror = "1"
 kaya-io = { path = "crates/kaya-io", version = "0.1.12" }
 kaya-wal = { path = "crates/kaya-wal", version = "0.1.12" }
 kaya-lsm = { path = "crates/kaya-lsm", version = "0.1.12" }

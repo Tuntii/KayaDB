@@ -12,17 +12,27 @@ pub const DEFAULT_SEGMENT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_MEMTABLE_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_SSTABLE_BLOCK_TARGET_BYTES: usize = 32 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KayaError {
+    #[error("invalid argument: {message}")]
     InvalidArgument { message: String },
+    #[error("not found")]
     NotFound,
+    #[error("corruption: {message}")]
     Corruption { message: String },
+    #[error("io error: {message}")]
     Io { message: String },
+    #[error("disk full")]
     DiskFull,
+    #[error("fsync failed")]
     FsyncFailed,
+    #[error("unsupported version: {found}")]
     UnsupportedVersion { found: u16 },
+    #[error("data directory lock conflict")]
     LockConflict,
+    #[error("invariant violation {id}: {message}")]
     InvariantViolation { id: String, message: String },
+    #[error("internal error: {message}")]
     Internal { message: String },
 }
 
@@ -56,27 +66,6 @@ impl KayaError {
         }
     }
 }
-
-impl fmt::Display for KayaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidArgument { message } => write!(f, "invalid argument: {message}"),
-            Self::NotFound => write!(f, "not found"),
-            Self::Corruption { message } => write!(f, "corruption: {message}"),
-            Self::Io { message } => write!(f, "io error: {message}"),
-            Self::DiskFull => write!(f, "disk full"),
-            Self::FsyncFailed => write!(f, "fsync failed"),
-            Self::UnsupportedVersion { found } => write!(f, "unsupported version: {found}"),
-            Self::LockConflict => write!(f, "data directory lock conflict"),
-            Self::InvariantViolation { id, message } => {
-                write!(f, "invariant violation {id}: {message}")
-            }
-            Self::Internal { message } => write!(f, "internal error: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for KayaError {}
 
 impl From<std::io::Error> for KayaError {
     fn from(value: std::io::Error) -> Self {

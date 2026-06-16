@@ -11,3 +11,6 @@ categories.workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+thiserror.workspace = true

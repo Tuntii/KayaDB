@@ -59,14 +59,19 @@ impl Memtable {
     }
 
     pub fn put(&mut self, key: Bytes, value: Bytes, sequence: SequenceNumber) {
-        self.entries
-            .insert(key, ValueRecord::Put { value, sequence });
-        self.recompute_approximate_bytes();
+        let old_size = self.entries.get(&key).map_or(0, |r| Self::entry_size(&key, r));
+        let new_rec = ValueRecord::Put { value, sequence };
+        let new_size = Self::entry_size(&key, &new_rec);
+        self.entries.insert(key, new_rec);
+        self.approximate_bytes = self.approximate_bytes.saturating_sub(old_size) + new_size;
     }
 
     pub fn delete(&mut self, key: Bytes, sequence: SequenceNumber) {
-        self.entries.insert(key, ValueRecord::Delete { sequence });
-        self.recompute_approximate_bytes();
+        let old_size = self.entries.get(&key).map_or(0, |r| Self::entry_size(&key, r));
+        let new_rec = ValueRecord::Delete { sequence };
+        let new_size = Self::entry_size(&key, &new_rec);
+        self.entries.insert(key, new_rec);
+        self.approximate_bytes = self.approximate_bytes.saturating_sub(old_size) + new_size;
     }
 
     pub fn get(&self, key: &[u8]) -> Option<ValueRecordRef<'_>> {
@@ -136,18 +141,12 @@ impl Memtable {
         }
     }
 
-    fn recompute_approximate_bytes(&mut self) {
-        self.approximate_bytes = self
-            .entries
-            .iter()
-            .map(|(key, record)| {
-                key.len()
-                    + match record {
-                        ValueRecord::Put { value, .. } => value.len(),
-                        ValueRecord::Delete { .. } => 0,
-                    }
-            })
-            .sum();
+    fn entry_size(key: &[u8], record: &ValueRecord) -> usize {
+        key.len()
+            + match record {
+                ValueRecord::Put { value, .. } => value.len(),
+                ValueRecord::Delete { .. } => 0,
+            }
     }
 }
 
@@ -201,6 +200,28 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].key, b"user:1");
         assert_eq!(items[1].key, b"user:2");
+    }
+
+    #[test]
+    fn approximate_bytes_is_incremental_and_accurate() {
+        let mut m = Memtable::new();
+        assert_eq!(m.approximate_bytes(), 0);
+
+        m.put(b"abc".to_vec(), b"xyz".to_vec(), SequenceNumber::new(1));
+        // key 3 + value 3
+        assert_eq!(m.approximate_bytes(), 6);
+
+        m.put(b"abc".to_vec(), b"longervalue".to_vec(), SequenceNumber::new(2));
+        // replace: old 6, new key3 + 11 = 14
+        assert_eq!(m.approximate_bytes(), 14);
+
+        m.delete(b"abc".to_vec(), SequenceNumber::new(3));
+        // tombstone keeps only key size 3
+        assert_eq!(m.approximate_bytes(), 3);
+
+        // another key
+        m.put(b"def".to_vec(), vec![0u8; 100], SequenceNumber::new(4));
+        assert_eq!(m.approximate_bytes(), 3 + 3 + 100);
     }
 
     // KD-0503: malformed SSTable footer input must not panic.
