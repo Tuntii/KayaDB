@@ -221,19 +221,43 @@ Print storage engine metrics for the data directory.
 kayactl stats
 kayactl --data /tmp/db stats
 kayactl --data /tmp/db stats --json
+kayactl --data /tmp/db stats --latency   # focused Track A durability + flush/compaction timers
 ```
 
-**Output example:**
+**Output example (normal):**
 ```
-memtable_entries: 3
-memtable_bytes:   96
-wal_segments:     1
-wal_bytes:        128
-sstable_count:    2
-sstable_bytes:    4096
-last_lsn:         5
-last_flush_lsn:   3
+put_count:         42
+...
+flush_count:       3
+flush_total_us:    12345
+flush_avg_us:      4115 (total/count)
+...
 ```
+
+Use `--latency` for a clean section with WAL fsync, flush, and compaction numbers plus eBPF correlation tips.
+
+### `flush`
+
+(Local/embedded mode only) Force a memtable flush to SSTable. This exercises the full LSM publish path (SST build, manifest edits, fsyncs, CURRENT update) so you can immediately observe the new latency metrics.
+
+```bash
+kayactl --data /tmp/db flush
+kayactl --data /tmp/db --json flush
+kayactl --data /tmp/db flush && kayactl --data /tmp/db stats --latency
+```
+
+**Output (human):**
+```
+OK flushed 1234 memtable entries. Live SSTables: 5
+Flush latency metrics updated. Key values:
+  flush_count:    4
+  flush_total_us: 56789
+  flush_avg_us:   14197
+...
+For full view + eBPF correlation tips: kayactl [--data ...] stats --latency
+```
+
+Great for Track A development: drive writes, flush, inspect `stats --latency`, attach `ebpf syscall-timeline` or `fsync-latency` in another terminal.
 
 ---
 
@@ -258,6 +282,46 @@ Recovery report:
 ```
 
 A non-zero exit code is emitted if recovery would fail.
+
+---
+
+## Linux eBPF observability (Track A / M12)
+
+`kayactl ebpf` provides Linux-only observability helpers using bpftrace. It does **not** require eBPF at build time or for normal operation.
+
+```bash
+# Show available subcommands and guidance
+kayactl ebpf
+kayactl ebpf help
+
+# Discover PIDs (great for 3-node local clusters) + active traces
+kayactl ebpf list
+kayactl ebpf status
+
+# Trace fsync/fdatasync latency (in microseconds) for a running server
+kayactl ebpf fsync-latency
+kayactl ebpf fsync-latency --pid 12345
+
+# Trace block-layer I/O latency (device + scheduler time)
+kayactl ebpf block-latency --pid 12345
+
+# New (Track A): broader syscall timeline with write/fsync correlation by TID + rename/unlink for flush/compaction
+kayactl ebpf syscall-timeline [--pid N] [--run]
+```
+
+On non-Linux the command prints a helpful message and points to `scripts/ebpf/`.
+
+**Prerequisites on the target Linux machine:**
+- `bpftrace` package installed
+- `sudo` (or appropriate BPF capabilities)
+- A running `kayadb-server` (use `kayactl ebpf list` for auto-discovery of all local nodes)
+
+See:
+- `scripts/ebpf/README.md` (detailed usage + one-liners + correlation guide)
+- `spec/docs/observability-spec.md` §7
+- `ROADMAP.md` (Track A)
+
+The probes are read-only diagnostics. They help answer "why are my strict fsyncs sometimes slow?" and "what is the cost of flush / compaction publish?" by showing kernel-side histograms + publish events that pure userspace timers (now also exposed as `flush_total_us` etc. in stats) cannot reveal. Use together with `kayactl stats --latency` / `flush` (to force publish paths) / `--server ... status`.
 
 ---
 

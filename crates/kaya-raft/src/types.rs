@@ -32,10 +32,7 @@ impl RaftApplyCommand {
                 self.index.0,
                 lsn.get()
             ),
-            None => format!(
-                "{{\"term\":{},\"index\":{}}}\n",
-                self.term.0, self.index.0
-            ),
+            None => format!("{{\"term\":{},\"index\":{}}}\n", self.term.0, self.index.0),
         }
     }
 
@@ -57,10 +54,7 @@ impl RaftApplyCommand {
 }
 
 fn parse_json_u64(json: &str, key: &str) -> Result<u64, String> {
-    let start = json
-        .find(key)
-        .ok_or_else(|| format!("missing key {key}"))?
-        + key.len();
+    let start = json.find(key).ok_or_else(|| format!("missing key {key}"))? + key.len();
     let tail = &json[start..];
     let end = tail
         .find(|c: char| !c.is_ascii_digit())

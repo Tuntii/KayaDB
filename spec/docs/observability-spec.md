@@ -1,7 +1,7 @@
 # Observability Spec
 
 **Status:** Draft v0.1  
-**Scope:** Logs, metrics, recovery diagnostics, simulation traces and future eBPF tooling  
+**Scope:** Logs, metrics, recovery diagnostics, simulation traces and Linux eBPF experiments (M12)  
 
 ---
 
@@ -62,18 +62,26 @@ pub struct EngineStats {
     pub scan_count: u64,
     pub wal_bytes_written: u64,
     pub wal_fsync_count: u64,
+    pub wal_fsync_total_us: u64,
+    pub wal_fsync_max_us: u64,
     pub memtable_entries: u64,
     pub sstable_count: u64,
     pub last_sequence: u64,
 }
 ```
 
-Future metrics:
+Userspace WAL fsync latency (`total_us` + `max_us`) was added together with the Linux eBPF experiments. It provides the application-visible cost of strict durability fsyncs and pairs naturally with kernel eBPF histograms.
 
-- WAL append latency,
-- fsync latency,
+Track A (2026-06) added:
+- `flush_total_us` / `flush_max_us`
+- `compaction_total_us` / `compaction_max_us`
+(Full wall time of the publish operations in the engine; complements the WAL-only timers and the `syscall-timeline.bt` probe that surfaces the rename/unlink/fsyc points.)
+
+Remaining future metrics (v2+):
+
+- Per-operation append latency (beyond just fsync),
 - recovery duration,
-- compaction input/output bytes,
+- compaction input/output bytes + duration,
 - block cache hits/misses,
 - read amplification estimates,
 - active immutable memtable count,
@@ -135,21 +143,39 @@ Trace files are correctness artifacts, not performance logs.
 
 ---
 
-## 7. Future eBPF scope
+## 7. Linux eBPF experiments (M12)
 
-v2+ eBPF tooling may include:
+**Status (2026-06):** Initial delivery. bpftrace-based probes shipped; `kayactl ebpf` subcommand added; no hard dependency.
 
-- fsync latency probes,
-- block I/O latency histograms,
-- syscall timeline for KayaDB process,
-- flamegraph helper integration,
-- trace correlation by PID/TID.
+Implemented (scripts + CLI + userspace metrics) — Track A updates:
 
-Non-goals for MVP:
+- `scripts/ebpf/fsync-latency.bt` — syscall-level fsync/fdatasync latency histograms (µs).
+- `scripts/ebpf/block-io-latency.bt` — block layer I/O latency histograms (reads vs writes).
+- `scripts/ebpf/syscall-timeline.bt` — write/fsync/fdatasync + rename/unlink + TID correlation + publish timeline for flush/compaction (Track A).
+- `kayactl ebpf`:
+  - `fsync-latency`, `block-latency`, `syscall-timeline` (with `--pid`, `--run`)
+  - `list` + `status` (discover all local kayadb-server PIDs for clusters; show active bpftrace traces)
+  - Improved auto-detect and cross-platform graceful messages.
+- Userspace latency in `EngineStats` (WAL fsync + new `flush_total_us`/`max`, `compaction_total_us`/`max`) + exposure in `kayactl stats`, server `status` JSON, and human printers. Designed to be compared side-by-side with eBPF histograms.
+- Full usage + correlation notes in `scripts/ebpf/README.md`. `kayactl ebpf list` is the recommended way to find PIDs.
 
-- kernel-specific hard dependency,
-- requiring root privileges for normal tests,
-- production observability claims.
+v2+ (future) eBPF tooling may still add:
+
+- Per-file / data-dir filters + richer TID/PID attribution.
+- Flamegraph helper integration.
+- Trace correlation by PID/TID + userspace markers / USDT.
+- Optional Rust eBPF crate (Aya or libbpf-rs) behind `ebpf` feature + `cfg(target_os = "linux")`.
+
+Non-goals (unchanged):
+
+- Kernel-specific hard dependency on the core crates.
+- Requiring root / eBPF for normal `cargo test` or development workflows.
+- Production observability claims or SLOs.
+
+See also:
+- ROADMAP.md (M12)
+- scripts/ebpf/README.md
+- `kayactl ebpf help` output
 
 ---
 

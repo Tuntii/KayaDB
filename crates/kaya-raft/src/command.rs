@@ -41,8 +41,13 @@ impl ClusterMember {
 /// A replicated command stored in the Raft log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RaftCommand {
-    Put { key: Vec<u8>, value: Vec<u8> },
-    Delete { key: Vec<u8> },
+    Put {
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Delete {
+        key: Vec<u8>,
+    },
     ConfigChange {
         phase: ConfigChangePhase,
         members: Vec<ClusterMember>,
@@ -155,7 +160,9 @@ fn next_u64(cur: &mut &[u8]) -> Result<u64, String> {
     if cur.len() < 8 {
         return Err("unexpected EOF reading u64".to_owned());
     }
-    let v = u64::from_le_bytes([cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7]]);
+    let v = u64::from_le_bytes([
+        cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
+    ]);
     *cur = &cur[8..];
     Ok(v)
 }

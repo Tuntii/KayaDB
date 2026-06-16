@@ -75,9 +75,27 @@ pub struct EngineStats {
     pub scan_count: u64,
     pub wal_bytes_written: u64,
     pub wal_fsync_count: u64,
+    /// Cumulative microseconds spent in WAL fsync_file calls for Strict appends.
+    /// Pairs with eBPF kernel-side histograms from scripts/ebpf/fsync-latency.bt.
+    pub wal_fsync_total_us: u64,
+    /// Maximum single WAL fsync duration observed (us).
+    pub wal_fsync_max_us: u64,
     pub memtable_entries: u64,
     pub sstable_count: u64,
     pub last_sequence: u64,
+    /// Cumulative microseconds spent inside flush() calls (full operation wall time).
+    /// Track A observability addition (pairs with eBPF syscall timelines).
+    pub flush_total_us: u64,
+    /// Maximum single flush() duration observed (us).
+    pub flush_max_us: u64,
+    /// Number of flush() operations performed.
+    pub flush_count: u64,
+    /// Cumulative microseconds spent inside compact() calls (full operation wall time).
+    pub compaction_total_us: u64,
+    /// Maximum single compact() duration observed (us).
+    pub compaction_max_us: u64,
+    /// Number of compact() operations performed.
+    pub compaction_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,6 +342,12 @@ impl<D: Disk> Engine<D> {
         self.stats.memtable_entries = self.memtable.len() as u64;
         self.stats.wal_bytes_written += u64::from(append.encoded_len);
         self.stats.wal_fsync_count += u64::from(append.durable);
+        if let Some(us) = append.fsync_duration_us {
+            self.stats.wal_fsync_total_us += us;
+            if us > self.stats.wal_fsync_max_us {
+                self.stats.wal_fsync_max_us = us;
+            }
+        }
         self.stats.last_sequence = append.sequence.get();
         Ok(WriteResult {
             sequence: append.sequence,
@@ -344,6 +368,12 @@ impl<D: Disk> Engine<D> {
         self.stats.memtable_entries = self.memtable.len() as u64;
         self.stats.wal_bytes_written += u64::from(append.encoded_len);
         self.stats.wal_fsync_count += u64::from(append.durable);
+        if let Some(us) = append.fsync_duration_us {
+            self.stats.wal_fsync_total_us += us;
+            if us > self.stats.wal_fsync_max_us {
+                self.stats.wal_fsync_max_us = us;
+            }
+        }
         self.stats.last_sequence = append.sequence.get();
         Ok(WriteResult {
             sequence: append.sequence,
@@ -420,8 +450,7 @@ impl<D: Disk> Engine<D> {
             self.memtable.raw_scan_prefix(b"").into_iter().collect();
 
         // Capture the pinned live tables (clone metadata; readers stay shared).
-        let pinned_tables: Vec<TableMetadata> =
-            self.manifest_state.live_tables.clone();
+        let pinned_tables: Vec<TableMetadata> = self.manifest_state.live_tables.clone();
 
         // Pin them (increment refcounts).
         for meta in &pinned_tables {
@@ -618,7 +647,7 @@ impl<D: Disk> Engine<D> {
 
         // 3. Update sequence / manifest last seq.
         self.manifest_state.last_sequence = cutoff_seq;
-        self.stats.last_sequence = cutoff_seq.get().saturating_sub(1).max(0);
+        self.stats.last_sequence = cutoff_seq.get().saturating_sub(1);
         self.stats.memtable_entries = self.memtable.len() as u64;
         self.stats.sstable_count = self.live_sstables.len() as u64;
 
@@ -663,6 +692,8 @@ impl<D: Disk> Engine<D> {
                 sstable_count: self.live_sstables.len() as u64,
             });
         }
+
+        let flush_start = std::time::Instant::now();
         let entry_count = self.memtable.len() as u64;
         let table_id = self.next_table_id;
         self.next_table_id += 1;
@@ -760,6 +791,13 @@ impl<D: Disk> Engine<D> {
         self.stats.sstable_count = self.live_sstables.len() as u64;
         self.stats.memtable_entries = 0;
 
+        let flush_us = flush_start.elapsed().as_micros() as u64;
+        self.stats.flush_total_us += flush_us;
+        if flush_us > self.stats.flush_max_us {
+            self.stats.flush_max_us = flush_us;
+        }
+        self.stats.flush_count += 1;
+
         Ok(FlushResult {
             memtable_entries: entry_count,
             sstable_count: self.live_sstables.len() as u64,
@@ -775,6 +813,8 @@ impl<D: Disk> Engine<D> {
                 output_tables: 0,
             });
         }
+
+        let compact_start = std::time::Instant::now();
 
         // Merge all entries from all L0 tables.  Iterate oldest-first so that
         // entries from newer tables (higher table_id) overwrite older ones.
@@ -901,6 +941,13 @@ impl<D: Disk> Engine<D> {
         self.manifest_state.live_tables.push(new_meta);
         self.manifest_state.last_sequence = last_seq;
         self.stats.sstable_count = 1;
+
+        let compact_us = compact_start.elapsed().as_micros() as u64;
+        self.stats.compaction_total_us += compact_us;
+        if compact_us > self.stats.compaction_max_us {
+            self.stats.compaction_max_us = compact_us;
+        }
+        self.stats.compaction_count += 1;
 
         Ok(CompactionResult {
             input_tables: input_count,
@@ -1361,6 +1408,49 @@ mod tests {
                 engine.get(b"c", ReadOptions::default()).await.unwrap(),
                 Some(b"3".to_vec())
             );
+        });
+    }
+
+    // Track A: flush and compaction stats are populated (counts + latency accumulators).
+    #[test]
+    fn flush_and_compaction_stats_are_recorded() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = EngineConfig::default();
+            let mut engine = Engine::open(config, disk).await.unwrap();
+
+            engine
+                .put(b"k1".to_vec(), b"v1".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            engine.flush().await.unwrap();
+
+            let s1 = engine.stats();
+            assert!(s1.flush_count >= 1);
+            // On fast SimDisk the us may be 0; we primarily care that the instrumentation path ran.
+            // Still record something observable.
+            let _ = s1.flush_total_us; // access to keep stats used
+
+            engine
+                .put(b"k2".to_vec(), b"v2".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            engine.flush().await.unwrap();
+
+            let s2 = engine.stats();
+            assert!(s2.flush_count >= 2);
+
+            // Add one more flush so we have enough tables for a compaction.
+            engine
+                .put(b"k3".to_vec(), b"v3".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            engine.flush().await.unwrap();
+
+            let _r = engine.compact().await.unwrap();
+            let s3 = engine.stats();
+            assert!(s3.compaction_count >= 1);
+            let _ = s3.compaction_total_us;
         });
     }
 

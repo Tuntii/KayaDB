@@ -5,8 +5,8 @@ use kaya_core::{EngineConfig, Lsn};
 use kaya_engine::{Engine, ScanOptions, WriteOptions};
 use kaya_io::SimDisk;
 use kaya_raft::{
-    ClusterMember, Envelope, LogIndex, NodeId, RaftApplyCommand, RaftCommand, RaftConfig,
-    RaftNode, RaftStatus, Term,
+    ClusterMember, Envelope, LogIndex, NodeId, RaftApplyCommand, RaftCommand, RaftConfig, RaftNode,
+    RaftStatus, Term,
 };
 
 use crate::model::RefModel;
@@ -173,10 +173,7 @@ impl ClusterSim {
             };
             nodes.insert(id, RaftNode::new(config));
         }
-        let state_machines = all_ids
-            .iter()
-            .map(|&id| (id, RefModel::new()))
-            .collect();
+        let state_machines = all_ids.iter().map(|&id| (id, RefModel::new())).collect();
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -277,9 +274,7 @@ impl ClusterSim {
 
     /// Propose a [`RaftCommand::Delete`] through the leader.
     pub fn propose_delete(&mut self, key: &[u8]) -> Option<(NodeId, LogIndex)> {
-        let cmd = RaftCommand::Delete {
-            key: key.to_vec(),
-        };
+        let cmd = RaftCommand::Delete { key: key.to_vec() };
         self.propose(cmd.encode())
     }
 
@@ -310,7 +305,10 @@ impl ClusterSim {
 
     /// Raft index ↔ engine LSN correlation records captured during apply.
     pub fn apply_records(&self, id: NodeId) -> &[RaftApplyCommand] {
-        self.apply_records.get(&id).map(|v| v.as_slice()).unwrap_or(&[])
+        self.apply_records
+            .get(&id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Return the ID of the unique current leader, or `None`.
@@ -371,12 +369,7 @@ impl ClusterSim {
         if self.all_ids.contains(&id) {
             return;
         }
-        let peers: Vec<NodeId> = self
-            .all_ids
-            .iter()
-            .copied()
-            .filter(|&p| p != id)
-            .collect();
+        let peers: Vec<NodeId> = self.all_ids.iter().copied().filter(|&p| p != id).collect();
         let timeout = 10 + (id.0.saturating_sub(1)) * 3;
         let config = RaftConfig {
             id,
@@ -522,8 +515,7 @@ impl ClusterSim {
                 if let Some(engine) = self.engines.get_mut(&id) {
                     match self.runtime.block_on(engine.install_snapshot(&data)) {
                         Ok(()) => {
-                            let model =
-                                self.runtime.block_on(sync_ref_model_from_engine(engine));
+                            let model = self.runtime.block_on(sync_ref_model_from_engine(engine));
                             self.state_machines.insert(id, model);
                         }
                         Err(e) => {
@@ -543,10 +535,7 @@ impl ClusterSim {
             for (idx, term, command) in applied {
                 if let Some(sm) = self.state_machines.get_mut(&id) {
                     if let Err(e) = sm.apply_log_entry(&command) {
-                        let msg = format!(
-                            "RAFT-INV-003: node {} corrupt log entry: {e}",
-                            id.0
-                        );
+                        let msg = format!("RAFT-INV-003: node {} corrupt log entry: {e}", id.0);
                         if !self.violations.contains(&msg) {
                             self.violations.push(msg);
                         }
@@ -562,10 +551,8 @@ impl ClusterSim {
                     {
                         Ok(lsn) => lsn,
                         Err(e) => {
-                            let msg = format!(
-                                "RAFT-INV-003: node {} engine apply failed: {e}",
-                                id.0
-                            );
+                            let msg =
+                                format!("RAFT-INV-003: node {} engine apply failed: {e}", id.0);
                             if !self.violations.contains(&msg) {
                                 self.violations.push(msg);
                             }
@@ -899,7 +886,10 @@ mod tests {
         let applied_after = sim.applied_entries(leader).len();
         // We expect some trimming happened (not the full 21+ entries kept if they were before snapshot)
         // Exact count depends on when snapshot was taken; just ensure it didn't grow unbounded in the snapshot case.
-        assert!(applied_after < 30, "applied entries list should be reasonable after trim");
+        assert!(
+            applied_after < 30,
+            "applied entries list should be reasonable after trim"
+        );
     }
 
     /// A 5-node cluster requires a 3-node quorum to commit entries.
@@ -1029,11 +1019,15 @@ mod tests {
         let leader = sim.current_leader().expect("leader");
 
         let follower = (1u64..=3).map(NodeId).find(|&id| id != leader).unwrap();
-        let peers: Vec<NodeId> = (1u64..=3).map(NodeId).filter(|&id| id != follower).collect();
+        let peers: Vec<NodeId> = (1u64..=3)
+            .map(NodeId)
+            .filter(|&id| id != follower)
+            .collect();
         sim.network_mut().isolate(follower, &peers);
 
         for i in 0u8..=10 {
-            sim.propose_put(format!("eng-{i}").as_bytes(), &[i]).unwrap();
+            sim.propose_put(format!("eng-{i}").as_bytes(), &[i])
+                .unwrap();
             sim.run_ticks(4);
         }
 

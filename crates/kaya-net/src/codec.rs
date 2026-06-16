@@ -235,10 +235,12 @@ pub fn decode_envelope(data: &[u8]) -> Result<Envelope, String> {
             })
         }
 
-        MSG_INSTALL_SNAPSHOT_RESPONSE => Message::InstallSnapshotResponse(InstallSnapshotResponse {
-            term: Term(take_u64(&mut cur)?),
-            success: take_u8(&mut cur)? != 0,
-        }),
+        MSG_INSTALL_SNAPSHOT_RESPONSE => {
+            Message::InstallSnapshotResponse(InstallSnapshotResponse {
+                term: Term(take_u64(&mut cur)?),
+                success: take_u8(&mut cur)? != 0,
+            })
+        }
 
         t => return Err(format!("unknown Raft message type: {t}")),
     };

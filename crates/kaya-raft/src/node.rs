@@ -243,10 +243,16 @@ impl RaftNode {
             Message::VoteResponse(m) => self.on_vote_response(env.from, m, &mut out),
             Message::AppendRequest(m) => self.on_append_request(env.from, m, &mut out),
             Message::AppendResponse(m) => self.on_append_response(env.from, m, &mut out),
-            Message::InstallSnapshotRequest(m) => self.on_install_snapshot_request(env.from, m, &mut out),
-            Message::InstallSnapshotResponse(m) => self.on_install_snapshot_response(env.from, m, &mut out),
+            Message::InstallSnapshotRequest(m) => {
+                self.on_install_snapshot_request(env.from, m, &mut out)
+            }
+            Message::InstallSnapshotResponse(m) => {
+                self.on_install_snapshot_response(env.from, m, &mut out)
+            }
             Message::ConfigChangeRequest(m) => self.on_config_change_request(env.from, m, &mut out),
-            Message::ConfigChangeResponse(m) => self.on_config_change_response(env.from, m, &mut out),
+            Message::ConfigChangeResponse(m) => {
+                self.on_config_change_response(env.from, m, &mut out)
+            }
         }
 
         out.extend(self.try_advance_apply());
@@ -293,10 +299,7 @@ impl RaftNode {
             ConfigChangePhase::Joint => {
                 let outgoing = self.effective_config.stable_config().clone();
                 let incoming = ClusterConfiguration::from_voters(voter_set);
-                self.effective_config = EffectiveConfig::Joint {
-                    outgoing,
-                    incoming,
-                };
+                self.effective_config = EffectiveConfig::Joint { outgoing, incoming };
                 self.sync_peers_from_effective_config();
                 if self.role == Role::Leader {
                     if let Some(final_members) = self.pending_membership.take() {
@@ -309,8 +312,7 @@ impl RaftNode {
                             command: cmd.encode(),
                         });
                         self.match_index.insert(self.config.id, idx);
-                        self.next_index
-                            .insert(self.config.id, LogIndex(idx.0 + 1));
+                        self.next_index.insert(self.config.id, LogIndex(idx.0 + 1));
                         self.send_append_to_all(out);
                     }
                 }
@@ -322,9 +324,7 @@ impl RaftNode {
                 self.pending_membership = None;
                 let last = self.log.last_index();
                 for &peer in &self.config.peers {
-                    self.next_index
-                        .entry(peer)
-                        .or_insert(LogIndex(last.0 + 1));
+                    self.next_index.entry(peer).or_insert(LogIndex(last.0 + 1));
                     self.match_index.entry(peer).or_insert(LogIndex(0));
                 }
             }
@@ -591,11 +591,7 @@ impl RaftNode {
                     continue;
                 }
                 let met = self.effective_config.commit_quorum_met(|id| {
-                    self.match_index
-                        .get(id)
-                        .copied()
-                        .unwrap_or(LogIndex(0))
-                        >= n_idx
+                    self.match_index.get(id).copied().unwrap_or(LogIndex(0)) >= n_idx
                 });
                 if met {
                     self.commit_index = n_idx;
@@ -681,7 +677,10 @@ impl RaftNode {
     ///
     /// Appends a joint-configuration log entry; once committed and applied the
     /// leader automatically appends the final-configuration entry.
-    pub fn propose_membership_change(&mut self, new_members: Vec<ClusterMember>) -> Option<LogIndex> {
+    pub fn propose_membership_change(
+        &mut self,
+        new_members: Vec<ClusterMember>,
+    ) -> Option<LogIndex> {
         if self.role != Role::Leader {
             return None;
         }
@@ -713,18 +712,25 @@ impl RaftNode {
             command: cmd.encode(),
         });
         self.match_index.insert(self.config.id, idx);
-        self.next_index
-            .insert(self.config.id, LogIndex(idx.0 + 1));
+        self.next_index.insert(self.config.id, LogIndex(idx.0 + 1));
         Some(idx)
     }
 
     // Dynamic membership stubs (prototype scaffolding)
-    fn on_config_change_request(&mut self, from: NodeId, req: crate::ConfigChangeRequest, out: &mut Vec<Envelope>) {
+    fn on_config_change_request(
+        &mut self,
+        from: NodeId,
+        req: crate::ConfigChangeRequest,
+        out: &mut Vec<Envelope>,
+    ) {
         if req.term < self.current_term {
             out.push(Envelope::new(
                 self.config.id,
                 from,
-                Message::ConfigChangeResponse(crate::ConfigChangeResponse { term: self.current_term, success: false }),
+                Message::ConfigChangeResponse(crate::ConfigChangeResponse {
+                    term: self.current_term,
+                    success: false,
+                }),
             ));
             return;
         }
@@ -737,11 +743,19 @@ impl RaftNode {
         out.push(Envelope::new(
             self.config.id,
             from,
-            Message::ConfigChangeResponse(crate::ConfigChangeResponse { term: self.current_term, success: true }),
+            Message::ConfigChangeResponse(crate::ConfigChangeResponse {
+                term: self.current_term,
+                success: true,
+            }),
         ));
     }
 
-    fn on_config_change_response(&mut self, _from: NodeId, _resp: crate::ConfigChangeResponse, _out: &mut Vec<Envelope>) {
+    fn on_config_change_response(
+        &mut self,
+        _from: NodeId,
+        _resp: crate::ConfigChangeResponse,
+        _out: &mut Vec<Envelope>,
+    ) {
         // TODO: track for quorum on config change
     }
 
@@ -794,7 +808,12 @@ impl RaftNode {
 
     // ── Snapshot support (MVP scaffolding) ─────────────────────────────────────
 
-    fn on_install_snapshot_request(&mut self, from: NodeId, req: crate::InstallSnapshotRequest, out: &mut Vec<Envelope>) {
+    fn on_install_snapshot_request(
+        &mut self,
+        from: NodeId,
+        req: crate::InstallSnapshotRequest,
+        out: &mut Vec<Envelope>,
+    ) {
         // Basic term handling and snapshot installation (to be expanded).
         if req.term < self.current_term {
             out.push(Envelope::new(
@@ -812,7 +831,11 @@ impl RaftNode {
         }
 
         // Accept the snapshot and truncate our log accordingly.
-        self.log.install_snapshot(req.last_included_index, req.last_included_term, req.data.clone());
+        self.log.install_snapshot(
+            req.last_included_index,
+            req.last_included_term,
+            req.data.clone(),
+        );
 
         // Advance our tracking.
         if req.last_included_index > self.commit_index {
@@ -835,7 +858,12 @@ impl RaftNode {
         ));
     }
 
-    fn on_install_snapshot_response(&mut self, from: NodeId, resp: crate::InstallSnapshotResponse, _out: &mut Vec<Envelope>) {
+    fn on_install_snapshot_response(
+        &mut self,
+        from: NodeId,
+        resp: crate::InstallSnapshotResponse,
+        _out: &mut Vec<Envelope>,
+    ) {
         if self.role != Role::Leader || resp.term < self.current_term {
             return;
         }

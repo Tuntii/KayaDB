@@ -30,10 +30,7 @@ impl RaftApplyIndex {
                 }
             }
         }
-        let writer = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let writer = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             path,
             writer,

@@ -251,9 +251,7 @@ mod tests {
         let t2 = Instant::now();
         history.record_timed(
             0,
-            Op::Get {
-                key: b"k".to_vec(),
-            },
+            Op::Get { key: b"k".to_vec() },
             OperationResult::Value(Some(b"v2".to_vec())),
             t2,
             t2 + Duration::from_micros(5),

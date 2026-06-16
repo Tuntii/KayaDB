@@ -22,7 +22,11 @@ impl ClusterConfiguration {
     }
 
     pub fn peers_of(&self, self_id: NodeId) -> Vec<NodeId> {
-        self.voters.iter().copied().filter(|&id| id != self_id).collect()
+        self.voters
+            .iter()
+            .copied()
+            .filter(|&id| id != self_id)
+            .collect()
     }
 }
 
@@ -69,16 +73,8 @@ impl EffectiveConfig {
                 met >= c.quorum()
             }
             Self::Joint { outgoing, incoming } => {
-                let old_met = outgoing
-                    .voters
-                    .iter()
-                    .filter(|id| match_counts(id))
-                    .count();
-                let new_met = incoming
-                    .voters
-                    .iter()
-                    .filter(|id| match_counts(id))
-                    .count();
+                let old_met = outgoing.voters.iter().filter(|id| match_counts(id)).count();
+                let new_met = incoming.voters.iter().filter(|id| match_counts(id)).count();
                 old_met >= outgoing.quorum() && new_met >= incoming.quorum()
             }
         }

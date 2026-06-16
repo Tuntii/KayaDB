@@ -578,28 +578,32 @@ mod tests {
         // Stop one follower while the leader compacts a large write batch.
         let (crashed_client_addr, restart_config) = if leader_id == 3 {
             handle2.abort();
-            (client_addr2, ClusterConfig::new(
-                2,
-                &data_dir2,
-                raft_addr2,
+            (
                 client_addr2,
-                vec![(1, raft_addr1, client_addr1), (3, raft_addr3, client_addr3)],
-            ))
+                ClusterConfig::new(
+                    2,
+                    &data_dir2,
+                    raft_addr2,
+                    client_addr2,
+                    vec![(1, raft_addr1, client_addr1), (3, raft_addr3, client_addr3)],
+                ),
+            )
         } else {
             handle3.abort();
-            (client_addr3, ClusterConfig::new(
-                3,
-                &data_dir3,
-                raft_addr3,
+            (
                 client_addr3,
-                vec![(1, raft_addr1, client_addr1), (2, raft_addr2, client_addr2)],
-            ))
+                ClusterConfig::new(
+                    3,
+                    &data_dir3,
+                    raft_addr3,
+                    client_addr3,
+                    vec![(1, raft_addr1, client_addr1), (2, raft_addr2, client_addr2)],
+                ),
+            )
         };
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        let mut client = kaya_client::KayaClient::connect(leader_addr)
-            .await
-            .unwrap();
+        let mut client = kaya_client::KayaClient::connect(leader_addr).await.unwrap();
         for i in 0..128u16 {
             let key = format!("snap-{i}");
             let val = format!("v{i}");
@@ -618,7 +622,10 @@ mod tests {
                 }
             }
         }
-        assert!(leader_compacted, "leader did not reach compaction threshold");
+        assert!(
+            leader_compacted,
+            "leader did not reach compaction threshold"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         let restart_handle = tokio::spawn(async move {
@@ -732,20 +739,22 @@ mod tests {
             (2, raft_addr2, client_addr2),
             (3, raft_addr3, client_addr3),
         ];
-        let config4 = ClusterConfig::new(4, &data_dir4, raft_addr4, client_addr4, seeds)
-            .with_join_cluster();
+        let config4 =
+            ClusterConfig::new(4, &data_dir4, raft_addr4, client_addr4, seeds).with_join_cluster();
         let handle4 = tokio::spawn(async move {
             let _ = ClusterNode::new(config4).run().await;
         });
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        let add_payload = encode_member_payload(
-            4,
-            &raft_addr4.to_string(),
-            &client_addr4.to_string(),
-        );
+        let add_payload =
+            encode_member_payload(4, &raft_addr4.to_string(), &client_addr4.to_string());
         let (status, body) = roundtrip(leader_addr, 7, &add_payload).await.unwrap();
-        assert_eq!(status, 0, "ADD_MEMBER failed: {:?}", String::from_utf8(body));
+        assert_eq!(
+            status,
+            0,
+            "ADD_MEMBER failed: {:?}",
+            String::from_utf8(body)
+        );
 
         let mut joined = false;
         for _ in 0..150 {
@@ -761,9 +770,7 @@ mod tests {
         }
         assert!(joined, "node 4 was not included in the cluster roster");
 
-        let mut client = kaya_client::KayaClient::connect(leader_addr)
-            .await
-            .unwrap();
+        let mut client = kaya_client::KayaClient::connect(leader_addr).await.unwrap();
         client
             .put(b"membership-key", b"membership-val")
             .await
@@ -775,7 +782,8 @@ mod tests {
         let remove_payload = encode_remove_member_payload(4);
         let (status, body) = roundtrip(leader_addr, 8, &remove_payload).await.unwrap();
         assert_eq!(
-            status, 0,
+            status,
+            0,
             "REMOVE_MEMBER failed: {:?}",
             String::from_utf8(body)
         );

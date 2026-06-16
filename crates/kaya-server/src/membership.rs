@@ -43,10 +43,7 @@ pub fn persist_roster(data_dir: &Path, roster: &NodeRoster) -> Result<(), String
     let path = roster_path(data_dir);
     let mut lines = Vec::new();
     for (id, raft_addr) in roster.all_entries() {
-        let client = roster
-            .client_addr(id)
-            .unwrap_or(raft_addr)
-            .to_string();
+        let client = roster.client_addr(id).unwrap_or(raft_addr).to_string();
         lines.push(format!(
             r#"{{"id":{},"raft_addr":"{raft_addr}","client_addr":"{client}"}}"#,
             id.0
@@ -80,10 +77,7 @@ fn serde_json_parse_line(line: &str) -> Result<RosterRecord, String> {
 
 fn extract_json_u64(json: &str, key: &str) -> Result<u64, String> {
     let needle = format!("\"{key}\":");
-    let start = json
-        .find(&needle)
-        .ok_or_else(|| format!("missing {key}"))?
-        + needle.len();
+    let start = json.find(&needle).ok_or_else(|| format!("missing {key}"))? + needle.len();
     let rest = json[start..].trim_start();
     let end = rest
         .find(|c: char| !c.is_ascii_digit())
@@ -93,12 +87,11 @@ fn extract_json_u64(json: &str, key: &str) -> Result<u64, String> {
 
 fn extract_json_str(json: &str, key: &str) -> Result<String, String> {
     let needle = format!("\"{key}\":\"");
-    let start = json
-        .find(&needle)
-        .ok_or_else(|| format!("missing {key}"))?
-        + needle.len();
+    let start = json.find(&needle).ok_or_else(|| format!("missing {key}"))? + needle.len();
     let rest = &json[start..];
-    let end = rest.find('"').ok_or_else(|| format!("unterminated {key}"))?;
+    let end = rest
+        .find('"')
+        .ok_or_else(|| format!("unterminated {key}"))?;
     Ok(rest[..end].to_owned())
 }
 
@@ -122,7 +115,9 @@ pub async fn apply_config_change_to_roster(
     guard.upsert(self_id, self_raft, self_client);
 
     if phase == ConfigChangePhase::Final {
-        let has_addrs = members.iter().all(|m| !m.raft_addr.is_empty() && !m.client_addr.is_empty());
+        let has_addrs = members
+            .iter()
+            .all(|m| !m.raft_addr.is_empty() && !m.client_addr.is_empty());
         if has_addrs {
             if let Ok(()) = guard.replace_from_members(&tuples) {
                 guard.upsert(self_id, self_raft, self_client);
@@ -228,11 +223,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let mut roster = NodeRoster::new_with_client([(
-            NodeId(1),
-            addr(7481),
-            addr(7379),
-        )]);
+        let mut roster = NodeRoster::new_with_client([(NodeId(1), addr(7481), addr(7379))]);
         persist_roster(&dir, &roster).unwrap();
 
         roster = NodeRoster::new_with_client([]);

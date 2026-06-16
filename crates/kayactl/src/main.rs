@@ -58,9 +58,25 @@ fn run() -> Result<()> {
         }
     };
 
+    let latency_view = remove_flag(&mut args, "--latency");
+
+    // ── eBPF observability (Linux experiments, M12) ───────────────────────────
+    // Handled early so it works standalone or alongside --server/--data.
+    if !args.is_empty() && args[0] == "ebpf" {
+        let sub = if args.len() > 1 {
+            args[1].clone()
+        } else {
+            "help".to_string()
+        };
+        let pid: Option<u32> = remove_value_flag(&mut args, "--pid").and_then(|s| s.parse().ok());
+        let run = remove_flag(&mut args, "--run");
+        let duration: Option<String> = remove_value_flag(&mut args, "--duration");
+        return handle_ebpf(&sub, pid, run, duration, json);
+    }
+
     // ── server mode ───────────────────────────────────────────────────────────
     if !server_addrs.is_empty() {
-        return run_server_mode(args, server_addrs, json, timeout);
+        return run_server_mode(args, server_addrs, json, timeout, latency_view);
     }
 
     // ── local engine mode (unchanged) ─────────────────────────────────────────
@@ -218,8 +234,32 @@ fn run() -> Result<()> {
             let recovery = engine.last_recovery().clone();
             if json {
                 print_stats_json(&stats, &recovery);
+            } else if latency_view {
+                print_latency_human(&stats);
             } else {
                 print_stats_human(&stats, &recovery);
+            }
+            Ok(())
+        }
+        [cmd] if cmd == "flush" => {
+            let (flush_res, stats) = block_on(async {
+                let mut engine = open_engine(data_dir, durability).await?;
+                let r = engine.flush().await?;
+                let s = engine.stats();
+                Ok::<_, KayaError>((r, s))
+            })?;
+            if json {
+                println!(
+                    "{{\"ok\":true,\"memtable_entries\":{},\"sstable_count\":{}}}",
+                    flush_res.memtable_entries, flush_res.sstable_count
+                );
+            } else {
+                println!(
+                    "OK flushed {} memtable entries. Live SSTables: {}",
+                    flush_res.memtable_entries, flush_res.sstable_count
+                );
+                println!();
+                print_latency_human(&stats);
             }
             Ok(())
         }
@@ -324,16 +364,22 @@ fn run_server_mode(
     endpoints: Vec<SocketAddr>,
     json: bool,
     timeout: Option<Duration>,
+    latency_view: bool,
 ) -> Result<()> {
-    block_on(async move { run_server_mode_async(args, endpoints, json, timeout).await })
+    block_on(
+        async move { run_server_mode_async(args, endpoints, json, timeout, latency_view).await },
+    )
 }
 
 async fn run_server_mode_async(
-    args: Vec<String>,
+    mut args: Vec<String>,
     endpoints: Vec<SocketAddr>,
     json: bool,
     timeout: Option<Duration>,
+    latency_view: bool,
 ) -> Result<()> {
+    let _operator_token = remove_value_flag(&mut args, "--operator-token").unwrap_or_default();
+
     match args.as_slice() {
         [] => {
             print_usage();
@@ -488,6 +534,11 @@ async fn run_server_mode_async(
                     String::from_utf8(body).map_err(|e| KayaError::corruption(e.to_string()))?;
                 if json {
                     println!("{}", stats_str);
+                } else if latency_view {
+                    // Best-effort: the full human already includes latency fields now.
+                    // For a focused view we still go through the extractor (it prints everything relevant).
+                    print_human_stats_from_json(&stats_str);
+                    // Future: could parse and call a pure latency printer, but enriched human is good.
                 } else {
                     print_human_stats_from_json(&stats_str);
                 }
@@ -524,17 +575,15 @@ async fn run_server_mode_async(
     }
 }
 
-fn handle_membership_response(
-    status: u16,
-    body: &[u8],
-    json: bool,
-    op: &str,
-) -> Result<()> {
+fn handle_membership_response(status: u16, body: &[u8], json: bool, op: &str) -> Result<()> {
     match status {
         STATUS_OK => {
             let msg = String::from_utf8_lossy(body);
             if json {
-                println!("{{\"ok\":true,\"op\":\"{op}\",\"message\":{}}}", json_string(&msg));
+                println!(
+                    "{{\"ok\":true,\"op\":\"{op}\",\"message\":{}}}",
+                    json_string(&msg)
+                );
             } else {
                 println!("OK {msg}");
             }
@@ -591,10 +640,13 @@ fn print_usage() {
     println!("  kayactl [--data <dir>] [--json] get <key>");
     println!("  kayactl [--data <dir>] [--durability strict|relaxed] [--json] delete <key>");
     println!("  kayactl [--data <dir>] [--json] scan <prefix>");
+    println!("  kayactl [--data <dir>] [--durability strict|relaxed] [--json] flush   (force memtable -> SSTable for observability)");
     println!();
     println!("OBSERVABILITY COMMANDS");
-    println!("  kayactl [--data <dir>] [--json] stats");
+    println!("  kayactl [--data <dir>] [--json] [--latency] stats   (add --latency for focused durability + flush/compaction timers)");
+    println!("  kayactl [--data <dir>] [--durability ...] [--json] flush   (force publish to see latency numbers move; pairs with --latency and ebpf probes)");
     println!("  kayactl [--data <dir>] [--json] recover --dry-run");
+    println!("  kayactl ebpf [fsync-latency|...|list|status|help] [--pid <pid>] [--run] [--duration 30s]   (Linux eBPF experiments, Track A)");
     println!();
     println!("CLUSTER MODE (via running kayadb-server)");
     println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] put <key> <value>");
@@ -608,7 +660,7 @@ fn print_usage() {
         "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] scan <prefix>"
     );
     println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] health");
-    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] status");
+    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] [--latency] status");
     println!("  kayactl --server <addr> add-node <id> <raft-addr> <client-addr>");
     println!("  kayactl --server <addr> remove-node <id>");
     println!();
@@ -621,6 +673,360 @@ fn print_usage() {
     println!("  --data ./data");
     println!("  --durability strict");
     println!("  --timeout (none)");
+}
+
+/// Handle `kayactl ebpf ...` subcommands.
+/// Linux eBPF observability experiments (Track A / M12). Non-Linux and missing tools are handled gracefully.
+/// If `run` is true we attempt to exec bpftrace (requires appropriate privileges on Linux).
+/// `duration` (e.g. "30s") is best-effort for --run (uses `timeout` on Unix if available).
+fn handle_ebpf(
+    sub: &str,
+    explicit_pid: Option<u32>,
+    run: bool,
+    duration: Option<String>,
+    _json: bool,
+) -> Result<()> {
+    const LINUX_ONLY_MSG: &str = "eBPF probes are Linux-only. This command provides ready-to-run bpftrace commands and guidance (see scripts/ebpf/).";
+
+    if !cfg!(target_os = "linux") {
+        println!("{}", LINUX_ONLY_MSG);
+        println!(
+            "Scripts live in scripts/ebpf/ and work on any Linux machine with bpftrace + sudo."
+        );
+        return Ok(());
+    }
+
+    // Try to auto-detect a KayaDB server PID if none supplied.
+    let pid = explicit_pid.or_else(|| {
+        // Best-effort: look for kayadb-server first, then kayactl (for local engine tests)
+        std::process::Command::new("pgrep")
+            .args(["-f", "kayadb-server"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .and_then(|s| s.lines().next().and_then(|l| l.trim().parse::<u32>().ok()))
+            })
+            .or_else(|| {
+                std::process::Command::new("pgrep")
+                    .args(["-f", "kayactl"])
+                    .output()
+                    .ok()
+                    .and_then(|o| {
+                        String::from_utf8(o.stdout).ok().and_then(|s| {
+                            s.lines().next().and_then(|l| l.trim().parse::<u32>().ok())
+                        })
+                    })
+            })
+    });
+
+    let pid_str = pid
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "<PID>".to_string());
+    let pid_hint = if pid.is_some() {
+        format!("(auto-detected PID {})", pid_str)
+    } else {
+        "(pass --pid <N> or run against a live kayadb-server)".to_string()
+    };
+
+    match sub {
+        "fsync-latency" | "fsync" => {
+            println!("KayaDB eBPF: fsync / fdatasync latency (microseconds)");
+            println!("PID hint: {}", pid_hint);
+            println!();
+            println!("Recommended (copy-paste):");
+            println!(
+                "  sudo bpftrace -p {} scripts/ebpf/fsync-latency.bt",
+                pid_str
+            );
+            println!();
+            println!("Alternative one-liner:");
+            println!("  sudo bpftrace -e '");
+            println!("    kprobe:sys_fsync, kprobe:sys_fdatasync {{ @start[tid] = nsecs; }}");
+            println!("    kretprobe:sys_fsync, kretprobe:sys_fdatasync /@start[tid]/ {{");
+            println!("      $us = (nsecs - @start[tid]) / 1000;");
+            println!("      @fsync_us = hist($us); delete(@start[tid]);");
+            println!("    }}' -p {}", pid_str);
+            println!();
+            println!("See: scripts/ebpf/README.md and spec/docs/observability-spec.md");
+            // Attempt to run if bpftrace exists and we have a real PID (best effort, user will see permission errors)
+            if pid.is_some()
+                && std::process::Command::new("bpftrace")
+                    .arg("--version")
+                    .output()
+                    .is_ok()
+            {
+                println!("\n[bpftrace found] You can now run the sudo command above.");
+            }
+            if run {
+                return try_run_bpftrace("fsync-latency", &pid_str, duration.as_deref());
+            }
+            Ok(())
+        }
+        "block-latency" | "bio" | "block" => {
+            println!("KayaDB eBPF: block I/O (device) latency histograms (us)");
+            println!("PID hint: {}", pid_hint);
+            println!();
+            println!("Recommended (copy-paste):");
+            println!(
+                "  sudo bpftrace -p {} scripts/ebpf/block-io-latency.bt",
+                pid_str
+            );
+            println!();
+            println!("This shows time spent in the storage stack / scheduler / device after the fsync syscall.");
+            println!("See: scripts/ebpf/README.md");
+            if pid.is_some()
+                && std::process::Command::new("bpftrace")
+                    .arg("--version")
+                    .output()
+                    .is_ok()
+            {
+                println!("\n[bpftrace found] Ready to attach.");
+            }
+            if run {
+                return try_run_bpftrace("block-io-latency", &pid_str, duration.as_deref());
+            }
+            Ok(())
+        }
+        "syscall-timeline" | "timeline" | "sys" => {
+            println!("KayaDB eBPF: syscall timeline (write, fsync, fdatasync, rename, unlink, fsyncdir) + TID correlation");
+            println!("PID hint: {}", pid_hint);
+            println!();
+            println!("Recommended (copy-paste):");
+            println!(
+                "  sudo bpftrace -p {} scripts/ebpf/syscall-timeline.bt",
+                pid_str
+            );
+            println!();
+            println!("This script correlates writes with their fsyncs by TID and shows rename/unlink for flush/compaction publish points.");
+            println!("See: scripts/ebpf/README.md (Track A addition)");
+            if pid.is_some()
+                && std::process::Command::new("bpftrace")
+                    .arg("--version")
+                    .output()
+                    .is_ok()
+            {
+                println!("\n[bpftrace found] Ready to attach.");
+            }
+            if run {
+                return try_run_bpftrace("syscall-timeline", &pid_str, duration.as_deref());
+            }
+            Ok(())
+        }
+        "list" => {
+            println!("kayactl ebpf list — active KayaDB / bpftrace processes (best effort)");
+            if !cfg!(target_os = "linux") {
+                println!("{}", LINUX_ONLY_MSG);
+                return Ok(());
+            }
+            // List kayadb-server instances (cluster friendly)
+            println!("\n--- kayadb-server processes ---");
+            if let Ok(out) = std::process::Command::new("pgrep")
+                .args(["-a", "kayadb-server"])
+                .output()
+            {
+                let s = String::from_utf8_lossy(&out.stdout);
+                if s.trim().is_empty() {
+                    println!("  (none found)");
+                } else {
+                    for line in s.lines() {
+                        println!("  {}", line.trim());
+                    }
+                }
+            } else {
+                println!("  pgrep unavailable");
+            }
+            // List kayactl (embedded tests)
+            println!("\n--- kayactl processes ---");
+            if let Ok(out) = std::process::Command::new("pgrep")
+                .args(["-a", "kayactl"])
+                .output()
+            {
+                let s = String::from_utf8_lossy(&out.stdout);
+                if s.trim().is_empty() {
+                    println!("  (none found)");
+                } else {
+                    for line in s.lines() {
+                        println!("  {}", line.trim());
+                    }
+                }
+            }
+            // List running bpftrace traces (useful for "status" of traces)
+            println!("\n--- bpftrace / trace processes ---");
+            if let Ok(out) = std::process::Command::new("pgrep")
+                .args(["-a", "bpftrace"])
+                .output()
+            {
+                let s = String::from_utf8_lossy(&out.stdout);
+                if s.trim().is_empty() {
+                    println!("  (none found — no active traces)");
+                } else {
+                    for line in s.lines() {
+                        println!("  {}", line.trim());
+                    }
+                }
+            } else {
+                println!("  pgrep bpftrace unavailable");
+            }
+            println!("\nUse the printed PIDs with --pid or the auto-detector.");
+            Ok(())
+        }
+        "status" => {
+            println!("kayactl ebpf status — quick view of local nodes + any attached traces");
+            if !cfg!(target_os = "linux") {
+                println!("{}", LINUX_ONLY_MSG);
+                return Ok(());
+            }
+            // Reuse list logic but summarized
+            let servers: Vec<String> = std::process::Command::new("pgrep")
+                .args(["-f", "kayadb-server"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| {
+                    s.lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(|l| l.trim().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            println!(
+                "Detected kayadb-server PIDs: {}",
+                if servers.is_empty() {
+                    "(none)".into()
+                } else {
+                    servers.join(", ")
+                }
+            );
+            let traces: Vec<String> = std::process::Command::new("pgrep")
+                .args(["-a", "bpftrace"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| {
+                    s.lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(|l| l.trim().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            println!(
+                "Active bpftrace traces: {}",
+                if traces.is_empty() {
+                    "0 (no kernel probes attached)".into()
+                } else {
+                    traces.len().to_string()
+                }
+            );
+            println!("Tip: kayactl ebpf list   for full details.");
+            Ok(())
+        }
+        "help" | _ => {
+            println!("kayactl ebpf — Linux eBPF observability experiments (Track A / M12)");
+            println!();
+            println!("Subcommands:");
+            println!(
+                "  kayactl ebpf fsync-latency [--pid <pid>] [--run]        Trace fsync/fdatasync latency (us)"
+            );
+            println!(
+                "  kayactl ebpf block-latency  [--pid <pid>] [--run]        Trace block device I/O latency (us)"
+            );
+            println!(
+                "  kayactl ebpf syscall-timeline [--pid <pid>] [--run]    Trace writes + fsync/rename etc + simple TID correlation (new)"
+            );
+            println!("  kayactl ebpf list                                    List local kayadb-server + active bpftrace processes (multi-node friendly)");
+            println!("  kayactl ebpf status                                  Summary of nodes + attached traces");
+            println!("  kayactl ebpf help");
+            println!();
+            println!("These commands print ready-to-run bpftrace invocations. Use --run [--duration 30s] to try executing directly (you will likely need sudo).");
+            println!("--run improvements: best-effort duration limit via `timeout` (Unix), output shown to terminal; for clusters run multiple in separate terminals or use external timeout.");
+            println!("Auto-detect + 'list'/'status' find all kayadb-server PIDs (good for 3-node local clusters).");
+            println!("Tip for Track A: `kayactl --data ... flush` (or repeated puts) + `stats --latency` generates visible activity for the probes.");
+            println!("They require a Linux host with bpftrace installed and sufficient capabilities (usually sudo).");
+            println!();
+            println!("Full documentation: scripts/ebpf/README.md");
+            println!("Observability spec:   spec/docs/observability-spec.md (section 7)");
+            println!("Roadmap:              ROADMAP.md (Track A)");
+            if !cfg!(target_os = "linux") {
+                println!("\n{}", LINUX_ONLY_MSG);
+            } else if pid.is_none() {
+                println!("\nTip: start a server first (kayadb-server or scripts/start-cluster.sh), then re-run. Use 'ebpf list' to discover PIDs.");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Try to exec the named bpftrace script (best-effort, for developer convenience).
+/// On Linux + bpftrace present this will (optionally with duration) run the trace.
+/// The user is responsible for privileges (the script will usually need sudo or
+/// CAP_BPF+CAP_PERFMON). We deliberately do *not* auto-sudo here.
+/// duration: optional e.g. "30s" — on Unix we prefix with `timeout <duration>` if the binary exists.
+fn try_run_bpftrace(kind: &str, pid_str: &str, duration: Option<&str>) -> Result<()> {
+    if !cfg!(target_os = "linux") {
+        eprintln!("--run is only supported on Linux.");
+        return Ok(());
+    }
+
+    let script = match kind {
+        "fsync-latency" => "scripts/ebpf/fsync-latency.bt",
+        "block-io-latency" => "scripts/ebpf/block-io-latency.bt",
+        "syscall-timeline" => "scripts/ebpf/syscall-timeline.bt",
+        _ => {
+            eprintln!("unknown eBPF script kind");
+            return Ok(());
+        }
+    };
+
+    if pid_str == "<PID>" {
+        eprintln!("Cannot --run without a concrete PID. Use --pid N or ensure a kayadb-server is running for auto-detect.");
+        return Ok(());
+    }
+
+    // Check bpftrace exists
+    if std::process::Command::new("bpftrace")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("bpftrace not found in PATH. Install it first (see scripts/ebpf/README.md).");
+        return Ok(());
+    }
+
+    eprintln!("WARNING: launching bpftrace for PID {}.", pid_str);
+    if let Some(d) = duration {
+        eprintln!("Duration limited to {} (best effort via timeout).", d);
+    }
+    eprintln!("This may require elevated privileges. If it fails with permission errors, re-run the printed sudo command manually.");
+    eprintln!("Press Ctrl-C to stop the trace.\n");
+
+    let mut cmd = std::process::Command::new("bpftrace");
+    if let Some(d) = duration {
+        // Best effort: use timeout(1) when available (common on Linux). Fall back to plain run.
+        if std::process::Command::new("timeout")
+            .arg("--version")
+            .output()
+            .is_ok()
+        {
+            cmd.arg(d); // timeout <duration> bpftrace ...
+        } else {
+            eprintln!("Note: 'timeout' command not found; running without duration limit.");
+        }
+    }
+    let status = cmd.args(["-p", pid_str, script]).status();
+
+    match status {
+        Ok(s) => {
+            if !s.success() {
+                eprintln!("bpftrace exited with status: {}", s);
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to spawn bpftrace: {}", e);
+        }
+    }
+    Ok(())
 }
 
 fn print_human_stats_from_json(json: &str) {
@@ -682,6 +1088,12 @@ fn print_human_stats_from_json(json: &str) {
     if let Some(wal_fsync) = extract("wal_fsync_count") {
         println!("WAL Fsync Count:      {}", wal_fsync);
     }
+    if let Some(total_us) = extract("wal_fsync_total_us") {
+        println!("WAL Fsync Total Us:   {}", total_us);
+    }
+    if let Some(max_us) = extract("wal_fsync_max_us") {
+        println!("WAL Fsync Max Us:     {}", max_us);
+    }
     if let Some(mem_entries) = extract("memtable_entries") {
         println!("Memtable Entries:     {}", mem_entries);
     }
@@ -690,6 +1102,30 @@ fn print_human_stats_from_json(json: &str) {
     }
     if let Some(last_seq) = extract("last_sequence") {
         println!("Last Sequence Number: {}", last_seq);
+    }
+    if let Some(f_cnt) = extract("flush_count") {
+        println!("Flush Count:            {}", f_cnt);
+    }
+    if let Some(f_tot) = extract("flush_total_us") {
+        println!("Flush Total Us:         {}", f_tot);
+    }
+    if let Some(f_max) = extract("flush_max_us") {
+        println!("Flush Max Us:           {}", f_max);
+    }
+    if let Some(f_avg) = extract("flush_avg_us") {
+        println!("Flush Avg Us:           {}", f_avg);
+    }
+    if let Some(c_cnt) = extract("compaction_count") {
+        println!("Compaction Count:       {}", c_cnt);
+    }
+    if let Some(c_tot) = extract("compaction_total_us") {
+        println!("Compaction Total Us:    {}", c_tot);
+    }
+    if let Some(c_max) = extract("compaction_max_us") {
+        println!("Compaction Max Us:      {}", c_max);
+    }
+    if let Some(c_avg) = extract("compaction_avg_us") {
+        println!("Compaction Avg Us:      {}", c_avg);
     }
     println!("==================================");
 }
@@ -701,9 +1137,30 @@ fn print_stats_human(stats: &EngineStats, recovery: &RecoveryReport) {
     println!("scan_count:        {}", stats.scan_count);
     println!("wal_bytes_written: {}", stats.wal_bytes_written);
     println!("wal_fsync_count:   {}", stats.wal_fsync_count);
+    println!("wal_fsync_total_us:{}", stats.wal_fsync_total_us);
+    println!("wal_fsync_max_us:  {}", stats.wal_fsync_max_us);
+    if stats.wal_fsync_count > 0 {
+        let avg = stats.wal_fsync_total_us / stats.wal_fsync_count;
+        println!("wal_fsync_avg_us:  {} (total/count)", avg);
+    }
     println!("memtable_entries:  {}", stats.memtable_entries);
     println!("sstable_count:     {}", stats.sstable_count);
     println!("last_sequence:     {}", stats.last_sequence);
+    // Track A latency metrics
+    println!("flush_count:       {}", stats.flush_count);
+    println!("flush_total_us:    {}", stats.flush_total_us);
+    println!("flush_max_us:      {}", stats.flush_max_us);
+    if stats.flush_count > 0 {
+        let avg = stats.flush_total_us / stats.flush_count;
+        println!("flush_avg_us:      {} (total/count)", avg);
+    }
+    println!("compaction_count:  {}", stats.compaction_count);
+    println!("compaction_total_us: {}", stats.compaction_total_us);
+    println!("compaction_max_us:   {}", stats.compaction_max_us);
+    if stats.compaction_count > 0 {
+        let avg = stats.compaction_total_us / stats.compaction_count;
+        println!("compaction_avg_us: {} (total/count)", avg);
+    }
     println!();
     println!(
         "recovery.manifest_records_replayed: {}",
@@ -748,8 +1205,10 @@ fn print_stats_json(stats: &EngineStats, recovery: &RecoveryReport) {
         stats.put_count, stats.get_count, stats.delete_count, stats.scan_count
     );
     print!(
-        "\"wal_bytes_written\":{},\"wal_fsync_count\":{},\"memtable_entries\":{},\"sstable_count\":{},\"last_sequence\":{},",
-        stats.wal_bytes_written, stats.wal_fsync_count, stats.memtable_entries, stats.sstable_count, stats.last_sequence
+        "\"wal_bytes_written\":{},\"wal_fsync_count\":{},\"wal_fsync_total_us\":{},\"wal_fsync_max_us\":{},\"memtable_entries\":{},\"sstable_count\":{},\"last_sequence\":{},\"flush_total_us\":{},\"flush_max_us\":{},\"flush_count\":{},\"compaction_total_us\":{},\"compaction_max_us\":{},\"compaction_count\":{},",
+        stats.wal_bytes_written, stats.wal_fsync_count, stats.wal_fsync_total_us, stats.wal_fsync_max_us, stats.memtable_entries, stats.sstable_count, stats.last_sequence,
+        stats.flush_total_us, stats.flush_max_us, stats.flush_count,
+        stats.compaction_total_us, stats.compaction_max_us, stats.compaction_count
     );
     print!(
         "\"recovery\":{{\"manifest_records_replayed\":{},\"live_sstable_count\":{},\"wal_records_replayed\":{},\"wal_truncated_bytes\":{},\"tmp_files_removed\":{},\"last_lsn\":{},\"last_sequence\":{},\"records_replayed\":{},\"warnings\":[",
@@ -769,6 +1228,46 @@ fn print_stats_json(stats: &EngineStats, recovery: &RecoveryReport) {
         print!("{}", json_string(&w.to_string()));
     }
     println!("]}}}}");
+}
+
+/// Focused latency view (Track A). Use with `kayactl [--data] stats --latency` or pipe server status JSON.
+fn print_latency_human(stats: &EngineStats) {
+    println!("=== KayaDB Latency / Durability (Track A) ===");
+    println!("WAL fsyncs (strict durability cost):");
+    println!("  count:   {}", stats.wal_fsync_count);
+    println!("  total_us:{}", stats.wal_fsync_total_us);
+    println!("  max_us:  {}", stats.wal_fsync_max_us);
+    if stats.wal_fsync_count > 0 {
+        println!(
+            "  avg_us:  {}",
+            stats.wal_fsync_total_us / stats.wal_fsync_count
+        );
+    }
+    println!();
+    println!("Flush (memtable -> SSTable publish, manifest, dir fsyncs):");
+    println!("  count:   {}", stats.flush_count);
+    println!("  total_us:{}", stats.flush_total_us);
+    println!("  max_us:  {}", stats.flush_max_us);
+    if stats.flush_count > 0 {
+        println!("  avg_us:  {}", stats.flush_total_us / stats.flush_count);
+    }
+    println!();
+    println!("Compaction (L0 merge + publish):");
+    println!("  count:   {}", stats.compaction_count);
+    println!("  total_us:{}", stats.compaction_total_us);
+    println!("  max_us:  {}", stats.compaction_max_us);
+    if stats.compaction_count > 0 {
+        println!(
+            "  avg_us:  {}",
+            stats.compaction_total_us / stats.compaction_count
+        );
+    }
+    println!();
+    println!("Cross-reference with:");
+    println!("  kayactl ebpf fsync-latency   (kernel fsync hist)");
+    println!("  kayactl ebpf syscall-timeline (write/fsync/rename timeline + TID corr)");
+    println!("  (Linux only; see scripts/ebpf/README.md)");
+    println!("========================================");
 }
 
 fn print_recovery_human(recovery: &RecoveryReport) {

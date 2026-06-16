@@ -16,6 +16,9 @@ pub struct AppendResult {
     pub offset: u64,
     pub encoded_len: u32,
     pub durable: bool,
+    /// Duration of the fsync_file that made this append durable (Strict mode only).
+    /// None for Relaxed or if timing was not captured.
+    pub fsync_duration_us: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -92,8 +95,22 @@ impl<D: Disk> WalWriter<D> {
         let offset = self.disk.append(&self.active_path, &encoded).await?;
         let durable = match mode {
             DurabilityMode::Strict => {
+                let start = std::time::Instant::now();
                 self.disk.fsync_file(&self.active_path).await?;
-                true
+                let us = start.elapsed().as_micros() as u64;
+                self.active_len = offset + u64::from(encoded_len);
+                let result = AppendResult {
+                    lsn: self.next_lsn,
+                    sequence: self.next_sequence,
+                    segment_id: self.active_segment_id,
+                    offset,
+                    encoded_len,
+                    durable: true,
+                    fsync_duration_us: Some(us),
+                };
+                self.next_lsn = self.next_lsn.next();
+                self.next_sequence = self.next_sequence.next();
+                return Ok(result);
             }
             DurabilityMode::Relaxed => false,
         };
@@ -106,6 +123,7 @@ impl<D: Disk> WalWriter<D> {
             offset,
             encoded_len,
             durable,
+            fsync_duration_us: None,
         };
         self.next_lsn = self.next_lsn.next();
         self.next_sequence = self.next_sequence.next();

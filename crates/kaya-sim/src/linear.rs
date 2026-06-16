@@ -343,7 +343,9 @@ impl LinearizabilityChecker {
         if found {
             Ok(())
         } else if last_error.is_empty() {
-            Err(vec!["no linearization extends the real-time order".to_owned()])
+            Err(vec![
+                "no linearization extends the real-time order".to_owned()
+            ])
         } else {
             Err(last_error)
         }
@@ -604,17 +606,62 @@ mod tests {
     fn concurrent_overlapping_put_get_consistent() {
         let mut checker = LinearizabilityChecker::new();
         // Two overlapping puts to different keys, then concurrent gets.
-        checker.record_interval(0, 2, Some(1), Op::Put { key: b"a".to_vec(), value: b"1".to_vec() }, OpResult::Ok);
-        checker.record_interval(1, 3, Some(2), Op::Put { key: b"b".to_vec(), value: b"2".to_vec() }, OpResult::Ok);
-        checker.record_interval(2, 4, Some(1), Op::Get { key: b"a".to_vec() }, OpResult::Value(Some(b"1".to_vec())));
-        checker.record_interval(2, 4, Some(2), Op::Get { key: b"b".to_vec() }, OpResult::Value(Some(b"2".to_vec())));
+        checker.record_interval(
+            0,
+            2,
+            Some(1),
+            Op::Put {
+                key: b"a".to_vec(),
+                value: b"1".to_vec(),
+            },
+            OpResult::Ok,
+        );
+        checker.record_interval(
+            1,
+            3,
+            Some(2),
+            Op::Put {
+                key: b"b".to_vec(),
+                value: b"2".to_vec(),
+            },
+            OpResult::Ok,
+        );
+        checker.record_interval(
+            2,
+            4,
+            Some(1),
+            Op::Get { key: b"a".to_vec() },
+            OpResult::Value(Some(b"1".to_vec())),
+        );
+        checker.record_interval(
+            2,
+            4,
+            Some(2),
+            Op::Get { key: b"b".to_vec() },
+            OpResult::Value(Some(b"2".to_vec())),
+        );
         assert!(checker.check_concurrent().is_ok());
     }
 
     fn concurrent_stale_read_is_violation() {
         let mut checker = LinearizabilityChecker::new();
-        checker.record_interval(0, 2, Some(1), Op::Put { key: b"k".to_vec(), value: b"v2".to_vec() }, OpResult::Ok);
-        checker.record_interval(1, 3, Some(2), Op::Get { key: b"k".to_vec() }, OpResult::Value(Some(b"v1".to_vec())));
+        checker.record_interval(
+            0,
+            2,
+            Some(1),
+            Op::Put {
+                key: b"k".to_vec(),
+                value: b"v2".to_vec(),
+            },
+            OpResult::Ok,
+        );
+        checker.record_interval(
+            1,
+            3,
+            Some(2),
+            Op::Get { key: b"k".to_vec() },
+            OpResult::Value(Some(b"v1".to_vec())),
+        );
         assert!(checker.check_concurrent().is_err());
     }
 

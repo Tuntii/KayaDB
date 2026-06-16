@@ -27,10 +27,9 @@ use kaya_engine::{Engine, ReadOptions, ScanOptions, WriteOptions};
 use kaya_io::FileDisk;
 use kaya_net::{
     decode_key_payload, decode_member_payload, decode_put_payload, decode_remove_member_payload,
-    decode_scan_payload,
-    encode_error_payload, encode_scan_response, encode_value_payload, read_client_frame,
-    send_envelopes, start_raft_listener, write_client_response, NodeRoster, STATUS_ERROR,
-    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
+    decode_scan_payload, encode_error_payload, encode_scan_response, encode_value_payload,
+    read_client_frame, send_envelopes, start_raft_listener, write_client_response, NodeRoster,
+    STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
 };
 use kaya_raft::{
     ClusterMember, ConfigChangePhase, Envelope, LogIndex, NodeId, RaftApplyCommand, RaftConfig,
@@ -518,11 +517,7 @@ async fn drain_and_apply(
             eprintln!("warning: failed to persist raft↔lsn correlation: {e}");
         }
 
-        let result = if command.is_empty() {
-            Ok(())
-        } else {
-            Ok(())
-        };
+        let result = if command.is_empty() { Ok(()) } else { Ok(()) };
         if let Some(tx) = pending.lock().unwrap().remove(&idx) {
             let _ = tx.send(result);
         }
@@ -623,7 +618,18 @@ async fn client_accept_loop(
         let ros = roster.clone();
         tokio::spawn(async move {
             handle_connection(
-                stream, r, e, p, pr, tx, rtx, next_id, ros, self_id, self_raft, self_client,
+                stream,
+                r,
+                e,
+                p,
+                pr,
+                tx,
+                rtx,
+                next_id,
+                ros,
+                self_id,
+                self_raft,
+                self_client,
             )
             .await;
         });
@@ -719,8 +725,15 @@ async fn dispatch(
     if opcode == 8 {
         return match decode_remove_member_payload(&payload) {
             Ok(node_id) => {
-                propose_remove_member(raft, roster, self_id, self_raft, self_client, NodeId(node_id))
-                    .await
+                propose_remove_member(
+                    raft,
+                    roster,
+                    self_id,
+                    self_raft,
+                    self_client,
+                    NodeId(node_id),
+                )
+                .await
             }
             Err(e) => (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
         };
@@ -825,10 +838,12 @@ async fn dispatch(
             let engine_stats = engine.lock().await.stats();
 
             let stats_json = format!(
-                "{{\"role\":\"{}\",\"term\":{},\"commit_index\":{},\"applied_index\":{},\"peer_count\":{},\"engine\":{{\"put_count\":{},\"get_count\":{},\"delete_count\":{},\"scan_count\":{},\"wal_bytes_written\":{},\"wal_fsync_count\":{},\"memtable_entries\":{},\"sstable_count\":{},\"last_sequence\":{}}}}}",
+                "{{\"role\":\"{}\",\"term\":{},\"commit_index\":{},\"applied_index\":{},\"peer_count\":{},\"engine\":{{\"put_count\":{},\"get_count\":{},\"delete_count\":{},\"scan_count\":{},\"wal_bytes_written\":{},\"wal_fsync_count\":{},\"wal_fsync_total_us\":{},\"wal_fsync_max_us\":{},\"memtable_entries\":{},\"sstable_count\":{},\"last_sequence\":{},\"flush_total_us\":{},\"flush_max_us\":{},\"flush_count\":{},\"compaction_total_us\":{},\"compaction_max_us\":{},\"compaction_count\":{}}}}}",
                 role, term, commit_idx, applied_idx, peer_count,
                 engine_stats.put_count, engine_stats.get_count, engine_stats.delete_count, engine_stats.scan_count,
-                engine_stats.wal_bytes_written, engine_stats.wal_fsync_count, engine_stats.memtable_entries, engine_stats.sstable_count, engine_stats.last_sequence
+                engine_stats.wal_bytes_written, engine_stats.wal_fsync_count, engine_stats.wal_fsync_total_us, engine_stats.wal_fsync_max_us, engine_stats.memtable_entries, engine_stats.sstable_count, engine_stats.last_sequence,
+                engine_stats.flush_total_us, engine_stats.flush_max_us, engine_stats.flush_count,
+                engine_stats.compaction_total_us, engine_stats.compaction_max_us, engine_stats.compaction_count
             );
 
             (STATUS_OK, stats_json.into_bytes())
@@ -895,7 +910,11 @@ async fn propose_add_member(
     let (proposed, out) = {
         let mut guard = raft.lock().unwrap();
         let idx = guard.propose_membership_change(members);
-        let out = if idx.is_some() { guard.broadcast() } else { vec![] };
+        let out = if idx.is_some() {
+            guard.broadcast()
+        } else {
+            vec![]
+        };
         (idx, out)
     };
     if !out.is_empty() {
@@ -965,7 +984,11 @@ async fn propose_remove_member(
     let (proposed, out) = {
         let mut guard = raft.lock().unwrap();
         let idx = guard.propose_membership_change(members);
-        let out = if idx.is_some() { guard.broadcast() } else { vec![] };
+        let out = if idx.is_some() {
+            guard.broadcast()
+        } else {
+            vec![]
+        };
         (idx, out)
     };
     if !out.is_empty() {

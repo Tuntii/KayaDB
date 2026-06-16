@@ -27,9 +27,7 @@ pub fn validate_bind_addr(addr: SocketAddr, allow_public_bind: bool) -> Result<(
         return Ok(());
     }
     if allow_public_bind {
-        eprintln!(
-            "warning: binding {addr} with --allow-public-bind; KayaDB has no auth/TLS"
-        );
+        eprintln!("warning: binding {addr} with --allow-public-bind; KayaDB has no auth/TLS");
         return Ok(());
     }
     let kind = if is_wildcard_bind(addr) {

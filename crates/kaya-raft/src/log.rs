@@ -50,7 +50,10 @@ impl MemLog {
 
     /// Term of the last entry, or the snapshot term if log has been compacted to a snapshot.
     pub fn last_term(&self) -> Term {
-        self.entries.last().map(|e| e.term).unwrap_or(self.last_included_term)
+        self.entries
+            .last()
+            .map(|e| e.term)
+            .unwrap_or(self.last_included_term)
     }
 
     /// Term of the entry at `index`, taking snapshots into account.
@@ -151,7 +154,13 @@ impl MemLog {
 
     /// Returns the currently installed snapshot, if any.
     pub fn snapshot(&self) -> Option<(LogIndex, Term, &[u8])> {
-        self.snapshot.as_ref().map(|d| (self.last_included_index, self.last_included_term, d.as_slice()))
+        self.snapshot.as_ref().map(|d| {
+            (
+                self.last_included_index,
+                self.last_included_term,
+                d.as_slice(),
+            )
+        })
     }
 
     /// Clear any installed snapshot (used after state machine has consumed it, or for tests).
@@ -242,7 +251,10 @@ mod tests {
     fn snapshot_compaction_basic() {
         let mut log = MemLog::new();
         for i in 1u64..=10 {
-            log.append(LogEntry { term: Term(i), command: vec![i as u8] });
+            log.append(LogEntry {
+                term: Term(i),
+                command: vec![i as u8],
+            });
         }
         assert_eq!(log.last_index(), LogIndex(10));
 
@@ -277,12 +289,20 @@ mod tests {
     #[test]
     fn append_after_snapshot() {
         let mut log = MemLog::new();
-        for i in 1u64..=5 { log.append(LogEntry { term: Term(1), command: vec![i as u8] }); }
+        for i in 1u64..=5 {
+            log.append(LogEntry {
+                term: Term(1),
+                command: vec![i as u8],
+            });
+        }
         log.install_snapshot(LogIndex(3), Term(1), b"s3".to_vec());
 
         // After snapshot at 3 we still have logical 4 and 5 (2 entries in the vec).
         // Next append should be logical 6.
-        let new_idx = log.append(LogEntry { term: Term(2), command: b"new".to_vec() });
+        let new_idx = log.append(LogEntry {
+            term: Term(2),
+            command: b"new".to_vec(),
+        });
         assert_eq!(new_idx, LogIndex(6));
         assert_eq!(log.last_index(), LogIndex(6));
         assert_eq!(log.get(LogIndex(6)).unwrap().command, b"new");
