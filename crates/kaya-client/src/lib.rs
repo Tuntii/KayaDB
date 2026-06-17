@@ -84,6 +84,12 @@ impl KayaClient {
                                 }
                             }
                         }
+                        // Empty hint (common for single-node during election).
+                        // Retry current address a few times before giving up.
+                        if attempt < self.max_redirects {
+                            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                            continue;
+                        }
                     }
                     return Ok((status, body));
                 }

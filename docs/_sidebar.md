@@ -10,6 +10,7 @@
   - [Embedded Usage (Rust)](getting-started.md#use-it-as-a-rust-library)
 
 - [Using KayaDB](cli-reference.md)
+  - [Kullanım Senaryoları](usage.md)
   - [CLI Reference (kayactl)](cli-reference.md)
   - [Client Library](getting-started.md#tcp-client)
   - [Client Protocol Spec](clients/client-protocol-spec.md)

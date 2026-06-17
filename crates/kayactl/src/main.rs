@@ -342,6 +342,14 @@ async fn roundtrip_with_retry(
             }
         }
 
+        // Single-node (or early election) case: the node replied NOT_LEADER with
+        // no hint because it hasn't finished electing yet. Retry same target briefly.
+        if status == STATUS_NOT_LEADER && redirect_retries < 6 {
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            redirect_retries += 1;
+            continue;
+        }
+
         if status == STATUS_ERROR || status == STATUS_INVALID_ARGUMENT {
             if let Ok(msg) = decode_error_payload(&body) {
                 if (msg.contains("connection") || msg.contains("unavailable"))

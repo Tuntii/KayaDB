@@ -165,6 +165,11 @@ impl RaftNode {
         self.match_index.insert(self.config.id, index);
         self.next_index
             .insert(self.config.id, LogIndex(index.0 + 1));
+
+        self.try_advance_commit();
+        // Run apply immediately so drain_applied() in the caller sees the entry
+        // (important for 1-node clusters where no AppendResponse will arrive).
+        let _ = self.try_advance_apply();
         Some(index)
     }
 
@@ -276,6 +281,27 @@ impl RaftNode {
         self.quorum()
     }
 
+    /// Advance commit_index if we (as leader) now have quorum on one or more
+    /// new entries in the current term. Must be called after updating match_index.
+    fn try_advance_commit(&mut self) {
+        if self.role != Role::Leader {
+            return;
+        }
+        let last = self.log.last_index();
+        for n in (self.commit_index.0 + 1)..=last.0 {
+            let n_idx = LogIndex(n);
+            if self.log.term_at(n_idx) != Some(self.current_term) {
+                continue;
+            }
+            let met = self.effective_config.commit_quorum_met(|id| {
+                self.match_index.get(id).copied().unwrap_or(LogIndex(0)) >= n_idx
+            });
+            if met {
+                self.commit_index = n_idx;
+            }
+        }
+    }
+
     /// Current effective configuration (stable or joint).
     pub fn effective_config(&self) -> &EffectiveConfig {
         &self.effective_config
@@ -351,6 +377,13 @@ impl RaftNode {
         self.votes_received.clear();
         self.votes_received.insert(self.config.id);
 
+        // For single-node (or when we already have quorum from self vote),
+        // promote immediately. This is required for 1-voter clusters.
+        if self.votes_received.len() >= self.effective_config.election_quorum() {
+            self.become_leader(out);
+            return;
+        }
+
         let req = VoteRequest {
             term: self.current_term,
             candidate_id: self.config.id,
@@ -393,6 +426,10 @@ impl RaftNode {
 
         // Broadcast the no-op immediately.
         self.send_append_to_all(out);
+
+        // For 1-node clusters the no-op must be committed right away.
+        self.try_advance_commit();
+        let _ = self.try_advance_apply();
     }
 
     fn send_append_to_all(&mut self, out: &mut Vec<Envelope>) {
@@ -582,21 +619,7 @@ impl RaftNode {
                 self.next_index.insert(from, LogIndex(mi.0 + 1));
             }
 
-            // Try to advance commit_index (Raft §5.3, §5.4).
-            // Only entries from the *current* term can be committed by counting.
-            let last = self.log.last_index();
-            for n in (self.commit_index.0 + 1)..=last.0 {
-                let n_idx = LogIndex(n);
-                if self.log.term_at(n_idx) != Some(self.current_term) {
-                    continue;
-                }
-                let met = self.effective_config.commit_quorum_met(|id| {
-                    self.match_index.get(id).copied().unwrap_or(LogIndex(0)) >= n_idx
-                });
-                if met {
-                    self.commit_index = n_idx;
-                }
-            }
+            self.try_advance_commit();
         } else {
             // Back off next_index for this peer (use peer's hint if useful).
             let ni = self.next_index.get(&from).copied().unwrap_or(LogIndex(1));
@@ -1029,5 +1052,36 @@ mod tests {
 
         assert_eq!(node.role, Role::Follower);
         assert_eq!(node.pending_reads.len(), 0);
+    }
+
+    #[test]
+    fn single_node_becomes_leader_and_commits_immediately() {
+        let mut node = make_node(1, vec![]); // 1-voter cluster
+        assert_eq!(node.role, Role::Follower);
+        assert!(node.propose(b"cmd".to_vec()).is_none());
+
+        // Drive ticks until election timeout fires
+        let mut out = Vec::new();
+        for _ in 0..20 {
+            out.extend(node.tick());
+            if node.role == Role::Leader {
+                break;
+            }
+        }
+        assert_eq!(node.role, Role::Leader, "single node must self-elect");
+        assert_eq!(node.status().leader_id, Some(NodeId(1)));
+
+        // Propose should succeed and the entry should be immediately committable
+        let idx = node.propose(b"hello".to_vec()).expect("propose on leader");
+        assert!(idx.0 > 0);
+
+        // Because of the immediate try_advance_commit + try_advance_apply inside propose,
+        // commit_index should have advanced and the entry should be ready to drain.
+        assert!(node.commit_index >= idx);
+        let applied = node.drain_applied();
+        assert!(
+            applied.iter().any(|(i, _, cmd)| *i == idx && cmd == b"hello"),
+            "single-node propose must produce a drained applied entry"
+        );
     }
 }

@@ -15,6 +15,7 @@
 
 ## Using KayaDB
 
+* [Kullanım Senaryoları Kılavuzu](usage.md) — Pratik senaryolar: yerel test, küme kurma, kurtarma, client kullanımı, inceleme
 * [CLI Reference (kayactl)](cli-reference.md)
   * [Global Flags & Modes](cli-reference.md#global-flags)
   * [Local (Embedded) Commands](cli-reference.md)

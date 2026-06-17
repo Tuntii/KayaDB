@@ -29,6 +29,7 @@ See the dedicated guide: [Publishing the Documentation](publishing.md) for setup
 | Document                  | Use it when you want to... |
 |---------------------------|------------------------------|
 | [Getting started](getting-started.md) | Build KayaDB, run a local node or cluster, use `kayactl`, and try the async Rust client |
+| [Kullanım Senaryoları](usage.md)      | Pratik senaryolarla çalış: yerel test, küme, kurtarma, client, inceleme ve otomasyon |
 | [CLI reference](cli-reference.md)     | Look up every `kayactl` command, flag, JSON output, and exit code |
 | [Architecture](architecture.md)       | Understand the storage stack, Raft layer, `SimDisk`, data flow and crate boundaries |
 | [Development guide](development.md)   | Run tests, simulations, fuzz targets, benchmarks, and contribution checks |
@@ -41,6 +42,7 @@ See the dedicated guide: [Publishing the Documentation](publishing.md) for setup
 | Document | Use it when you want to... |
 |---|---|
 | [Getting started](getting-started.md) | Build KayaDB, run a local node, use `kayactl`, and try the Rust client |
+| [Kullanım Senaryoları](usage.md) | Farklı kullanım senaryoları: embedded, cluster, kurtarma, client, inspect ve otomasyon |
 | [CLI reference](cli-reference.md) | Look up every `kayactl` mode, flag, output shape, and exit code |
 | [Architecture](architecture.md) | Understand the storage stack, Raft layer, disk abstraction, and data flow |
 | [Development guide](development.md) | Run tests, simulations, fuzz targets, benchmarks, and contribution checks |
@@ -57,7 +59,8 @@ See the dedicated guide: [Publishing the Documentation](publishing.md) for setup
 1. Follow [Getting started](getting-started.md).
 2. Run local embedded commands with `kayactl --data ./data`.
 3. Start `kayadb-server` and connect with `kayactl --server 127.0.0.1:7379`.
-4. Inspect the generated WAL, SSTable, and manifest files.
+4. See practical workflows in [Kullanım Senaryoları](usage.md).
+5. Inspect the generated WAL, SSTable, and manifest files.
 
 ### I want to embed it in Rust
 
@@ -116,7 +119,7 @@ This GitBook organizes KayaDB documentation into the following main sections (se
 
 - **Introduction** — Project goals and current status
 - **Getting Started** — Build, run, and first commands
-- **Using KayaDB** — `kayactl` reference and client library usage
+- **Using KayaDB** — Kullanım senaryoları, `kayactl` referansı ve client kütüphanesi kullanımı
 - **Architecture & Internals** — High-level design and data flows
 - **Core Components** — WAL, LSM, Disk simulation, Recovery (with links to detailed specs)
 - **Distributed KayaDB** — Raft, cluster mode, client redirection, Jepsen testing
