@@ -193,6 +193,9 @@ impl RaftNode {
             acks,
         });
 
+        // For single-node (and in general), check immediately. Self is already acked.
+        self.check_pending_reads();
+
         Some(self.commit_index)
     }
 
@@ -340,6 +343,9 @@ impl RaftNode {
                         self.match_index.insert(self.config.id, idx);
                         self.next_index.insert(self.config.id, LogIndex(idx.0 + 1));
                         self.send_append_to_all(out);
+
+                        // Advance commit for the auto-generated final entry (important for 1-node).
+                        self.try_advance_commit();
                     }
                 }
             }
@@ -736,6 +742,10 @@ impl RaftNode {
         });
         self.match_index.insert(self.config.id, idx);
         self.next_index.insert(self.config.id, LogIndex(idx.0 + 1));
+
+        // Ensure commit/apply for single-node membership changes.
+        self.try_advance_commit();
+        let _ = self.try_advance_apply();
         Some(idx)
     }
 
@@ -1083,5 +1093,12 @@ mod tests {
             applied.iter().any(|(i, _, cmd)| *i == idx && cmd == b"hello"),
             "single-node propose must produce a drained applied entry"
         );
+
+        // ReadIndex should also work immediately on single node
+        let read_id = 42u64;
+        let read_idx = node.propose_read(read_id).expect("read index on single-node leader");
+        assert!(read_idx <= node.commit_index);
+        let ready = node.drain_ready_reads();
+        assert!(ready.contains(&read_id), "single-node ReadIndex must become ready immediately");
     }
 }
