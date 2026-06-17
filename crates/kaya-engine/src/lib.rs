@@ -7,8 +7,8 @@ use kaya_core::{
 use kaya_io::{Disk, RelativePath};
 use kaya_lsm::{
     decode_footer, encode_manifest_edit, ManifestEdit, ManifestState, ManifestWarning, Memtable,
-    SstEntry, SstableBuilder, SstableReader, TableMetadata, ValueRecordRef, CURRENT_FILE_NAME,
-    CURRENT_TMP_FILE_NAME, MANIFEST_FILE_NAME, SST_FOOTER_LEN,
+    SstEntry, SstableBuilder, SstableReader, TableMetadata, ValueRecord, ValueRecordRef,
+    CURRENT_FILE_NAME, CURRENT_TMP_FILE_NAME, MANIFEST_FILE_NAME, SST_FOOTER_LEN,
 };
 
 /// A compact, pinnable snapshot view of the LSM state at a point in time.
@@ -447,10 +447,16 @@ impl<D: Disk> Engine<D> {
     /// until the snapshot is released.
     pub async fn create_snapshot(&mut self) -> Result<Vec<u8>> {
         // Make sure the current memtable is captured as immutable view.
-        // For simplicity we capture the mutable memtable's raw state (it will be
-        // treated as the "snapshot memtable" on install).
-        let memtable_snapshot: Vec<(Bytes, Option<Bytes>, SequenceNumber)> =
-            self.memtable.raw_scan_prefix(b"").into_iter().collect();
+        // Use the direct iter() to avoid an extra full owned tuple vec allocation
+        // during snapshot capture (still need to own the data for the serialized view).
+        let memtable_snapshot: Vec<(Bytes, Option<Bytes>, SequenceNumber)> = self
+            .memtable
+            .iter()
+            .map(|(k, rec)| match rec {
+                ValueRecord::Put { value, sequence } => (k.clone(), Some(value.clone()), *sequence),
+                ValueRecord::Delete { sequence } => (k.clone(), None, *sequence),
+            })
+            .collect();
 
         // Capture the pinned live tables (clone metadata; readers stay shared).
         let pinned_tables: Vec<TableMetadata> = self.manifest_state.live_tables.clone();
@@ -702,13 +708,26 @@ impl<D: Disk> Engine<D> {
         self.next_table_id += 1;
 
         // Build SSTable from all memtable entries (including tombstones).
+        // Use direct iter() to avoid allocating a full temporary Vec<(Bytes, Option, Seq)>
+        // of the entire memtable on every flush (hot-ish background path + memory savings).
         let mut builder = SstableBuilder::new(self.config.sstable.block_target_bytes);
-        for (key, value, sequence) in self.memtable.raw_scan_prefix(b"") {
-            builder.add(SstEntry {
-                key,
-                value,
-                sequence,
-            });
+        for (key, record) in self.memtable.iter() {
+            match record {
+                ValueRecord::Put { value, sequence } => {
+                    builder.add(SstEntry {
+                        key: key.clone(),
+                        value: Some(value.clone()),
+                        sequence: *sequence,
+                    });
+                }
+                ValueRecord::Delete { sequence } => {
+                    builder.add(SstEntry {
+                        key: key.clone(),
+                        value: None,
+                        sequence: *sequence,
+                    });
+                }
+            }
         }
         let sst_bytes = builder.finish()?;
         let sst_file_size = sst_bytes.len() as u64;

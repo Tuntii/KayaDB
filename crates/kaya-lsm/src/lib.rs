@@ -59,7 +59,10 @@ impl Memtable {
     }
 
     pub fn put(&mut self, key: Bytes, value: Bytes, sequence: SequenceNumber) {
-        let old_size = self.entries.get(&key).map_or(0, |r| Self::entry_size(&key, r));
+        let old_size = self
+            .entries
+            .get(&key)
+            .map_or(0, |r| Self::entry_size(&key, r));
         let new_rec = ValueRecord::Put { value, sequence };
         let new_size = Self::entry_size(&key, &new_rec);
         self.entries.insert(key, new_rec);
@@ -67,7 +70,10 @@ impl Memtable {
     }
 
     pub fn delete(&mut self, key: Bytes, sequence: SequenceNumber) {
-        let old_size = self.entries.get(&key).map_or(0, |r| Self::entry_size(&key, r));
+        let old_size = self
+            .entries
+            .get(&key)
+            .map_or(0, |r| Self::entry_size(&key, r));
         let new_rec = ValueRecord::Delete { sequence };
         let new_size = Self::entry_size(&key, &new_rec);
         self.entries.insert(key, new_rec);
@@ -88,15 +94,28 @@ impl Memtable {
 
     pub fn scan_prefix(&self, prefix: &[u8]) -> Vec<KeyValue> {
         let mut items = Vec::new();
-        for (key, value) in self.entries.range(prefix.to_vec()..) {
-            if !key.starts_with(prefix) {
-                break;
+        // Avoid bound allocation on full prefix scan (common internal + some user cases).
+        if prefix.is_empty() {
+            for (key, record) in &self.entries {
+                if let ValueRecord::Put { value, .. } = record {
+                    items.push(KeyValue {
+                        key: key.clone(),
+                        value: value.clone(),
+                    });
+                }
             }
-            if let ValueRecord::Put { value, .. } = value {
-                items.push(KeyValue {
-                    key: key.clone(),
-                    value: value.clone(),
-                });
+        } else {
+            let start = prefix.to_vec();
+            for (key, record) in self.entries.range(start..) {
+                if !key.starts_with(prefix) {
+                    break;
+                }
+                if let ValueRecord::Put { value, .. } = record {
+                    items.push(KeyValue {
+                        key: key.clone(),
+                        value: value.clone(),
+                    });
+                }
             }
         }
         items
@@ -106,20 +125,42 @@ impl Memtable {
     /// Returns `(key, Option<value>, sequence)` — `None` value means deletion.
     pub fn raw_scan_prefix(&self, prefix: &[u8]) -> Vec<(Bytes, Option<Bytes>, SequenceNumber)> {
         let mut items = Vec::new();
-        for (key, record) in self.entries.range(prefix.to_vec()..) {
-            if !key.starts_with(prefix) {
-                break;
-            }
-            match record {
-                ValueRecord::Put { value, sequence } => {
-                    items.push((key.clone(), Some(value.clone()), *sequence));
+        // Avoid allocating the bound vec for the very common "dump everything" case (flush, snapshot).
+        if prefix.is_empty() {
+            for (key, record) in &self.entries {
+                match record {
+                    ValueRecord::Put { value, sequence } => {
+                        items.push((key.clone(), Some(value.clone()), *sequence));
+                    }
+                    ValueRecord::Delete { sequence } => {
+                        items.push((key.clone(), None, *sequence));
+                    }
                 }
-                ValueRecord::Delete { sequence } => {
-                    items.push((key.clone(), None, *sequence));
+            }
+        } else {
+            let start = prefix.to_vec();
+            for (key, record) in self.entries.range(start..) {
+                if !key.starts_with(prefix) {
+                    break;
+                }
+                match record {
+                    ValueRecord::Put { value, sequence } => {
+                        items.push((key.clone(), Some(value.clone()), *sequence));
+                    }
+                    ValueRecord::Delete { sequence } => {
+                        items.push((key.clone(), None, *sequence));
+                    }
                 }
             }
         }
         items
+    }
+
+    /// Zero-copy iterator over all entries (including tombstones).
+    /// Preferred for internal full-table processing (flush, snapshot, create_snapshot)
+    /// to avoid materializing a large intermediate Vec of owned tuples on every call.
+    pub fn iter(&self) -> impl Iterator<Item = (&Bytes, &ValueRecord)> {
+        self.entries.iter()
     }
 
     pub fn len(&self) -> usize {
@@ -211,7 +252,11 @@ mod tests {
         // key 3 + value 3
         assert_eq!(m.approximate_bytes(), 6);
 
-        m.put(b"abc".to_vec(), b"longervalue".to_vec(), SequenceNumber::new(2));
+        m.put(
+            b"abc".to_vec(),
+            b"longervalue".to_vec(),
+            SequenceNumber::new(2),
+        );
         // replace: old 6, new key3 + 11 = 14
         assert_eq!(m.approximate_bytes(), 14);
 

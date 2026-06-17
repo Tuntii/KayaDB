@@ -6,8 +6,8 @@ use std::sync::Arc;
 use kaya_core::{EngineConfig, KayaError, Result, SequenceNumber};
 use kaya_io::{Disk, RelativePath};
 use kaya_lsm::{
-    CURRENT_FILE_NAME, CURRENT_TMP_FILE_NAME, ManifestState, ManifestWarning, SstableReader,
-    TableMetadata,
+    ManifestState, ManifestWarning, SstableReader, TableMetadata, CURRENT_FILE_NAME,
+    CURRENT_TMP_FILE_NAME,
 };
 use kaya_wal::{recover_wal, WalPayload};
 
@@ -43,7 +43,8 @@ pub async fn recover<D: Disk>(config: EngineConfig, disk: Arc<D>) -> Result<Reco
                     Ok(m_len) if m_len > 0 => {
                         let mut manifest_buf = vec![0u8; m_len as usize];
                         disk.read_at(&manifest_rel, 0, &mut manifest_buf).await?;
-                        let (state, replayed_count, warnings) = kaya_lsm::replay_manifest(&manifest_buf);
+                        let (state, replayed_count, warnings) =
+                            kaya_lsm::replay_manifest(&manifest_buf);
                         (replayed_count, state.live_tables.len(), warnings)
                     }
                     _ => (0, 0, Vec::new()),
