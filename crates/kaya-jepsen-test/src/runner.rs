@@ -142,9 +142,7 @@ impl TestRunner {
             scenario.nemesis.as_ref().map(|n| &n.nemesis_type)
         );
 
-        cluster
-            .wait_for_leader(Duration::from_secs(15))
-            .await?;
+        cluster.wait_for_leader(Duration::from_secs(15)).await?;
 
         if scenario.topology == Topology::FourNodeJoin {
             let seeds = cluster.seed_peers();
@@ -169,9 +167,7 @@ impl TestRunner {
         }
 
         let endpoints = match scenario.topology {
-            Topology::FourNodeJoin => {
-                cluster.client_endpoints_for_ids(&[1, 2, 3])
-            }
+            Topology::FourNodeJoin => cluster.client_endpoints_for_ids(&[1, 2, 3]),
             _ => cluster.client_endpoints(),
         };
         eprintln!("  Endpoints: {:?}", endpoints);
@@ -181,10 +177,7 @@ impl TestRunner {
 
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let nemesis_handle = if let Some(nemesis_config) = &scenario.nemesis {
-            let nemesis = Nemesis::new(
-                nemesis_config.clone(),
-                self.config.cluster_dir.clone(),
-            );
+            let nemesis = Nemesis::new(nemesis_config.clone(), self.config.cluster_dir.clone());
             let stop_rx = stop_rx.clone();
             let endpoints = endpoints.clone();
             Some(tokio::spawn(async move {
@@ -304,9 +297,7 @@ async fn apply_nemesis_action(
         NemesisAction::AddMember(spec) => {
             let resolved = resolve_member_spec(cluster, &spec)?;
             let leader = cluster.wait_for_leader(Duration::from_secs(10)).await?;
-            cluster
-                .add_member(leader.client_addr, &resolved)
-                .await?;
+            cluster.add_member(leader.client_addr, &resolved).await?;
         }
         NemesisAction::RemoveMember(node_id) => {
             let leader = cluster.wait_for_leader(Duration::from_secs(10)).await?;
@@ -328,7 +319,10 @@ async fn apply_nemesis_action(
     Ok(())
 }
 
-fn resolve_member_spec(cluster: &ClusterController, spec: &MemberSpec) -> Result<MemberSpec, String> {
+fn resolve_member_spec(
+    cluster: &ClusterController,
+    spec: &MemberSpec,
+) -> Result<MemberSpec, String> {
     if spec.raft_addr.ends_with(":0") || spec.client_addr.ends_with(":0") {
         cluster.member_spec_for_node(spec.node_id)
     } else {
@@ -343,9 +337,7 @@ async fn run_workload_hook(
 ) -> Result<(), String> {
     match hook {
         WorkloadHook::BurstWrites { count, key_prefix } => {
-            eprintln!(
-                "[Runner] BurstWrites: {count} keys with prefix '{key_prefix}'"
-            );
+            eprintln!("[Runner] BurstWrites: {count} keys with prefix '{key_prefix}'");
             let leader = if let Some(addr) = leader_hint {
                 addr
             } else {
@@ -407,9 +399,7 @@ async fn t7_durability_check(cluster: &ClusterController) -> Result<(), String> 
             if let Ok(Ok(mut client)) =
                 timeout(Duration::from_millis(500), KayaClient::connect(endpoint)).await
             {
-                if let Ok(Ok(stats)) =
-                    timeout(Duration::from_millis(500), client.stats()).await
-                {
+                if let Ok(Ok(stats)) = timeout(Duration::from_millis(500), client.stats()).await {
                     let applied = applied_index_from_stats(&stats).unwrap_or(0);
                     if applied < 64 {
                         tokio::time::sleep(Duration::from_millis(100)).await;

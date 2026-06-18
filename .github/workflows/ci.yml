@@ -26,7 +26,11 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: |
+          cargo test --workspace --exclude kaya-jepsen-test -- --test-threads=1
+          cargo test -p kaya-raft --features disk-storage -- --test-threads=1
+          cargo test -p kaya-jepsen-test --lib -- --test-threads=1
+          cargo test -p kaya-jepsen-test --test cluster_controller_smoke -- --test-threads=1
 
       - name: Smoke benchmark (bounded)
         run: cargo bench -p kaya-bench --bench smoke -- --noplot

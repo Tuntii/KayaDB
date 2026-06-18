@@ -8,9 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::nemesis::MemberSpec;
-use kaya_net::{
-    encode_member_payload, encode_remove_member_payload, roundtrip, STATUS_OK,
-};
+use kaya_net::{encode_member_payload, encode_remove_member_payload, roundtrip, STATUS_OK};
 use kaya_server::{ClusterConfig, ClusterNode};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -102,8 +100,8 @@ impl ClusterController {
         let data_dir = self.base_dir.join(format!("node{id}"));
         std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
 
-        let config = ClusterConfig::new(id, &data_dir, raft_addr, client_addr, seeds)
-            .with_join_cluster();
+        let config =
+            ClusterConfig::new(id, &data_dir, raft_addr, client_addr, seeds).with_join_cluster();
         let handle = spawn_node(config);
 
         self.nodes.push(ManagedNode {
@@ -140,11 +138,7 @@ impl ClusterController {
             "[ClusterController] ADD_MEMBER node {} via {}",
             spec.node_id, leader
         );
-        let payload = encode_member_payload(
-            spec.node_id,
-            &spec.raft_addr,
-            &spec.client_addr,
-        );
+        let payload = encode_member_payload(spec.node_id, &spec.raft_addr, &spec.client_addr);
         match timeout(Duration::from_secs(10), roundtrip(leader, 7, &payload)).await {
             Ok(Ok((status, _body))) if status == STATUS_OK => Ok(()),
             Ok(Ok((status, body))) => {
@@ -209,10 +203,7 @@ impl ClusterController {
             }
 
             if tokio::time::Instant::now() >= deadline {
-                return Err(format!(
-                    "no leader elected within {:?}",
-                    timeout
-                ));
+                return Err(format!("no leader elected within {:?}", timeout));
             }
             sleep(Duration::from_millis(100)).await;
         }
@@ -242,13 +233,8 @@ impl ClusterController {
             handle.abort();
         }
 
-        let config = ClusterConfig::new(
-            id,
-            &node.data_dir,
-            node.raft_addr,
-            node.client_addr,
-            peers,
-        );
+        let config =
+            ClusterConfig::new(id, &node.data_dir, node.raft_addr, node.client_addr, peers);
         node.handle = Some(spawn_node(config));
         Ok(())
     }
@@ -258,7 +244,7 @@ impl ClusterController {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = id;
-            return Err("partition requires linux".into());
+            Err("partition requires linux".into())
         }
         #[cfg(target_os = "linux")]
         {
@@ -276,7 +262,7 @@ impl ClusterController {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = id;
-            return Err("partition requires linux".into());
+            Err("partition requires linux".into())
         }
         #[cfg(target_os = "linux")]
         {

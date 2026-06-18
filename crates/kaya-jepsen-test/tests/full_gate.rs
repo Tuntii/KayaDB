@@ -32,8 +32,7 @@ async fn run_full_gate(scenario: Scenario) {
     assert!(
         result.passed,
         "{} full gate failed: {:?}",
-        scenario.id,
-        result.violations
+        scenario.id, result.violations
     );
 
     cluster.shutdown_all().await;

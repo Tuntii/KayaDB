@@ -38,12 +38,12 @@ use kaya_raft::{
 
 use crate::apply_index::RaftApplyIndex;
 use crate::command::RaftCommand;
-use crate::raft_persister::RaftPersister;
 use crate::membership::{
     apply_config_change_to_roster, build_raft_snapshot_payload, decode_config_change,
     load_persisted_roster, members_for_add, members_for_remove, parse_raft_snapshot_payload,
     persist_roster, shared_roster, SharedRoster,
 };
+use crate::raft_persister::RaftPersister;
 
 // ── public API ────────────────────────────────────────────────────────────────
 
@@ -184,8 +184,8 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         heartbeat_interval_ticks: config.heartbeat_interval_ticks,
     };
 
-    let mut persister = RaftPersister::open(&config.data_dir)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let mut persister =
+        RaftPersister::open(&config.data_dir).map_err(|e| std::io::Error::other(e.to_string()))?;
     let apply_path = config.data_dir.join("raft-apply-index.jsonl");
     let apply_floor = RaftApplyIndex::load_all(&apply_path)
         .map(|recs| {
@@ -196,10 +196,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         })
         .unwrap_or(LogIndex(0));
 
-    let raft_node = match persister
-        .load_state()
-        .map_err(|e| std::io::Error::other(e))?
-    {
+    let raft_node = match persister.load_state().map_err(std::io::Error::other)? {
         Some(state) => {
             let seed = state.clone();
             let mut node = RaftNode::recover(raft_cfg, state);

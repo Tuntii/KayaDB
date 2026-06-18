@@ -3,8 +3,8 @@
 //! Run with: `cargo test -p kaya-raft --features disk-storage --test raft_persist_crash`
 
 use kaya_raft::{
-    default_hard_state, encode_hard_state, DiskRaftStorage, HardState, LogEntry, LogIndex,
-    MemLog, NodeId, RaftStorage, RaftStorageError, Term,
+    default_hard_state, encode_hard_state, DiskRaftStorage, HardState, LogEntry, LogIndex, MemLog,
+    NodeId, RaftStorage, RaftStorageError, Term,
 };
 use std::path::PathBuf;
 

@@ -1,8 +1,6 @@
 //! Failure injectors (nemeses) for Jepsen-style testing.
 
-use kaya_net::{
-    encode_member_payload, encode_remove_member_payload, roundtrip, STATUS_OK,
-};
+use kaya_net::{encode_member_payload, encode_remove_member_payload, roundtrip, STATUS_OK};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::net::SocketAddr;
@@ -154,13 +152,17 @@ impl Nemesis {
         match &self.config.nemesis_type {
             NemesisType::Composite(types) => {
                 for nemesis_type in types {
-                    Self::inject_script_one(nemesis_type, rng, &self.cluster_dir, self.config.duration)
-                        .await;
+                    Self::inject_script_one(
+                        nemesis_type,
+                        rng,
+                        &self.cluster_dir,
+                        self.config.duration,
+                    )
+                    .await;
                 }
             }
             other => {
-                Self::inject_script_one(other, rng, &self.cluster_dir, self.config.duration)
-                    .await;
+                Self::inject_script_one(other, rng, &self.cluster_dir, self.config.duration).await;
             }
         }
     }
@@ -184,7 +186,9 @@ impl Nemesis {
                 Self::restart_node_script(*id, cluster_dir).await;
             }
             NemesisType::KillFollower => {
-                eprintln!("[Nemesis] KillFollower requires ClusterController (script path unsupported)");
+                eprintln!(
+                    "[Nemesis] KillFollower requires ClusterController (script path unsupported)"
+                );
             }
             NemesisType::Partition => {
                 let node_id = rng.gen_range(1..=3);
@@ -301,11 +305,7 @@ impl Nemesis {
         };
 
         eprintln!("[Nemesis] ADD_MEMBER node {} via {}", spec.node_id, leader);
-        let payload = encode_member_payload(
-            spec.node_id,
-            &spec.raft_addr,
-            &spec.client_addr,
-        );
+        let payload = encode_member_payload(spec.node_id, &spec.raft_addr, &spec.client_addr);
         match roundtrip(leader, 7, &payload).await {
             Ok((status, _body)) if status == STATUS_OK => {}
             Ok((status, body)) => {
@@ -441,10 +441,8 @@ impl Nemesis {
 async fn find_leader(endpoints: &[SocketAddr]) -> Option<SocketAddr> {
     for &addr in endpoints {
         if let Ok((status, body)) = roundtrip(addr, 5, &[]).await {
-            if status == STATUS_OK {
-                if String::from_utf8(body).ok().as_deref() == Some("leader") {
-                    return Some(addr);
-                }
+            if status == STATUS_OK && String::from_utf8(body).ok().as_deref() == Some("leader") {
+                return Some(addr);
             }
         }
     }

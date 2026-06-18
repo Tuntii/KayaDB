@@ -152,7 +152,9 @@ pub fn memlog_to_frames(log: &MemLog) -> Vec<LogFrame> {
     let mut frames = Vec::new();
     for idx in start..=end {
         let index = LogIndex(idx);
-        let entry = log.get(index).expect("memlog entry missing for in-range index");
+        let entry = log
+            .get(index)
+            .expect("memlog entry missing for in-range index");
         frames.push(LogFrame {
             index,
             term: entry.term,
@@ -214,11 +216,7 @@ pub trait RaftStorage: Send {
 pub fn frames_to_memlog(hs: &HardState, frames: Vec<LogFrame>) -> MemLog {
     let mut log = MemLog::new();
     if hs.last_included_index.0 > 0 {
-        log.install_snapshot(
-            hs.last_included_index,
-            hs.last_included_term,
-            Vec::new(),
-        );
+        log.install_snapshot(hs.last_included_index, hs.last_included_term, Vec::new());
     }
     for frame in frames {
         debug_assert_eq!(frame.index.0, log.last_index().0 + 1);

@@ -868,13 +868,9 @@ mod tests {
         assert!(hs_path.exists(), "raft-hard-state missing after run");
         let bytes = std::fs::read(&hs_path).unwrap();
         let persisted = decode_hard_state(&bytes).unwrap();
-        assert!(
-            persisted.current_term.0 > 0,
-            "expected persisted term > 0"
-        );
+        assert!(persisted.current_term.0 > 0, "expected persisted term > 0");
 
-        let restart_config =
-            ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![]);
+        let restart_config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![]);
         let restart_handle = tokio::spawn(async move {
             let _ = ClusterNode::new(restart_config).run().await;
         });
