@@ -39,8 +39,9 @@ use kaya_raft::{
 use crate::apply_index::RaftApplyIndex;
 use crate::command::RaftCommand;
 use crate::membership::{
-    apply_config_change_to_roster, decode_config_change, load_persisted_roster, members_for_add,
-    members_for_remove, persist_roster, shared_roster, SharedRoster,
+    apply_config_change_to_roster, build_raft_snapshot_payload, decode_config_change,
+    load_persisted_roster, members_for_add, members_for_remove, parse_raft_snapshot_payload,
+    persist_roster, shared_roster, SharedRoster,
 };
 
 // ── public API ────────────────────────────────────────────────────────────────
@@ -255,12 +256,44 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         self_client,
     );
     // Load persisted Raft snapshot once at startup (before the event loop applies entries).
+    // This brings the engine LSM state to the last Raft snapshot point.
+    // If the persisted payload contains embedded membership (from dynamic cluster
+    // snapshot), restore roster + Raft effective config too.
     {
         let snap_path = config.data_dir.join("raft-snapshot.bin");
         if snap_path.exists() {
-            if let Ok(data) = std::fs::read(&snap_path) {
-                if let Err(e) = shared_engine.lock().await.install_snapshot(&data).await {
-                    eprintln!("warning: failed to install persisted raft snapshot: {e}");
+            if let Ok(raw) = std::fs::read(&snap_path) {
+                match parse_raft_snapshot_payload(&raw) {
+                    Ok((eng, mems)) => {
+                        if !eng.is_empty() {
+                            if let Err(e) = shared_engine.lock().await.install_snapshot(&eng).await
+                            {
+                                eprintln!(
+                                    "warning: failed to install persisted engine snapshot: {e}"
+                                );
+                            }
+                        }
+                        if !mems.is_empty() {
+                            apply_config_change_to_roster(
+                                &config.data_dir,
+                                &shared_roster,
+                                ConfigChangePhase::Final,
+                                &mems,
+                                config.node_id,
+                                config.raft_addr,
+                                config.client_addr,
+                            )
+                            .await;
+                            let mut rg = shared_raft.lock().unwrap();
+                            rg.restore_config_from_snapshot(mems);
+                        }
+                    }
+                    Err(_) => {
+                        // legacy pure engine data
+                        if let Err(e) = shared_engine.lock().await.install_snapshot(&raw).await {
+                            eprintln!("warning: failed to install legacy persisted snapshot: {e}");
+                        }
+                    }
                 }
             }
         }
@@ -441,11 +474,12 @@ async fn is_known_raft_peer(raft: &SharedRaft, roster: &SharedRoster, from: Node
 }
 
 /// Drain freshly-applied Raft entries and execute them against the engine.
+#[allow(clippy::too_many_arguments)]
 async fn drain_and_apply(
     raft: &SharedRaft,
     engine: &SharedEngine,
     roster: &SharedRoster,
-    data_dir: &PathBuf,
+    data_dir: &std::path::Path,
     apply_index: &SharedApplyIndex,
     pending: &SharedPending,
     pending_reads: &SharedPendingReads,
@@ -455,13 +489,42 @@ async fn drain_and_apply(
 ) {
     // First, handle any snapshot that was just installed on us (via InstallSnapshot).
     // This brings our engine state to the snapshot point.
+    // If the snapshot payload includes embedded membership (for dynamic cluster),
+    // also restore roster and Raft effective config so the node has correct
+    // membership even if it never replayed the original config-change entries.
     let installed_snapshot = {
         let mut guard = raft.lock().unwrap();
         guard.drain_installed_snapshot()
     };
     if let Some((_idx, _term, data)) = installed_snapshot {
-        if let Err(e) = engine.lock().await.install_snapshot(&data).await {
-            eprintln!("error installing Raft snapshot into engine: {e}");
+        match parse_raft_snapshot_payload(&data) {
+            Ok((eng, mems)) => {
+                if !eng.is_empty() {
+                    if let Err(e) = engine.lock().await.install_snapshot(&eng).await {
+                        eprintln!("error installing Raft snapshot into engine: {e}");
+                    }
+                }
+                if !mems.is_empty() {
+                    apply_config_change_to_roster(
+                        data_dir,
+                        roster,
+                        ConfigChangePhase::Final,
+                        &mems,
+                        self_id,
+                        self_raft,
+                        self_client,
+                    )
+                    .await;
+                    let mut rg = raft.lock().unwrap();
+                    rg.restore_config_from_snapshot(mems);
+                }
+            }
+            Err(e) => {
+                // Fallback: try as pure engine data (legacy)
+                if let Err(e2) = engine.lock().await.install_snapshot(&data).await {
+                    eprintln!("error installing (legacy) snapshot: {e2} (parse err was {e})");
+                }
+            }
         }
     }
 
@@ -517,7 +580,7 @@ async fn drain_and_apply(
             eprintln!("warning: failed to persist raft↔lsn correlation: {e}");
         }
 
-        let result = if command.is_empty() { Ok(()) } else { Ok(()) };
+        let result = Ok(());
         if let Some(tx) = pending.lock().unwrap().remove(&idx) {
             let _ = tx.send(result);
         }
@@ -544,21 +607,91 @@ async fn drain_and_apply(
         }
     };
     if let Some((last, term)) = compaction_target {
-        let snap_data = match engine.lock().await.create_snapshot().await {
+        // Before replacing the Raft snapshot with a newer one, release pins held
+        // by the *previous* snapshot view on this node. Only the latest snapshot
+        // that Raft can send needs its tables protected.
+        {
+            let old_data = {
+                let guard = raft.lock().unwrap();
+                guard.snapshot().and_then(
+                    |(_idx, _term, d)| {
+                        if d.is_empty() {
+                            None
+                        } else {
+                            Some(d)
+                        }
+                    },
+                )
+            };
+            if let Some(data) = old_data {
+                let _ = engine.lock().await.release_snapshot(&data).await;
+            }
+        }
+
+        let engine_data = match engine.lock().await.create_snapshot().await {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("warning: engine snapshot failed for compaction: {e}");
                 vec![]
             }
         };
+
+        // Capture current membership so snapshot receivers (new nodes or lagging
+        // followers) can restore the correct effective config and roster even if
+        // they jump over config-change log entries.
+        let members_snapshot: Vec<ClusterMember> = {
+            let roster_guard = roster.read().await;
+            let voters: Vec<NodeId> = raft
+                .lock()
+                .unwrap()
+                .effective_config()
+                .stable_config()
+                .voters
+                .iter()
+                .copied()
+                .collect();
+            voters
+                .into_iter()
+                .filter_map(|id| {
+                    if let (Some(r), Some(c)) =
+                        (roster_guard.addr(id), roster_guard.client_addr(id))
+                    {
+                        Some(ClusterMember {
+                            id,
+                            raft_addr: r.to_string(),
+                            client_addr: c.to_string(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        let snap_data = build_raft_snapshot_payload(&engine_data, &members_snapshot);
         raft.lock().unwrap().compact(last, term, snap_data.clone());
 
-        // Basic persisted snapshot for restart support (prototype).
-        // Write the compact view to a fixed file so on next start we can install it into the engine.
+        // Persisted snapshot for fast restart. Written atomically (tmp + rename + fsync)
+        // so that a crash leaves either the old complete snapshot or the new one.
         if !snap_data.is_empty() {
             let snap_path = data_dir.join("raft-snapshot.bin");
-            if let Err(e) = std::fs::write(snap_path, &snap_data) {
-                eprintln!("warning: failed to persist raft snapshot: {e}");
+            let tmp_path = data_dir.join("raft-snapshot.bin.tmp");
+            let write_ok = (|| -> std::io::Result<()> {
+                use std::fs::File;
+                use std::io::Write;
+                let mut f = File::create(&tmp_path)?;
+                f.write_all(&snap_data)?;
+                f.sync_all()?;
+                std::fs::rename(&tmp_path, &snap_path)?;
+                if let Ok(dirf) = File::open(data_dir) {
+                    let _ = dirf.sync_all();
+                }
+                Ok(())
+            })();
+            if let Err(e) = write_ok {
+                eprintln!("warning: failed to persist raft snapshot atomically: {e}");
+                // best effort cleanup
+                let _ = std::fs::remove_file(&tmp_path);
             }
         }
     }
@@ -857,6 +990,7 @@ async fn dispatch(
 }
 
 /// Leader proposes adding a new voting member (joint-consensus path).
+#[allow(clippy::too_many_arguments)]
 async fn propose_add_member(
     raft: &SharedRaft,
     roster: &SharedRoster,
@@ -885,6 +1019,16 @@ async fn propose_add_member(
         .collect();
 
     let roster_guard = roster.read().await;
+
+    // Optimistically upsert the new member into our roster so that we can
+    // immediately replicate log entries (including the membership change) to it.
+    if let (Ok(raft_addr), Ok(client_addr)) = (
+        new_raft.clone().parse::<SocketAddr>(),
+        new_client.clone().parse::<SocketAddr>(),
+    ) {
+        roster.write().await.upsert(new_id, raft_addr, client_addr);
+    }
+
     let members = members_for_add(
         &roster_guard,
         &current_voters,
@@ -933,6 +1077,7 @@ async fn propose_add_member(
 }
 
 /// Leader proposes removing a voting member (joint-consensus path).
+#[allow(clippy::too_many_arguments)]
 async fn propose_remove_member(
     raft: &SharedRaft,
     roster: &SharedRoster,

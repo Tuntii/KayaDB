@@ -215,6 +215,22 @@ pub struct HistoryStats {
     pub duration_ms: u64,
 }
 
+impl std::fmt::Display for HistoryStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "History: {} ops ({} PUT, {} GET, {} DEL, {} SCAN, {} errors) in {}ms",
+            self.total,
+            self.puts,
+            self.gets,
+            self.deletes,
+            self.scans,
+            self.errors,
+            self.duration_ms
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,18 +276,5 @@ mod tests {
     }
 }
 
-impl std::fmt::Display for HistoryStats {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "History: {} ops ({} PUT, {} GET, {} DEL, {} SCAN, {} errors) in {}ms",
-            self.total,
-            self.puts,
-            self.gets,
-            self.deletes,
-            self.scans,
-            self.errors,
-            self.duration_ms
-        )
-    }
-}
+// (Display impl moved earlier in the file before the tests module)
+

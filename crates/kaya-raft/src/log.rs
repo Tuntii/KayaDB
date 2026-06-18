@@ -133,11 +133,7 @@ impl MemLog {
 
         // Remove all entries up to and including the snapshot point.
         let first_to_keep = up_to_index.0 + 1;
-        let current_logical_first = if self.entries.is_empty() {
-            self.last_included_index.0 + 1
-        } else {
-            self.last_included_index.0 + 1
-        };
+        let current_logical_first = self.last_included_index.0 + 1;
 
         if first_to_keep > current_logical_first {
             let drain_count = (first_to_keep - current_logical_first) as usize;

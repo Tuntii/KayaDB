@@ -56,3 +56,9 @@ impl RefModel {
             .collect()
     }
 }
+
+impl Default for RefModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}

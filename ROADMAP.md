@@ -1,0 +1,681 @@
+# KayaDB Development Roadmap
+
+**Status:** Living roadmap  
+**Last updated:** 2026-06-16
+
+> **"Geniş ve yaşayan yol haritası"** — Bu belge hem tarihi başarıları arşivler, hem şu anki odak noktalarını gösterir, hem de uzun vadeli vizyonu (birden fazla paralel track ile) detaylandırır. Tasarım-öncelikli ve correctness-öncelikli felsefe korunur.
+
+**Not (2026-06-16):** M0–M11'in çok detaylı listeleri ve eski "Current snapshot" bölümü bu belgenin okunabilirliğini bozduğu için büyük ölçüde arşivlenmiştir (yukarıdaki "Completed Work — Historical Archive" bölümüne bakın). Bundan sonra roadmap **geniş gelecek vizyonu** + aktif M12/M13 üzerine odaklanacak.  
+
+KayaDB is developed design-first and correctness-first. The roadmap intentionally prioritizes crash consistency, deterministic failure testing and inspectable storage formats before performance or distributed features.
+
+This document is the public, human-readable project roadmap. Detailed team implementation notes are maintained separately.
+
+---
+
+## North star: prototype → product
+
+**Intent (do not lose sight of this):** KayaDB is experimental today, but the project is deliberately being evolved into a **trustworthy, deployable distributed database** — not a forever-demo. Correctness-first work (M0–M12) is the foundation; productization is the planned next arc.
+
+| Today (honest) | Target (product) |
+|---|---|
+| Strong LSM engine, sim harness, Raft prototype + initial durable state (hard state + log) | Same core, proven under chaos and restart |
+| TCP cluster, snapshots, dynamic membership | Survives real restarts and operator workflows |
+| Open admin RPCs on localhost | TLS + auth on client and membership/admin paths |
+| “Experimental” badge | Documented deployment guide with explicit SLO/limit envelopes |
+
+**We do not claim production-ready until the exit gates below are met.** Until then, treat every release as a correctness prototype.
+
+### M13 — Productization (planned)
+
+Goal: cross the line from “serious prototype” to “operators can run this with eyes open.”
+
+1. **Durable Raft state** 🟡 — `raft-hard-state` (term + voted_for + snapshot boundary with CRC) and `raft-log` (framed entries) now persist via `DiskRaftStorage`. `RaftNode::recover` + server startup loads them. Hard state saved every loop; log rewritten on propose, follower appends, and compaction points. Full SimDisk crash/restart property tests and suffix-only append tracking remain. Cluster can now survive restart without losing term/vote/log history.
+2. **Authenticated transport** — TLS (or documented mTLS sidecar pattern) on Raft and client ports; `ADD_MEMBER` / `REMOVE_MEMBER` require operator credentials.
+3. **Chaos proof** — external Jepsen (or equivalent) run against a multi-node cluster with membership changes and snapshots under nemesis.
+4. **Operations** — backup/restore story, rolling restart procedure, `kayactl`/docs for day-2 tasks (add/remove node, detect split-brain symptoms).
+5. **Security audit pass** — `docs/security.md` enforcement table fully implemented in code, not advisory only.
+6. **Performance envelope** — published benchmark methodology + regression budget in CI (`BENCHMARKS.md` gates).
+
+Exit criteria for dropping the “experimental” label:
+
+- All six items above ✅ with tests or documented runbooks.
+- `cargo test --workspace` + distributed integration suite green.
+- No known correctness gaps called out as accepted risk in `docs/security.md`.
+
+---
+
+## Roadmap principles
+
+1. **Correctness before throughput**  
+   A slow but correct storage path is preferred over a fast ambiguous one.
+
+2. **Failure is a normal input**  
+   Partial writes, failed fsyncs, corruption and crash/restart paths must be testable.
+
+3. **Every persistent format is inspectable**  
+   WAL, manifest, SSTable and traces should be readable through tooling.
+
+4. **Simulation before distribution**  
+   Raft and networking should start only after local storage recovery is reliable.
+
+5. **No production-readiness claim before proof**  
+   KayaDB remains experimental until crash, recovery, fuzzing and distributed validation are mature.
+
+---
+
+## Legend
+
+| Mark | Meaning |
+|---|---|
+| ✅ | Implemented or mostly complete for current scope |
+| 🟡 | Partially implemented / actively next |
+| ⬜ | Planned |
+| 🔒 | Future scope, intentionally blocked by earlier milestones |
+
+---
+
+## Completed Work — Historical Archive (M0–M11)
+
+**Tüm M0–M11 başarıyla tamamlandı.** (Son büyük güncelleme ~2026-06-14)
+
+KayaDB şu anda güçlü bir **correctness prototype** seviyesindedir:
+- Tam fonksiyonel LSM engine (WAL, memtable, SSTable, manifest, L0 compaction, recovery).
+- Deterministic simulation + SimDisk + crash/restart property testleri.
+- Tam Raft (election, log replication, snapshots, joint-consensus dynamic membership).
+- Gerçek TCP cluster + resilient client (`kaya-client` + `kayactl --server`).
+- Linearizability (sequential + concurrent), Jepsen-style harness, client tracing.
+- Kapsamlı tooling: `kayactl` (inspect, stats, recover, membership), fuzzing, benchmarks.
+- 150+ test + güvenlik sınırları.
+
+**Arşiv:** Detaylı "Implemented" listeleri, KD-XXXX backlog'lar ve M0–M11 bölümleri bu belgenin hacmini çok büyüttüğü için buradan kaldırıldı. 
+
+İlgili tarihsel içerik için:
+- Git'teki 2026-06-14 ROADMAP snapshot'ı
+- `spec/docs/` (özellikle simulation-spec, raft-and-distributed-roadmap-spec)
+- `memory/` klasöründeki session notları
+- `docs/KayaDB_Explained.md` ve eski milestone PR'ları
+
+Artık roadmap **ileriye ve genişe** odaklanıyor.
+
+---
+
+## M0 — Project foundation ✅ (Arşiv)
+
+Goal: establish the repository as a compilable Rust workspace with design-driven contribution flow.
+
+(Detaylar arşive taşındı — yukarıya bakın.)
+
+- Rust workspace and crate layout.
+- Initial `README.md` and `CONTRIBUTING.md`.
+- CI workflow for formatting, clippy and tests.
+- PR template with roadmap/invariant sections.
+- Initial internal design notes.
+
+Primary backlog IDs:
+
+- `KD-0001` Create Rust workspace and crate layout.
+- `KD-0002` Add CI for fmt, clippy and tests.
+- `KD-0003` Add contribution templates and labels.
+
+Exit criteria:
+
+- ✅ `cargo test --workspace` passes.
+- ✅ Crate boundaries compile.
+- ✅ Public documentation explains crate boundaries and development flow.
+
+---
+
+## M1 — Disk layer and WAL format 🟡
+
+Goal: make the durability foundation explicit and testable.
+
+Implemented or mostly implemented:
+
+- Core types and error model.
+- `RelativePath` validation.
+- `Disk` trait.
+- `FileDisk` implementation.
+- WAL record constants/types.
+- WAL encoder and decoder.
+- Basic malformed WAL rejection tests.
+
+Still needed:
+
+- Harden `FileDisk` concurrency/append serialization if needed by tests.
+- Add more shared disk contract tests for `FileDisk` and `SimDisk`.
+- Expand decoder tests around unknown flags, oversized lengths and corruption cases.
+- Add persistent format fixtures.
+
+Primary backlog IDs:
+
+- `KD-0101` Define core types and error model.
+- `KD-0102` Define `RelativePath`.
+- `KD-0103` Define `Disk` trait.
+- `KD-0104` Implement `FileDisk`.
+- `KD-0105` Implement WAL record structs and constants.
+- `KD-0106` Implement WAL encoder.
+- `KD-0107` Implement WAL decoder.
+
+Related public docs:
+
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/development.md`](docs/development.md)
+
+---
+
+## M2 — WAL writer, recovery and SimDisk ✅
+
+Goal: prove that strict ACKed WAL records survive crash/recovery.
+
+Implemented:
+
+- WAL segment writer.
+- Strict and relaxed append modes.
+- WAL recovery reader.
+- Corrupted/partial tail truncation path.
+- Basic `SimDisk` volatile/stable model.
+- SimDisk event recording.
+- Deterministic fault schedule (`FaultKind`: `FsyncFailed`, `IoError`, `DiskFull`, `PartialWrite`) with `SimDisk::with_faults`.
+- WAL durable-prefix property test (KD-0206).
+- WAL crash/recovery idempotence tests.
+- Multi-segment recovery test.
+
+Still needed:
+
+- TLA+ model execution instructions/tooling.
+
+Primary backlog IDs:
+
+- `KD-0201` Implement WAL segment writer. ✅
+- `KD-0202` Implement WAL recovery reader. ✅
+- `KD-0203` Implement corrupted tail truncation. ✅
+- `KD-0204` Implement `SimDisk` stable/volatile model. ✅
+- `KD-0205` Add deterministic fault schedule to `SimDisk`. ✅
+- `KD-0206` Add WAL durable-prefix property test. ✅
+
+Related public docs:
+
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/development.md`](docs/development.md)
+
+Recommended next PR focus:
+
+```text
+KD-0401 KD-0402
+```
+
+---
+
+## M3 — Minimal single-node engine ✅
+
+Goal: provide durable local key-value operations over WAL + memtable.
+
+Implemented:
+
+- Memtable `put/get/delete/scan_prefix`.
+- Engine `put/get/delete/scan_prefix`.
+- Engine recovery from WAL into memtable.
+- `kayactl put/get/delete/scan`.
+- `kayactl inspect wal`.
+- Engine crash/restart tests over `SimDisk`.
+- Delete-then-restart correctness test.
+- Scan-prefix correctness after restart.
+
+Still needed:
+
+- Stronger validation around limits and scan behavior.
+- More CLI JSON output and snapshot-style CLI tests.
+- Recovery diagnostics exposed through CLI.
+- Clear data directory locking behavior.
+
+Primary backlog IDs:
+
+- `KD-0301` Implement memtable. ✅
+- `KD-0302` Implement engine PUT/GET/DELETE over WAL + memtable. ✅
+- `KD-0303` Implement engine recovery from WAL. ✅
+- `KD-0304` Implement `kayactl put/get/delete/scan`. ✅
+
+Related public docs:
+
+- [`docs/getting-started.md`](docs/getting-started.md)
+- [`docs/cli-reference.md`](docs/cli-reference.md)
+- [`docs/development.md`](docs/development.md)
+
+---
+
+## M4 — SSTable and manifest ✅
+
+Goal: move beyond WAL-only persistence into LSM storage with manifest-defined live state.
+
+Implemented:
+
+- SSTable writer (`SstableBuilder`) and reader (`SstableReader`).
+- Three-level on-disk layout: data blocks → index block → footer.
+- CRC32C validation on data blocks, index block and footer.
+- Footer magic and version check.
+- Manifest frame format: 32-byte header with CRC + variable payload.
+- Manifest edit types: `CreateTable`, `DeleteTable`, `SetLastSequence`.
+- `replay_manifest` reconstructing `ManifestState` from any suffix of valid edits.
+- `CURRENT` file atomic update (tmp-write → fsync → rename → fsync dir).
+- Engine `flush()`: SSTable build → atomic disk publish → manifest append → CURRENT update.
+- Engine `get()` falls back through live SSTables newest-first.
+- Engine `scan_prefix()` merges SSTable and memtable results (tombstones respected).
+- Engine `open()` loads manifest and live SSTables from disk.
+- `kayactl inspect sstable <path>` and `kayactl inspect manifest <path>`.
+- Flush-and-reopen roundtrip tests, delete-after-flush test, scan merge test.
+
+Primary backlog IDs:
+
+- `KD-0401` Implement SSTable writer/reader. ✅
+- `KD-0402` Implement manifest record format and replay. ✅
+- `KD-0403` Implement memtable flush to SSTable. ✅
+- `KD-0404` Implement basic inspect commands. ✅
+
+Related public docs:
+
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/cli-reference.md`](docs/cli-reference.md)
+
+Exit criteria:
+
+- ✅ Recovered database can read from live SSTables.
+- ✅ Manifest replay reconstructs live table set.
+- ✅ Crash during flush does not lose acknowledged writes.
+
+---
+
+## M5 — Compaction and recovery hardening ✅
+
+Goal: preserve visible state while reducing read amplification and hardening crash recovery.
+
+Implemented:
+
+- Simple L0 compaction: merges all L0 SSTables by key and sequence, tombstones preserved.
+- Atomic compaction publication: `CreateTable(output)` → `DeleteTable(inputs)` → fsync, single manifest batch.
+- `Engine::compact()` crash-safe: output is live before inputs are removed; partial manifest state is valid.
+- Recovery idempotence: flush and compaction crash recovery verified with double-crash tests.
+- Manifest tail corruption test: appended garbage survives a simulated fsync, recovery truncates it gracefully.
+- Fuzz target skeletons: `fuzz/fuzz_targets/fuzz_wal_decoder.rs`, `fuzz_sstable_footer.rs`, `fuzz_manifest_decoder.rs` using `libfuzzer-sys`.
+- Malformed-input unit tests for all three decoders: no panic on arbitrary byte sequences.
+
+Primary backlog IDs:
+
+- `KD-0501` Implement simple L0 compaction. ✅
+- `KD-0502` Add recovery idempotence test suite. ✅
+- `KD-0503` Add fuzz target skeletons. ✅
+
+Related public docs:
+
+- [`docs/development.md`](docs/development.md)
+- [`docs/security.md`](docs/security.md)
+
+Exit criteria:
+
+- ✅ Compaction preserves visible key-value state.
+- ✅ Flush and compaction crash recovery are idempotent.
+- ✅ Malformed persistent files do not panic expected paths.
+
+---
+
+## M6 — Deterministic simulator ✅
+
+Goal: make failures reproducible by seed and replayable trace.
+
+Delivered work:
+
+- `crates/kaya-sim/src/rng.rs` — xorshift64 `SimRng`, fully deterministic.
+- `crates/kaya-sim/src/model.rs` — `RefModel` BTreeMap reference model.
+- `crates/kaya-sim/src/trace.rs` — hand-rolled JSONL `TraceWriter` + `parse_trace`.
+- `crates/kaya-sim/src/runner.rs` — `run_async` (seeded op gen, invariant checks, crash/restart) and `replay_async`.
+- `crates/kaya-sim/src/lib.rs` — `SimRunner`, `replay_trace`, full public API + tests.
+- Invariants checked: ENG-001 (durability after crash), ENG-002 (GET matches model),
+  ENG-003 (DELETE hides key), ENG-004 (SCAN matches model prefix).
+
+Primary backlog IDs:
+
+- `KD-0601` Implement simulation runner. ✅
+- `KD-0602` Implement replay mode. ✅
+- `KD-0603` Add CI small seed suite (10 seeds × 1 000 ops). ✅
+
+Related public docs:
+
+- [`docs/development.md`](docs/development.md)
+- [`docs/architecture.md`](docs/architecture.md)
+
+Exit criteria:
+
+- Same seed produces same operation sequence. ✅
+- Invariant failure writes JSONL trace with full event history. ✅
+- Replay verifies GET/SCAN results match original run. ✅
+
+---
+
+## M7 — Raft prototype in simulation ✅
+
+Goal: introduce replicated log semantics only after local storage correctness is stable.
+
+Implemented:
+
+- `Term`, `LogIndex`, `NodeId` types and `RaftApplyCommand` in `kaya-raft`.
+- `MemLog`: in-memory Raft log with 1-based indexing, truncation and conflict resolution.
+- `VoteRequest`, `VoteResponse`, `AppendRequest`, `AppendResponse`, `Message`, `Envelope` message types.
+- `RaftNode`: tick-driven pure state machine with full Raft §5 semantics:
+  - Leader election: election timeout, RequestVote, vote counting, majority quorum.
+  - Log replication: AppendEntries, prevLog consistency check, conflict truncation, commit index advancement.
+  - No-op entry on new leader to establish commit barrier for previous-term entries (§5.4.2).
+  - Leader heartbeats every `heartbeat_interval_ticks` ticks.
+  - `propose()` for submitting commands when leader.
+  - `applied_entries` visible to simulator for invariant verification.
+- `SimNetwork`: deterministic per-seed message drop and duplication, unidirectional partitions, `isolate` / `reconnect` helpers.
+- `ClusterSim`: multi-node Raft driver in `kaya-sim`:
+  - Staggered election timeouts for deterministic first-election convergence.
+  - Two-round message delivery per tick (request → response in same tick).
+  - RAFT-INV-001 invariant check: ≤1 leader per term.
+  - `propose`, `current_leader`, `statuses`, `applied_entries`, `network_mut` API.
+- 14 simulation tests pass (including multi-seed CI suite and partition/rejoin).
+
+Primary backlog IDs:
+
+- `KD-0701` Implement Raft state machine (`kaya-raft`). ✅
+- `KD-0702` Implement deterministic simulated network (`kaya-sim`). ✅
+- `KD-0703` Implement `ClusterSim` with election-safety invariant. ✅
+- `KD-0704` Add partition/rejoin and multi-seed CI tests. ✅
+
+Related public docs:
+
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/development.md`](docs/development.md)
+
+Exit criteria:
+
+- ✅ Same seed produces same operation sequence.
+- ✅ At most one leader per term across all tested scenarios.
+- ✅ Committed entries survive partition and rejoin.
+- ✅ `cargo test --workspace` passes (59 tests).
+
+---
+
+## M8 — Real cluster mode ✅
+
+Goal: run a small KayaDB cluster over real TCP after simulated Raft is reliable.
+
+Completed work:
+
+- **KD-0801** — TCP Raft transport in `kaya-net` (`codec.rs`, `roster.rs`, `transport.rs`).
+  - Hand-rolled wire format: `frame_len(u32 LE) | from_id | to_id | msg_type | payload`.
+  - Client frame helpers: PUT/GET/DELETE/SCAN/HEALTH encode + decode.
+  - `send_envelopes`, `start_raft_listener`, `roundtrip` transport primitives.
+  - `NodeRoster` — static cluster membership table.
+- **KD-0802** — `ClusterNode` in `kaya-server` with Raft event loop and client handler.
+  - `RaftCommand` (Put / Delete) with hand-rolled codec.
+  - `raft_event_loop`: `tokio::select!` over tick / raft-rx / propose-rx.
+  - `drain_and_apply` path writes committed entries into the LSM engine.
+  - Pending client oneshot map for linearizable PUT/DELETE replies.
+- **KD-0803** — `kayadb-server` cluster CLI (`--node-id`, `--raft-addr`, `--client-addr`, `--peer`, `--data`).
+- **KD-0804** — `kayactl --server <addr>` cluster-aware commands (put/get/delete/scan/health).
+
+Related public docs:
+
+- [`docs/getting-started.md`](docs/getting-started.md)
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/security.md`](docs/security.md)
+
+Verification:
+
+- ✅ `cargo build --workspace` succeeds.
+- ✅ `cargo test --workspace` passes (72 tests, +13 from M8: kaya-net × 9, kaya-server × 4).
+
+---
+
+## M9 — Benchmarking, observability and linearizability ✅
+
+Goal: validate distributed behavior and improve Linux-native observability/performance.
+
+Completed work:
+
+- **KD-0901** — Benchmark harness (`crates/kaya-bench`): Criterion-based microbenchmarks
+  for WAL append (relaxed/strict/recovery), SSTable build+scan+get, and engine PUT/GET workloads.
+- **KD-0902** — Observability commands in `kayactl`:
+  - `kayactl [--data <dir>] [--json] stats` — live `EngineStats` + recovery summary.
+  - `kayactl [--data <dir>] [--json] recover --dry-run` — WAL replay report without
+    opening the engine; shows `records_replayed`, `truncated_bytes`, `last_lsn`, warnings.
+- **KD-0903** — `LinearizabilityChecker` in `kaya-sim` (`src/linear.rs`):
+  - Records `(Op, OpResult, start_tick, end_tick)` history via `record` / `record_next`.
+  - `check_sequential()` replays against in-memory `RefModel`; verifies every GET/SCAN
+    returns the value that was last committed. Errors are non-constraining.
+  - 6 tests: consistent reads, delete-then-get, stale-read violation, error non-constraining,
+    scan consistent, scan missing-entry violation.
+  - Public API exported from `kaya-sim` for future Jepsen-style test drivers.
+
+Related public docs:
+
+- [`docs/cli-reference.md`](docs/cli-reference.md)
+- [`docs/development.md`](docs/development.md)
+- [`BENCHMARKS.md`](BENCHMARKS.md)
+
+Future (v2+):
+
+- Additional eBPF probes (syscall timeline, USDT, flamegraphs); the basic fsync + block I/O probes landed in M12 via bpftrace + `kayactl ebpf`.
+- Jepsen workloads (requires Clojure + Linux cluster).
+- Concurrent linearizability via WGL algorithm (needs concurrent op history).
+- `io_uring` backend (Linux-only).
+
+Verification:
+
+- ✅ `cargo build --workspace` succeeds.
+- ✅ `cargo test --workspace` passes (78 tests, +6 from M9: linear × 6).
+
+---
+
+## M10 — Cluster correctness hardening and client API ✅
+
+Goal: harden the protocol surface, add malformed-input tests, improve client/operator UX and enable trace-based cluster validation.
+
+Completed work:
+
+- **P0-1** — Linearizable read policy: GET/SCAN go through ReadIndex; followers return `STATUS_NOT_LEADER`. ✅ (already in M8)
+- **P0-2** — Leader discovery and retry hints: `NOT_LEADER` response includes leader `client_addr`; `kaya-client` and `kayactl` auto-redirect. ✅ (already in M8)
+- **P0-3** — Real cluster integration tests: 3-node spawn, leader election, PUT/GET/DELETE/SCAN, follower `NOT_LEADER`, leader crash, re-election, linearizability history check. ✅ (already in M8)
+- **P0-4** — Protocol alignment and malformed frame tests (KD-1001):
+  - 26 malformed-input unit tests for all client payload decoders and Raft envelope decoder in `kaya-net`.
+  - 12 TCP loopback tests for `read_client_frame`, `write_client_response`, `encode_client_frame` and `roundtrip`.
+  - `STATUS_INVALID_ARGUMENT` (1) now returned by server on malformed client payloads (was `STATUS_ERROR`).
+  - `STATUS_INVALID_ARGUMENT` re-exported from `kaya-net` and handled by `kaya-client` and `kayactl`.
+- **P1-6** — `kayactl --server` improvements (KD-1002):
+  - `--timeout <ms>` flag for request timeouts.
+  - Multi-endpoint mode: `--server a --server b --server c` with automatic failover.
+  - `health` command now uses `roundtrip_with_retry` for endpoint failover.
+- **P1-9** — Recovery diagnostics: already complete in M9 (`RecoveryReport` includes manifest, SSTable, WAL, temp files, warnings). ✅
+- **P1-11** — Client trace recording (KD-1003):
+  - `KayaClient::enable_tracing()` / `disable_tracing()` / `take_trace(seed)` / `check_trace()`.
+  - Records every PUT/GET/DELETE/SCAN into `LinearizabilityChecker` for sequential linearizability verification.
+  - `take_trace()` exports JSONL trace compatible with simulation replayer.
+- **P2-13** — Protocol fuzz tests: `fuzz_command_frame_decoder` already covers all `kaya-net` decoders. ✅
+
+Verification:
+
+- ✅ `cargo fmt --all -- --check` passes.
+- ✅ `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- ✅ `cargo test --workspace` passes (128 tests, +50 from M10: kaya-net codec × 26, kaya-net transport × 12, kaya-raft × 3, kaya-server × 4, kaya-sim × 5).
+
+---
+
+## Immediate next actions
+
+M10 completed the client/protocol hardening pass. The project now has:
+
+- Linearizable reads via ReadIndex, leader hints, and auto-redirect in both `kaya-client` and `kayactl`.
+- 38 malformed-input and TCP loopback tests in `kaya-net`.
+- `STATUS_INVALID_ARGUMENT` for malformed client payloads.
+- Multi-endpoint and timeout support in `kayactl --server`.
+- Client-side trace recording compatible with `LinearizabilityChecker`.
+- 157+ passing tests across the workspace.
+
+### M11 — Demo/readiness pass ✅
+
+1. **Benchmark reporting discipline.** ✅ `BenchmarkReport`, `scripts/bench-report.{sh,ps1}`, CI smoke step, `BENCHMARKS.md` metadata table.
+2. **Concurrent linearizability checker.** ✅ `LinearizabilityChecker::check_concurrent` (WGL); `kaya-jepsen-test` `History::check_concurrent` + `record_timed`.
+3. **Raft log snapshotting/compaction.** ✅ InstallSnapshot wire codec (MSG 5/6), sim + server integration, `test_install_snapshot_over_tcp`.
+4. **Dynamic cluster membership.** ✅ Joint-consensus with `ClusterMember` addresses, `Arc<RwLock<NodeRoster>>` hot reload, `ADD_MEMBER`/`REMOVE_MEMBER` opcodes (7/8), `kayactl add-node`/`remove-node`, `--join-cluster`, persisted `cluster-roster.json`.
+5. **Production security boundaries.** ✅ `--allow-public-bind` guard, bind validation, 64 MiB frame limits, `docs/security.md` enforcement table.
+
+### M12 — Jepsen prep + Linux observability experiments
+
+6. **Jepsen preparation.** ✅
+   - Workload and nemesis definitions documented in `docs/jepsen-design.md`.
+   - Process-control scripts: `scripts/start-cluster.{sh,ps1}`, `stop-cluster.{sh,ps1}`, `kill-node.{sh,ps1}`, `restart-node.{sh,ps1}`.
+   - Rust-native test harness in `crates/kaya-jepsen-test/`:
+     - `workload` module: concurrent client generators (Register, Counter, Set, Map workloads).
+     - `nemesis` module: failure injectors (kill node, partition — partition requires `iptables`/`tc`).
+     - `history` module: thread-safe operation recorder with `LinearizabilityChecker` integration.
+     - `runner` module: test orchestrator with workload + nemesis + verification pipeline.
+   - Full Jepsen (Clojure) deferred until snapshot and dynamic membership are stable.
+7. **Linux eBPF observability.** 🟡 (initial experiments + userspace complement delivered)
+   - ✅ `scripts/ebpf/fsync-latency.bt` and `block-io-latency.bt` (bpftrace)
+   - ✅ `kayactl ebpf fsync-latency|block-latency [--pid N]`
+   - ✅ `scripts/ebpf/README.md` + docs updates
+   - ✅ Userspace WAL fsync latency metrics in EngineStats (`wal_fsync_total_us` / `max_us`) + printing in stats/status (pairs with eBPF kernel histograms)
+   - `io_uring` backend remains separate future item (see disk-and-io-spec).
+   - Next possible: deeper probes (syscall timeline etc.), optional aya-based Rust eBPF crate scaffold, more userspace latencies (flush, compaction).
+
+### P3 — GUI/dashboard scope, deliberately deferred
+
+8. **Do not build a general GUI client yet.**
+9. **Later dashboard candidate: trace and cluster viewer.**
+   - Read JSONL traces and show operation timeline, leader changes, partitions and invariant failures.
+   - Show node status/metrics from `kayactl status`/server `STATS`.
+
+Suggested next milestone shape:
+
+```text
+M11 — Benchmark discipline, concurrent linearizability, Raft snapshots, dynamic membership ✅
+M12 — Jepsen prep + Linux observability experiments
+M13 — Productization (see North star above)
+```
+
+---
+
+## Validation commands
+
+Run before roadmap-affecting PRs:
+
+```powershell
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+For deeper correctness work, add the relevant property, crash, fuzz or simulation command once those tools exist.
+
+---
+
+## Long-term Expanded Roadmap — Parallel Tracks (Baya Geniş Versiyon)
+
+Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde öncelikli, orta ve uzun vadeli adımlar içerir. Özellikle **Linux eBPF / Observability** track'i detaylı yazıldı çünkü şu anda aktif olarak çalışıyoruz.
+
+### Track A: Observability, Diagnostics & Linux/eBPF Tooling (Aktif — Yüksek Öncelik)
+
+**Mevcut durum (2026-06-16 + Track A devam):** 
+- bpftrace script'leri: fsync-latency, block-io-latency, **syscall-timeline.bt** (write/fsync/rename/unlink + TID correlation + publish timeline)
+- `kayactl ebpf`: fsync/block/syscall + **list** + **status** (multi-PID discovery for clusters, active traces), **--run --duration**, auto-detect improvements
+- Userspace metrics: WAL fsync + **flush_total/max/count + compaction_total/max/count** in EngineStats, full exposure in `kayactl stats` (incl. **--latency** focused view), server `status`, JSON + human printers everywhere
+- Enriched averages in output, regression test for the new stats paths, correlation guidance in README
+- docs (cli-ref, ebpf/README, observability-spec) + ROADMAP updated
+- Cross-platform (graceful on Windows); Linux eBPF remains optional / no hard dep
+
+**Kısa vadeli (hemen / 2026 yaz sonu):**
+- Yeni bpftrace script'leri ekle:
+  - `syscall-timeline.bt` (write, fsync, fdatasync, rename, unlink, fsyncdir)
+  - Per-file veya data-dir filtreli versiyonlar
+  - Basit write + fsync korelasyonu (aynı TID'de)
+- `kayactl ebpf` geliştirmeleri:
+  - `--run` iyileştirmesi (output capture, timeout, multiple script paralel)
+  - `kayactl ebpf list` ve `kayactl ebpf status` (çalışan trace'leri göster)
+  - Auto-detect tüm local `kayadb-server` process'leri (cluster node'lar için)
+- Daha fazla userspace latency metrik:
+  - Flush süresi, compaction süresi, manifest publish fsync'leri
+  - `EngineStats`'e `flush_total_us`, `compaction_total_us` gibi alanlar ekle
+  - `kayactl stats --latency` veya zenginleştirilmiş çıktı
+- eBPF + userspace verilerini birleştiren basit korelasyon yardımcıları (script veya Rust tool)
+
+**Orta vadeli:**
+- Opsiyonel `crates/kaya-ebpf` (veya `kaya-observe`) crate:
+  - `ebpf` Cargo feature
+  - `cfg(target_os = "linux")` + build.rs notları (clang, bpf-linker, libbpf)
+  - Aya veya libbpf-rs tabanlı örnek probe'lar (USDT marker'lar, custom maps)
+  - Hala **non-hard-dependency** — normal `cargo test` çalışmalı
+- USDT (User Statically-Defined Tracing) marker'lar Rust koduna ekle (WAL fsync, flush entry/exit noktaları)
+- Flamegraph + stack collapse entegrasyonu
+- Prometheus / OpenTelemetry exporter (basit metrik + span'ler)
+- `scripts/ebpf/` altına BCC / bpftrace helper script'leri + Makefile
+
+**Uzun vadeli / İleri seviye:**
+- Kernel + userspace birleşik attribution (hangi fsync'in ne kadarını kernel'da geçirdiğini net raporla)
+- Production-grade tracing (trace correlation across cluster nodes + client)
+- GUI / web dashboard (trace timeline + eBPF histogram + cluster health)
+- io_uring completion tracing (Track B ile birleşik)
+
+**Non-goals (değişmez):**
+- Root gerektiren testler default olarak
+- Kernel bağımlılığını core crate'lere sızdırmak
+- Production SLA claim'leri (henüz)
+
+### Track B: I/O & Low-level Storage
+
+- Linux `io_uring` Disk implementasyonu (yeni async backend)
+- Gelişmiş compaction stratejileri (leveled + tiered hibrit)
+- Block cache, bloom filter, compression seçenekleri (SSTable v2)
+- Daha iyi fsync_dir semantiği + directory sync optimizasyonları
+
+### Track C: Distributed Correctness & Chaos
+
+- Tam Clojure Jepsen suite (gerçek cluster + dynamic membership + snapshots altında)
+- Daha zengin nemesis seti + clock skew, disk latency injection
+- TLA+ modellerinin genişletilmesi (manifest + compaction + Raft bir arada)
+- Linearizability checker'in production'a yakın versiyonu (WGL + daha iyi raporlama)
+
+### Track D: Client & Language Ecosystem
+
+- Go client gerçek implementasyon + conformance
+- Python, TypeScript/JavaScript, Zig native client'lar
+- Ortak conformance test harness
+- Yüksek seviye özellikler: retry policy'leri, observability hook'lar, connection pooling
+
+### Track E: Operations, Security & Production
+
+- Backup/restore (snapshot + incremental)
+- TLS + auth her yerde (Raft, client, admin RPC)
+- Day-2 operasyon dokümanları + kayactl komutları
+- Deployment (systemd, Docker, Kubernetes örnekleri)
+- Monitoring stack (Prometheus + eBPF + custom exporter)
+- SLO / error budget / limit envelope tanımları
+
+### Track F: Performance & Benchmarking
+
+- Latency histogram'ları her yerde (WAL, read path, compaction)
+- CI regression gate'leri + BENCHMARKS.md otomasyonu
+- Linux perf + eBPF ile düzenli profiling
+- Large value, high concurrency, mixed workload benchmark'ları
+
+### Track G: DX, Tooling & Documentation
+
+- `kayactl` interactive / watch modları
+- Trace + cluster görselleştirme (dashboard)
+- Daha iyi hata mesajları ve recovery rehberliği
+- Katkı deneyimini iyileştirme (eBPF "good first issue" etiketleri vs.)
+
+### Track H: Research & Future Experiments
+
+- Learned indexes / filtreler
+- Yeni durability modları (group commit, relaxed + periodic fsync)
+- eBPF + io_uring ultra low-latency path denemeleri
+- Daha fazla formal yöntem + property test
+
+---
+
+Bu yapı ile roadmap **hem tarihsel olarak temiz, hem çok geniş (8 paralel track), hem de eBPF/observability için somut actionable adımlar** içeriyor.
+
+Devam etmek istersen bir track'i derinleştirelim (örneğin Track A'daki bir sonraki eBPF script'ini veya kaya-ebpf stub'unu yapalım). 
+
+Ne dersin?

@@ -1,0 +1,11 @@
+# CODEOWNERS for KayaDB
+# Review requests will be sent to the listed users/teams for matching paths
+
+# Core maintainers
+* @Tuntii
+
+# Documentation
+/docs/ @Tuntii
+
+# CI / release
+/.github/ @Tuntii

@@ -306,18 +306,23 @@ impl<D: Disk> Engine<D> {
     }
 
     /// Attempt to load a persisted Raft snapshot from `snap_path`.
-    /// Returns true if a snapshot was loaded and applied.
+    /// Returns true if a snapshot was loaded and applied to the engine.
+    ///
+    /// After load, the tables referenced by the snapshot are pinned (refcounted)
+    /// so that subsequent compactions respect them (see compact()).
     pub async fn load_persisted_raft_snapshot(
         &mut self,
         snap_path: impl AsRef<std::path::Path>,
     ) -> Result<bool> {
-        if let Ok(data) = std::fs::read(snap_path.as_ref()) {
-            self.install_snapshot(&data).await?;
-            // Optional: remove after successful load to avoid re-applying
-            // let _ = std::fs::remove_file(snap_path);
-            Ok(true)
-        } else {
-            Ok(false)
+        let path = snap_path.as_ref();
+        match std::fs::read(path) {
+            Ok(data) if !data.is_empty() => {
+                self.install_snapshot(&data).await?;
+                // Keep the file for future restarts. A newer snapshot will overwrite it.
+                Ok(true)
+            }
+            Ok(_) => Ok(false),
+            Err(_) => Ok(false),
         }
     }
 
@@ -660,13 +665,83 @@ impl<D: Disk> Engine<D> {
         self.stats.memtable_entries = self.memtable.len() as u64;
         self.stats.sstable_count = self.live_sstables.len() as u64;
 
-        // Decrement refs for the tables we just installed from this snapshot.
+        // Pin the tables belonging to this snapshot view. Installing a snapshot
+        // means this view is now our active durable state (from persisted load
+        // or InstallSnapshot RPC). We must protect these SSTables from compaction
+        // until a newer snapshot supersedes this one (via release_snapshot).
         for meta in &pinned {
-            if let Some(count) = self.sstable_refcounts.get_mut(&meta.table_id) {
+            *self.sstable_refcounts.entry(meta.table_id).or_insert(0) += 1;
+        }
+
+        Ok(())
+    }
+
+    /// Release the pin counts held by a serialized snapshot view (produced by
+    /// `create_snapshot`). This should be called when a newer Raft snapshot
+    /// supersedes a previous one, so that the SSTables from the old view are
+    /// no longer artificially kept alive on this node.
+    pub async fn release_snapshot(&mut self, data: &[u8]) -> Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let mut cur: &[u8] = data;
+
+        let num_tables = Self::take_u32(&mut cur)? as usize;
+        for _ in 0..num_tables {
+            // table_id is the first u64 in each table record
+            if cur.len() < 8 {
+                return Err(KayaError::invalid_argument("truncated snapshot table id"));
+            }
+            let table_id = u64::from_le_bytes([
+                cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
+            ]);
+            cur = &cur[8..];
+
+            // Skip the rest of this table's metadata to reach the next record.
+            // level: u32 (4)
+            if cur.len() < 4 {
+                return Err(KayaError::invalid_argument("truncated level"));
+            }
+            cur = &cur[4..];
+            // path
+            let plen = Self::take_u32(&mut cur)? as usize;
+            if cur.len() < plen {
+                return Err(KayaError::invalid_argument("truncated path"));
+            }
+            cur = &cur[plen..];
+            // smallest_key
+            let sk = Self::take_u32(&mut cur)? as usize;
+            if cur.len() < sk {
+                return Err(KayaError::invalid_argument("truncated smallest"));
+            }
+            cur = &cur[sk..];
+            // largest_key
+            let lk = Self::take_u32(&mut cur)? as usize;
+            if cur.len() < lk {
+                return Err(KayaError::invalid_argument("truncated largest"));
+            }
+            cur = &cur[lk..];
+            // remaining fixed: min_seq(8) + max_seq(8) + entry_count(8) + file_size(8) + checksum(8) = 40
+            if cur.len() < 40 {
+                return Err(KayaError::invalid_argument("truncated table footer"));
+            }
+            cur = &cur[40..];
+
+            if let Some(count) = self.sstable_refcounts.get_mut(&table_id) {
                 if *count > 0 {
                     *count -= 1;
                 }
+                if *count == 0 {
+                    self.sstable_refcounts.remove(&table_id);
+                }
             }
+        }
+
+        // Advance past memtable data and cutoff (we don't need them for release)
+        // num_mt_entries
+        if !cur.is_empty() {
+            let _ = Self::take_u32(&mut cur).ok();
+            // We could skip entries but it's not required; just best-effort cleanup.
         }
 
         Ok(())
@@ -827,9 +902,31 @@ impl<D: Disk> Engine<D> {
     }
 
     pub async fn compact(&mut self) -> Result<CompactionResult> {
-        let input_count = self.live_sstables.len() as u64;
-        if input_count < 2 {
+        let total_tables = self.live_sstables.len() as u64;
+        if total_tables < 2 {
             // Nothing to compact — 0 or 1 table.
+            return Ok(CompactionResult {
+                input_tables: 0,
+                output_tables: 0,
+            });
+        }
+
+        // Respect pinned tables from Raft snapshots: never delete tables that
+        // have a positive refcount. Only compact tables with refcount == 0.
+        let mut pinned_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for (&id, &cnt) in &self.sstable_refcounts {
+            if cnt > 0 {
+                pinned_ids.insert(id);
+            }
+        }
+
+        let eligible_count = self
+            .live_sstables
+            .iter()
+            .filter(|(m, _)| !pinned_ids.contains(&m.table_id))
+            .count();
+
+        if eligible_count < 2 {
             return Ok(CompactionResult {
                 input_tables: 0,
                 output_tables: 0,
@@ -838,10 +935,12 @@ impl<D: Disk> Engine<D> {
 
         let compact_start = std::time::Instant::now();
 
-        // Merge all entries from all L0 tables.  Iterate oldest-first so that
-        // entries from newer tables (higher table_id) overwrite older ones.
+        // Merge only non-pinned tables. Iterate in reverse (oldest first among current live).
         let mut merged: BTreeMap<Bytes, (u64, Option<Bytes>)> = BTreeMap::new();
-        for (_, reader) in self.live_sstables.iter().rev() {
+        for (meta, reader) in self.live_sstables.iter().rev() {
+            if pinned_ids.contains(&meta.table_id) {
+                continue;
+            }
             for entry in reader.all_entries()? {
                 let seq = entry.sequence.get();
                 match merged.get(&entry.key) {
@@ -911,8 +1010,13 @@ impl<D: Disk> Engine<D> {
             footer_checksum: footer_crc,
         };
 
-        // Collect input table IDs before mutating state.
-        let input_ids: Vec<u64> = self.live_sstables.iter().map(|(m, _)| m.table_id).collect();
+        // Collect input table IDs (only the non-pinned / eligible ones we are compacting).
+        let input_ids: Vec<u64> = self
+            .live_sstables
+            .iter()
+            .filter(|(m, _)| !pinned_ids.contains(&m.table_id))
+            .map(|(m, _)| m.table_id)
+            .collect();
         let last_seq = SequenceNumber::new(self.stats.last_sequence);
 
         // Append manifest edits: CreateTable(output) first — safe to have it
@@ -955,14 +1059,27 @@ impl<D: Disk> Engine<D> {
         self.disk.fsync_dir(&root_rel).await?;
 
         // Update in-memory state.
+        // Preserve pinned tables (move their readers) and drop the compacted ones' readers.
+        // Add the freshly compacted table.
         let new_reader = SstableReader::open(sst_bytes)?;
-        self.live_sstables = vec![(new_meta.clone(), new_reader)];
+        let mut new_live: Vec<(TableMetadata, SstableReader)> = Vec::new();
+        for (meta, reader) in self.live_sstables.drain(..) {
+            if pinned_ids.contains(&meta.table_id) {
+                new_live.push((meta, reader));
+            }
+            // non-pinned readers are dropped (their SSTables will be deleted via manifest)
+        }
+        new_live.push((new_meta.clone(), new_reader));
+        new_live.sort_by_key(|b| std::cmp::Reverse(b.0.table_id));
+
+        self.live_sstables = new_live;
+
         for &id in &input_ids {
             self.manifest_state.live_tables.retain(|t| t.table_id != id);
         }
         self.manifest_state.live_tables.push(new_meta);
         self.manifest_state.last_sequence = last_seq;
-        self.stats.sstable_count = 1;
+        self.stats.sstable_count = self.live_sstables.len() as u64;
 
         let compact_us = compact_start.elapsed().as_micros() as u64;
         self.stats.compaction_total_us += compact_us;
@@ -971,8 +1088,9 @@ impl<D: Disk> Engine<D> {
         }
         self.stats.compaction_count += 1;
 
+        let actual_input = input_ids.len() as u64;
         Ok(CompactionResult {
-            input_tables: input_count,
+            input_tables: actual_input,
             output_tables: 1,
         })
     }

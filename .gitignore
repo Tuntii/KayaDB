@@ -1,16 +1,26 @@
+# Build artifacts
 /target/
+/fuzz/target/
+
+# Rust backup
 **/*.rs.bk
-data/
+
+# Runtime / data (never commit DB state or test data dirs)
+/data/
 *.trace.jsonl
 *.log
-ROADMAP.md
-/fuzz/target
-/scripts
+.kaya-*
+KAYA_LOCK
+
+# Private / internal working docs (local notes, unpublished specs)
 spec/KayaDB_PRD.md
 spec/KayaDB_Technical_Spec.md
-
-# Geçici Türkçe tam açıklama dosyası (kullanıcı PDF hazırlayacak)
-# PDF hazırlandıktan sonra bu satır kaldırılıp dosya eklenecek
 docs/KayaDB_Explained_TR.md
-/memory
-/mcps
+/memory/
+/mcps/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*~

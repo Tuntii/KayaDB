@@ -5,9 +5,10 @@
 <img src="docs/kaya-logo.png" alt="KayaDB logo" width="320">
 
 [![CI](https://github.com/Tuntii/KayaDB/actions/workflows/ci.yml/badge.svg)](https://github.com/Tuntii/KayaDB/actions/workflows/ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](Cargo.toml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](Cargo.toml)
 [![Status](https://img.shields.io/badge/status-experimental%20%7C%20correctness--first-yellow.svg)](ROADMAP.md)
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://tuntii.github.io/KayaDB/)
 
 **A correctness-first, inspectable, embeddable storage engine built in Rust.**
 
@@ -277,17 +278,13 @@ For the complete picture and deeper explanations, use the **[official GitBook do
 
 ## Contributing
 
-KayaDB is open source and contributor-friendly, but it has a strong correctness culture.
+KayaDB is open source and contributor-friendly, but correctness culture is non-negotiable.
 
-Good contributions usually include:
+- Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes.
+- We follow the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
+- Security vulnerabilities: see [.github/SECURITY.md](.github/SECURITY.md).
 
-- a linked roadmap item or clear design note,
-- a test for the behavior being changed,
-- deterministic crash/recovery coverage when persistence is involved,
-- inspector output updates when persistent formats change,
-- clear error handling for malformed input.
-
-Before opening a PR:
+Run the full checks locally before pushing:
 
 ```bash
 cargo fmt --all -- --check
@@ -295,24 +292,18 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Good first contribution areas:
-
-- CLI and JSON output polish,
-- extra malformed-input tests,
-- benchmark scenarios,
-- documentation improvements,
-- simulator seeds and trace regression cases,
-- inspector UX for WAL/SSTable/manifest output.
-
-Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/development.md`](docs/development.md).
+Good first areas are listed inside `CONTRIBUTING.md`.
 
 ---
 
 ## License
 
-KayaDB is declared as dual-licensed under **MIT OR Apache-2.0** in the workspace Cargo metadata.
+KayaDB is dual-licensed under **MIT OR Apache-2.0**.
 
-Before publishing a formal release, the repository should include the corresponding `LICENSE-MIT` and `LICENSE-APACHE` files at the root so downstream users can audit the license text directly.
+- [LICENSE-MIT](LICENSE-MIT)
+- [LICENSE-APACHE](LICENSE-APACHE)
+
+You may choose either license when using or contributing to the project.
 
 ---
 

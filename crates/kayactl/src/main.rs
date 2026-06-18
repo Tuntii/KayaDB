@@ -930,7 +930,7 @@ fn handle_ebpf(
             println!("Tip: kayactl ebpf list   for full details.");
             Ok(())
         }
-        "help" | _ => {
+        _ => {
             println!("kayactl ebpf — Linux eBPF observability experiments (Track A / M12)");
             println!();
             println!("Subcommands:");

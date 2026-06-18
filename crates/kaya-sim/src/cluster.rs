@@ -351,16 +351,28 @@ impl ClusterSim {
         }
 
         let engine = self.engines.get_mut(&id)?;
-        let data = self
+        let engine_data = self
             .runtime
             .block_on(engine.create_snapshot())
             .map_err(|e| e.to_string())
             .ok()?;
-        if data.is_empty() {
+        if engine_data.is_empty() {
             return None;
         }
 
-        node.compact(last, status.current_term, data);
+        // Embed membership config (consistent with server) so that when a
+        // follower/new node catches up via InstallSnapshot after a membership
+        // change + snapshot, its Raft effective_config is restored correctly.
+        let voters: Vec<NodeId> = node
+            .effective_config()
+            .stable_config()
+            .voters
+            .iter()
+            .copied()
+            .collect();
+        let members = Self::sim_members(&voters);
+        let combined = kaya_raft::build_snapshot_payload(&engine_data, &members);
+        node.compact(last, status.current_term, combined);
         Some((last, status.current_term))
     }
 
@@ -513,7 +525,22 @@ impl ClusterSim {
 
             if let Some((_idx, _term, data)) = node.drain_installed_snapshot() {
                 if let Some(engine) = self.engines.get_mut(&id) {
-                    match self.runtime.block_on(engine.install_snapshot(&data)) {
+                    // Parse combined payload (if present) to restore membership config
+                    // on the RaftNode after snapshot (for dynamic membership + snapshot tests).
+                    let engine_data =
+                        if let Ok((eng, mems)) = kaya_raft::parse_snapshot_payload(&data) {
+                            if !mems.is_empty() {
+                                node.restore_config_from_snapshot(mems);
+                            }
+                            if !eng.is_empty() {
+                                eng
+                            } else {
+                                data
+                            }
+                        } else {
+                            data
+                        };
+                    match self.runtime.block_on(engine.install_snapshot(&engine_data)) {
                         Ok(()) => {
                             let model = self.runtime.block_on(sync_ref_model_from_engine(engine));
                             self.state_machines.insert(id, model);

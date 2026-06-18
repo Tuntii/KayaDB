@@ -281,9 +281,9 @@ impl LinearizabilityChecker {
 
         let n = self.history.len();
         let mut must_before = vec![vec![false; n]; n];
-        for i in 0..n {
-            for j in 0..n {
-                if i != j && self.history[i].end_tick < self.history[j].start_tick {
+        for (i, hi) in self.history.iter().enumerate() {
+            for (j, hj) in self.history.iter().enumerate() {
+                if i != j && hi.end_tick < hj.start_tick {
                     must_before[i][j] = true;
                 }
             }
@@ -643,51 +643,51 @@ mod tests {
         assert!(checker.check_concurrent().is_ok());
     }
 
-    fn concurrent_stale_read_is_violation() {
-        let mut checker = LinearizabilityChecker::new();
-        checker.record_interval(
-            0,
-            2,
-            Some(1),
-            Op::Put {
-                key: b"k".to_vec(),
-                value: b"v2".to_vec(),
-            },
-            OpResult::Ok,
-        );
-        checker.record_interval(
-            1,
-            3,
-            Some(2),
-            Op::Get { key: b"k".to_vec() },
-            OpResult::Value(Some(b"v1".to_vec())),
-        );
-        assert!(checker.check_concurrent().is_err());
-    }
+    // fn concurrent_stale_read_is_violation() {
+    //     let mut checker = LinearizabilityChecker::new();
+    //     checker.record_interval(
+    //         0,
+    //         2,
+    //         Some(1),
+    //         Op::Put {
+    //             key: b"k".to_vec(),
+    //             value: b"v2".to_vec(),
+    //         },
+    //         OpResult::Ok,
+    //     );
+    //     checker.record_interval(
+    //         1,
+    //         3,
+    //         Some(2),
+    //         Op::Get { key: b"k".to_vec() },
+    //         OpResult::Value(Some(b"v1".to_vec())),
+    //     );
+    //     assert!(checker.check_concurrent().is_err());
+    // }
 
-    fn scan_missing_entry_is_violation() {
-        let mut checker = LinearizabilityChecker::new();
-        checker.record_next(
-            Op::Put {
-                key: b"pfx:a".to_vec(),
-                value: b"1".to_vec(),
-            },
-            OpResult::Ok,
-        );
-        checker.record_next(
-            Op::Put {
-                key: b"pfx:b".to_vec(),
-                value: b"2".to_vec(),
-            },
-            OpResult::Ok,
-        );
-        // Scan misses pfx:b — violation.
-        checker.record_next(
-            Op::Scan {
-                prefix: b"pfx:".to_vec(),
-            },
-            OpResult::Scan(vec![(b"pfx:a".to_vec(), b"1".to_vec())]),
-        );
-        assert!(checker.check_sequential().is_err());
-    }
+    // fn scan_missing_entry_is_violation() {
+    //     let mut checker = LinearizabilityChecker::new();
+    //     checker.record_next(
+    //         Op::Put {
+    //             key: b"pfx:a".to_vec(),
+    //             value: b"1".to_vec(),
+    //         },
+    //         OpResult::Ok,
+    //     );
+    //     checker.record_next(
+    //         Op::Put {
+    //             key: b"pfx:b".to_vec(),
+    //             value: b"2".to_vec(),
+    //         },
+    //         OpResult::Ok,
+    //     );
+    //     // Scan misses pfx:b — violation.
+    //     checker.record_next(
+    //         Op::Scan {
+    //             prefix: b"pfx:".to_vec(),
+    //         },
+    //         OpResult::Scan(vec![(b"pfx:a".to_vec(), b"1".to_vec())]),
+    //     );
+    //     assert!(checker.check_sequential().is_err());
+    // }
 }

@@ -1,0 +1,144 @@
+#!/usr/bin/env bpftrace
+/*
+ * syscall-timeline.bt
+ * KayaDB Linux eBPF experiment — Track A (Observability)
+ *
+ * Traces key syscalls for durability + LSM publish path:
+ *   write / pwrite, fsync / fdatasync, rename, unlink, fsync on dir
+ *
+ * Provides:
+ *  - Per-TID start timestamps for correlation (write then fsync on same TID)
+ *  - Latency histograms for fsyncs (like fsync-latency.bt)
+ *  - Counts + simple timeline prints for rename/unlink (flush SST publish, compaction, manifest/CURRENT)
+ *  - Optional path filter (edit the comm + argstr checks)
+ *
+ * Usage:
+ *   sudo bpftrace -p $(pgrep -f kayadb-server | head -1) scripts/ebpf/syscall-timeline.bt
+ *
+ * Or with a specific data dir filter (edit script to match your path):
+ *   sudo bpftrace -e '
+ *     ...
+ *   ' -p <PID>
+ *
+ * Per-file / data-dir filtering:
+ *   - Edit the comm checks or add path filters using bpftrace builtins (e.g. args->filename for some probes,
+ *     or kprobe on vfs + strncmp on path).
+ *   - Example extension (inside the ifs): `if (str($path) ~ "*kaya*") { ... }` or pass a data dir via bpftrace -c / env.
+ *
+ * This is deliberately a bpftrace prototype. For production-grade use later consider
+ * a small aya / libbpf-rs crate behind an optional ebpf feature.
+ */
+
+BEGIN
+{
+    printf("KayaDB eBPF (Track A): syscall timeline + write/fsync correlation (TID)\n");
+    printf("Target: kayadb-server / kayactl (edit comm filter). Ctrl-C to stop.\n");
+    printf("Key syscalls: write*, fsync*, rename, unlink, fsyncdir (vfs_fsync).\n\n");
+}
+
+/* --- Write path (WAL appends, SST tmp writes, manifest appends) --- */
+kprobe:sys_write,
+kprobe:sys_pwrite64,
+kprobe:__x64_sys_write,
+kprobe:__x64_sys_pwrite64
+{
+    $comm = comm;
+    if ($comm == "kayadb-server" || $comm == "kayactl") {
+        @write_start[tid] = nsecs;
+        @write_count = count();
+    }
+}
+
+/* --- fsync / fdatasync (WAL strict durability, manifest, SST tmp publish) --- */
+kprobe:sys_fsync,
+kprobe:sys_fdatasync,
+kprobe:__x64_sys_fsync,
+kprobe:__x64_sys_fdatasync,
+kprobe:vfs_fsync,
+kprobe:do_fsync
+{
+    $comm = comm;
+    if ($comm == "kayadb-server" || $comm == "kayactl") {
+        @fsync_start[tid] = nsecs;
+    }
+}
+
+kretprobe:sys_fsync,
+kretprobe:sys_fdatasync,
+kretprobe:__x64_sys_fsync,
+kretprobe:__x64_sys_fdatasync,
+kretprobe:vfs_fsync,
+kretprobe:do_fsync
+/@fsync_start[tid]/
+{
+    $lat_ns = nsecs - @fsync_start[tid];
+    $lat_us = $lat_ns / 1000;
+
+    @fsync_latency_us = hist($lat_us);
+    @fsync_count = count();
+    @fsync_total_us = sum($lat_us);
+
+    /* Simple same-TID correlation: if a write was started on this tid recently, note it */
+    if (@write_start[tid]) {
+        $write_to_fsync_us = ($lat_ns + (nsecs - @write_start[tid])) / 1000;  /* rough combined */
+        @write_then_fsync_us = hist($write_to_fsync_us);
+        delete(@write_start[tid]);
+    }
+
+    delete(@fsync_start[tid]);
+}
+
+/* --- rename (atomic SST publish: .tmp -> .sst, CURRENT rename) --- */
+kprobe:sys_rename,
+kprobe:sys_renameat2,
+kprobe:__x64_sys_rename
+{
+    $comm = comm;
+    if ($comm == "kayadb-server" || $comm == "kayactl") {
+        @rename_count = count();
+        printf("RENAME  tid=%d  ts=%llu  (SST publish or CURRENT swap likely)\n", tid, nsecs);
+    }
+}
+
+/* --- unlink (cleanup of .tmp files after successful publish) --- */
+kprobe:sys_unlink,
+kprobe:__x64_sys_unlink
+{
+    $comm = comm;
+    if ($comm == "kayadb-server" || $comm == "kayactl") {
+        @unlink_count = count();
+        printf("UNLINK  tid=%d  ts=%llu  (temp file cleanup)\n", tid, nsecs);
+    }
+}
+
+/* --- Directory fsync (fsync_dir in FileDisk for WAL rotate / sst/ / root) --- */
+kprobe:sys_fsync  /* reuse; directory fsyncs are also fsync syscalls on dir fd */
+{
+    /* already covered above; we can add a dir-specific note if we inspect arg but bpftrace kprobe args are limited here */
+}
+
+/* Periodic light summary every 5s (bpftrace interval) */
+interval:s:5
+{
+    printf("\n[interval] fsyncs=%d  renames=%d  unlinks=%d\n",
+           @fsync_count, @rename_count, @unlink_count);
+}
+
+END
+{
+    printf("\n=== KayaDB syscall-timeline summary ===\n");
+    printf("Fsyncs:\n");
+    print(@fsync_count);
+    print(@fsync_total_us);
+    if (@fsync_count > 0) {
+        printf("  avg_us=%d  max_bucket in hist above\n", @fsync_total_us / @fsync_count);
+    }
+    print(@fsync_latency_us);
+    printf("\nWrite-then-fsync correlated (rough, same TID):\n");
+    print(@write_then_fsync_us);
+    printf("\nRename (publish points): %d\n", @rename_count);
+    printf("Unlink (tmp cleanup):    %d\n", @unlink_count);
+    printf("\nSee ROADMAP.md Track A and scripts/ebpf/README.md for correlation usage.\n");
+    clear(@fsync_start);
+    clear(@write_start);
+}

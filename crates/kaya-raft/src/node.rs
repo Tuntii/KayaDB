@@ -439,8 +439,16 @@ impl RaftNode {
     }
 
     fn send_append_to_all(&mut self, out: &mut Vec<Envelope>) {
-        let peers: Vec<NodeId> = self.config.peers.clone();
-        for peer in peers {
+        let mut targets: Vec<NodeId> = self.config.peers.clone();
+        // Also include any peers we have replication state for (helps newly
+        // added members that were seeded in propose_membership_change before
+        // the config entry is applied and peers list is synced).
+        for &id in self.next_index.keys() {
+            if id != self.config.id && !targets.contains(&id) {
+                targets.push(id);
+            }
+        }
+        for peer in targets {
             self.send_append_to(peer, out);
         }
     }
@@ -702,6 +710,24 @@ impl RaftNode {
         self.log.last_included_index()
     }
 
+    /// Restore effective configuration from a snapshot (used when installing a
+    /// Raft snapshot that jumps over previous config change log entries).
+    /// This ensures new/lagging nodes get the membership that was in effect
+    /// at the snapshot point.
+    pub fn restore_config_from_snapshot(&mut self, members: Vec<ClusterMember>) {
+        let voter_set: BTreeSet<NodeId> = members.iter().map(|m| m.id).collect();
+        self.effective_config =
+            EffectiveConfig::Stable(ClusterConfiguration::from_voters(voter_set));
+        self.sync_peers_from_effective_config();
+        self.pending_membership = None;
+        // Re-seed peer tracking for current peers (safe on snapshot install)
+        let last = self.log.last_index();
+        for &peer in &self.config.peers {
+            self.next_index.entry(peer).or_insert(LogIndex(last.0 + 1));
+            self.match_index.entry(peer).or_insert(LogIndex(0));
+        }
+    }
+
     /// Propose a joint-consensus membership change. Only valid on leader.
     ///
     /// Appends a joint-configuration log entry; once committed and applied the
@@ -734,7 +760,7 @@ impl RaftNode {
         self.pending_membership = Some(members.clone());
         let cmd = RaftCommand::ConfigChange {
             phase: ConfigChangePhase::Joint,
-            members,
+            members: members.clone(),
         };
         let idx = self.log.append(LogEntry {
             term: self.current_term,
@@ -743,13 +769,25 @@ impl RaftNode {
         self.match_index.insert(self.config.id, idx);
         self.next_index.insert(self.config.id, LogIndex(idx.0 + 1));
 
+        // Seed replication state for any new members so the leader will start
+        // sending AppendEntries (including the joint entry) to them promptly.
+        // This helps the incoming configuration participate in replication early.
+        let last_log = self.log.last_index();
+        for m in &members {
+            if m.id != self.config.id {
+                self.next_index
+                    .entry(m.id)
+                    .or_insert(LogIndex(last_log.0 + 1));
+                self.match_index.entry(m.id).or_insert(LogIndex(0));
+            }
+        }
+
         // Ensure commit/apply for single-node membership changes.
         self.try_advance_commit();
         let _ = self.try_advance_apply();
         Some(idx)
     }
 
-    // Dynamic membership stubs (prototype scaffolding)
     fn on_config_change_request(
         &mut self,
         from: NodeId,
@@ -770,9 +808,11 @@ impl RaftNode {
         if req.term > self.current_term {
             self.step_down(req.term);
         }
-        if self.role == Role::Leader {
-            self.config.peers = req.new_peers.clone();
-        }
+        // Note: Actual membership changes are driven by committed+applied
+        // RaftCommand::ConfigChange log entries (joint consensus).
+        // This direct message path is minimal (term handling + ack).
+        // We do not mutate peers here; sync_peers_from_effective_config is used
+        // after log apply.
         out.push(Envelope::new(
             self.config.id,
             from,
@@ -789,7 +829,9 @@ impl RaftNode {
         _resp: crate::ConfigChangeResponse,
         _out: &mut Vec<Envelope>,
     ) {
-        // TODO: track for quorum on config change
+        // Config change commitment and quorum are handled via the normal
+        // log replication path + effective_config.commit_quorum_met.
+        // This handler is kept for protocol completeness (no-op for now).
     }
 
     /// Apply all committed but not yet applied log entries.
@@ -1090,15 +1132,22 @@ mod tests {
         assert!(node.commit_index >= idx);
         let applied = node.drain_applied();
         assert!(
-            applied.iter().any(|(i, _, cmd)| *i == idx && cmd == b"hello"),
+            applied
+                .iter()
+                .any(|(i, _, cmd)| *i == idx && cmd == b"hello"),
             "single-node propose must produce a drained applied entry"
         );
 
         // ReadIndex should also work immediately on single node
         let read_id = 42u64;
-        let read_idx = node.propose_read(read_id).expect("read index on single-node leader");
+        let read_idx = node
+            .propose_read(read_id)
+            .expect("read index on single-node leader");
         assert!(read_idx <= node.commit_index);
         let ready = node.drain_ready_reads();
-        assert!(ready.contains(&read_id), "single-node ReadIndex must become ready immediately");
+        assert!(
+            ready.contains(&read_id),
+            "single-node ReadIndex must become ready immediately"
+        );
     }
 }

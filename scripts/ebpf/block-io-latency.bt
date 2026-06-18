@@ -1,0 +1,68 @@
+#!/usr/bin/env bpftrace
+/*
+ * block-io-latency.bt
+ * KayaDB Linux eBPF experiment (M12)
+ *
+ * Measures block device I/O latency (issue -> complete) via tracepoints.
+ * Separate histograms for reads and writes.
+ *
+ * Requires recent kernel with block tracepoints (almost all do).
+ *
+ * Usage:
+ *   sudo bpftrace -p <KAYADB_PID> scripts/ebpf/block-io-latency.bt
+ */
+
+BEGIN
+{
+    printf("KayaDB eBPF: tracing block I/O latency (us) for process ... Ctrl-C to stop\n");
+    printf("Filtering to PID: %d (plus any children/threads)\n", $1 ? $1 : pid);
+}
+
+tracepoint:block:block_rq_issue
+{
+    // Only care about our process' I/O if we can attribute it.
+    // Block layer doesn't carry pid directly in all kernels; we trace all and rely on -p.
+    // For stronger filtering use bpftrace -p which limits to that process subtree.
+    @start[args->sector] = nsecs;
+    @issue_count = count();
+}
+
+tracepoint:block:block_rq_complete
+/@start[args->sector]/
+{
+    $lat_ns = nsecs - @start[args->sector];
+    $lat_us = $lat_ns / 1000;
+
+    if (args->rwbs ~ "*W*") {
+        @block_write_us = hist($lat_us);
+        @write_count = count();
+        @write_total_us = sum($lat_us);
+    } else {
+        @block_read_us = hist($lat_us);
+        @read_count = count();
+        @read_total_us = sum($lat_us);
+    }
+
+    delete(@start[args->sector]);
+}
+
+END
+{
+    printf("\n=== KayaDB block I/O latency (us) ===\n");
+    printf("Writes:\n");
+    print(@block_write_us);
+    if (@write_count > 0) {
+        printf("  count=%d  total_us=%d  avg=%d\n",
+               @write_count, @write_total_us, @write_total_us / @write_count);
+    }
+
+    printf("\nReads:\n");
+    print(@block_read_us);
+    if (@read_count > 0) {
+        printf("  count=%d  total_us=%d  avg=%d\n",
+               @read_count, @read_total_us, @read_total_us / @read_count);
+    }
+
+    printf("\n(These include elevator, driver, device time behind every fsync.)\n");
+    clear(@start);
+}

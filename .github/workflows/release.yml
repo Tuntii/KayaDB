@@ -63,6 +63,9 @@ jobs:
             cp target/${{ matrix.target }}/release/kayadb-server release-pkg/${{ matrix.bin_name }}
             cp target/${{ matrix.target }}/release/kayactl release-pkg/${{ matrix.ctl_name }}
             cp README.md release-pkg/
+            cp LICENSE* release-pkg/ || true
+            cp CHANGELOG.md release-pkg/ || true
+            cp CODE_OF_CONDUCT.md release-pkg/ || true
             cp docs/security.md release-pkg/ || true
             strip release-pkg/${{ matrix.bin_name }}
             strip release-pkg/${{ matrix.ctl_name }}
@@ -76,6 +79,9 @@ jobs:
           Copy-Item target/${{ matrix.target }}/release/kayadb-server.exe release-pkg/${{ matrix.bin_name }}
           Copy-Item target/${{ matrix.target }}/release/kayactl.exe release-pkg/${{ matrix.ctl_name }}
           Copy-Item README.md release-pkg/
+          Copy-Item LICENSE* release-pkg/ -ErrorAction SilentlyContinue
+          Copy-Item CHANGELOG.md release-pkg/ -ErrorAction SilentlyContinue
+          Copy-Item CODE_OF_CONDUCT.md release-pkg/ -ErrorAction SilentlyContinue
           if (Test-Path docs/security.md) { Copy-Item docs/security.md release-pkg/ }
           Compress-Archive -Path release-pkg/* -DestinationPath kayadb-${{ github.ref_name }}-${{ matrix.target }}.zip
 

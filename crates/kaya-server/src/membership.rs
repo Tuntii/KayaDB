@@ -208,6 +208,12 @@ pub fn decode_config_change(command: &[u8]) -> Option<(ConfigChangePhase, Vec<Cl
     }
 }
 
+// Re-export the payload helpers from kaya-raft for server use (avoids duplication).
+pub use kaya_raft::{
+    build_snapshot_payload as build_raft_snapshot_payload,
+    parse_snapshot_payload as parse_raft_snapshot_payload,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

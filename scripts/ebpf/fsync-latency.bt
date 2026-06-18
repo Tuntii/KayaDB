@@ -1,0 +1,68 @@
+#!/usr/bin/env bpftrace
+/*
+ * fsync-latency.bt
+ * KayaDB Linux eBPF experiment (M12)
+ *
+ * Traces fsync/fdatasync latency for the target process (use -p PID).
+ * Latency histogram in microseconds.
+ *
+ * Usage:
+ *   sudo bpftrace -p $(pgrep -f kayadb-server | head -1) scripts/ebpf/fsync-latency.bt
+ *
+ * Or attach to any PID:
+ *   sudo bpftrace -p <PID> scripts/ebpf/fsync-latency.bt
+ */
+
+BEGIN
+{
+    printf("KayaDB eBPF: tracing fsync/fdatasync latency (us) ... Ctrl-C to stop\n");
+    printf("Target comms: kayadb-server, kayactl (edit script to customize)\n");
+}
+
+kprobe:sys_fsync,
+kprobe:sys_fdatasync,
+kprobe:__x64_sys_fsync,
+kprobe:__x64_sys_fdatasync
+{
+    $pid = pid;
+    $comm = comm;
+    if ($comm == "kayadb-server" || $comm == "kayactl" || $comm == "kaya") {
+        @start[tid] = nsecs;
+    }
+}
+
+/* Some kernels expose do_fsync / vfs_fsync */
+kprobe:vfs_fsync,
+kprobe:do_fsync
+{
+    $pid = pid;
+    $comm = comm;
+    if ($comm == "kayadb-server" || $comm == "kayactl") {
+        @start[tid] = nsecs;
+    }
+}
+
+kretprobe:sys_fsync,
+kretprobe:sys_fdatasync,
+kretprobe:__x64_sys_fsync,
+kretprobe:__x64_sys_fdatasync,
+kretprobe:vfs_fsync,
+kretprobe:do_fsync
+/@start[tid]/
+{
+    $latency_ns = nsecs - @start[tid];
+    $latency_us = $latency_ns / 1000;
+    @fsync_latency_us = hist($latency_us);
+    @fsync_count = count();
+    @fsync_total_us = sum($latency_us);
+    delete(@start[tid]);
+}
+
+END
+{
+    printf("\n--- KayaDB fsync summary ---\n");
+    print(@fsync_count);
+    print(@fsync_total_us);
+    printf("Average (us): %d\n", @fsync_total_us / @fsync_count);
+    clear(@start);
+}

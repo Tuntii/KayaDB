@@ -15,8 +15,9 @@
 //! `term(u64) | cmd_len(u32) | cmd_bytes`.
 
 use kaya_raft::{
-    AppendRequest, AppendResponse, Envelope, InstallSnapshotRequest, InstallSnapshotResponse,
-    LogEntry, LogIndex, Message, NodeId, Term, VoteRequest, VoteResponse,
+    AppendRequest, AppendResponse, ConfigChangeRequest, ConfigChangeResponse, Envelope,
+    InstallSnapshotRequest, InstallSnapshotResponse, LogEntry, LogIndex, Message, NodeId, Term,
+    VoteRequest, VoteResponse,
 };
 
 use crate::DEFAULT_MAX_FRAME_LEN;
@@ -27,6 +28,8 @@ const MSG_APPEND_REQUEST: u8 = 3;
 const MSG_APPEND_RESPONSE: u8 = 4;
 const MSG_INSTALL_SNAPSHOT_REQUEST: u8 = 5;
 const MSG_INSTALL_SNAPSHOT_RESPONSE: u8 = 6;
+const MSG_CONFIG_CHANGE_REQUEST: u8 = 7;
+const MSG_CONFIG_CHANGE_RESPONSE: u8 = 8;
 
 /// Max snapshot payload bytes on the wire (frame budget minus headers).
 pub const MAX_SNAPSHOT_DATA_LEN: u32 = DEFAULT_MAX_FRAME_LEN.saturating_sub(64);
@@ -146,8 +149,24 @@ pub fn encode_envelope(env: &Envelope) -> Vec<u8> {
             push_u64(&mut body, m.term.0);
             push_u8(&mut body, m.success as u8);
         }
-        Message::ConfigChangeRequest(_) | Message::ConfigChangeResponse(_) => {
-            panic!("ConfigChange messages not yet supported on kaya-net wire codec");
+        Message::ConfigChangeRequest(m) => {
+            push_u8(&mut body, MSG_CONFIG_CHANGE_REQUEST);
+            push_u64(&mut body, m.term.0);
+            // old_peers: len + ids
+            push_u32(&mut body, m.old_peers.len() as u32);
+            for p in &m.old_peers {
+                push_u64(&mut body, p.0);
+            }
+            // new_peers
+            push_u32(&mut body, m.new_peers.len() as u32);
+            for p in &m.new_peers {
+                push_u64(&mut body, p.0);
+            }
+        }
+        Message::ConfigChangeResponse(m) => {
+            push_u8(&mut body, MSG_CONFIG_CHANGE_RESPONSE);
+            push_u64(&mut body, m.term.0);
+            push_u8(&mut body, m.success as u8);
         }
     }
 
@@ -241,6 +260,30 @@ pub fn decode_envelope(data: &[u8]) -> Result<Envelope, String> {
                 success: take_u8(&mut cur)? != 0,
             })
         }
+
+        MSG_CONFIG_CHANGE_REQUEST => {
+            let term = Term(take_u64(&mut cur)?);
+            let old_len = take_u32(&mut cur)? as usize;
+            let mut old_peers = Vec::with_capacity(old_len);
+            for _ in 0..old_len {
+                old_peers.push(NodeId(take_u64(&mut cur)?));
+            }
+            let new_len = take_u32(&mut cur)? as usize;
+            let mut new_peers = Vec::with_capacity(new_len);
+            for _ in 0..new_len {
+                new_peers.push(NodeId(take_u64(&mut cur)?));
+            }
+            Message::ConfigChangeRequest(ConfigChangeRequest {
+                term,
+                old_peers,
+                new_peers,
+            })
+        }
+
+        MSG_CONFIG_CHANGE_RESPONSE => Message::ConfigChangeResponse(ConfigChangeResponse {
+            term: Term(take_u64(&mut cur)?),
+            success: take_u8(&mut cur)? != 0,
+        }),
 
         t => return Err(format!("unknown Raft message type: {t}")),
     };
@@ -527,6 +570,51 @@ mod tests {
         let encoded = encode_envelope(&env);
         let decoded = decode_envelope(&encoded[4..]).unwrap();
         if let Message::InstallSnapshotResponse(resp) = decoded.message {
+            assert!(resp.success);
+        } else {
+            panic!("wrong message type");
+        }
+    }
+
+    #[test]
+    fn round_trip_config_change_request() {
+        use kaya_raft::ConfigChangeRequest;
+
+        let env = Envelope {
+            from: NodeId(1),
+            to: NodeId(2),
+            message: Message::ConfigChangeRequest(ConfigChangeRequest {
+                term: Term(7),
+                old_peers: vec![NodeId(1), NodeId(2)],
+                new_peers: vec![NodeId(1), NodeId(2), NodeId(3)],
+            }),
+        };
+        let encoded = encode_envelope(&env);
+        let decoded = decode_envelope(&encoded[4..]).unwrap();
+        if let Message::ConfigChangeRequest(req) = decoded.message {
+            assert_eq!(req.term, Term(7));
+            assert_eq!(req.old_peers.len(), 2);
+            assert_eq!(req.new_peers.len(), 3);
+        } else {
+            panic!("wrong message type");
+        }
+    }
+
+    #[test]
+    fn round_trip_config_change_response() {
+        use kaya_raft::ConfigChangeResponse;
+
+        let env = Envelope {
+            from: NodeId(2),
+            to: NodeId(1),
+            message: Message::ConfigChangeResponse(ConfigChangeResponse {
+                term: Term(7),
+                success: true,
+            }),
+        };
+        let encoded = encode_envelope(&env);
+        let decoded = decode_envelope(&encoded[4..]).unwrap();
+        if let Message::ConfigChangeResponse(resp) = decoded.message {
             assert!(resp.success);
         } else {
             panic!("wrong message type");
