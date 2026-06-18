@@ -162,6 +162,54 @@ pub fn memlog_to_frames(log: &MemLog) -> Vec<LogFrame> {
     frames
 }
 
+/// Default empty hard state for a fresh node.
+pub fn default_hard_state() -> HardState {
+    HardState {
+        current_term: Term(0),
+        voted_for: None,
+        last_included_index: LogIndex(0),
+        last_included_term: Term(0),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedRaftState {
+    pub hard_state: HardState,
+    pub log: MemLog,
+}
+
+#[derive(Debug)]
+pub enum RaftStorageError {
+    Io(std::io::Error),
+    Corrupt(String),
+}
+
+impl std::fmt::Display for RaftStorageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "raft storage io error: {e}"),
+            Self::Corrupt(msg) => write!(f, "raft storage corrupt: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for RaftStorageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Corrupt(_) => None,
+        }
+    }
+}
+
+/// Persistent Raft state: hard-state (term/vote/snapshot boundary) and framed log.
+pub trait RaftStorage: Send {
+    fn load(&self) -> Result<PersistedRaftState, RaftStorageError>;
+    fn save_hard_state(&mut self, hs: &HardState) -> Result<(), RaftStorageError>;
+    fn save_log(&mut self, log: &MemLog, hs: &HardState) -> Result<(), RaftStorageError>;
+    fn sync(&mut self) -> Result<(), RaftStorageError>;
+}
+
 /// Rebuild an in-memory log from hard-state snapshot metadata and wire frames.
 pub fn frames_to_memlog(hs: &HardState, frames: Vec<LogFrame>) -> MemLog {
     let mut log = MemLog::new();

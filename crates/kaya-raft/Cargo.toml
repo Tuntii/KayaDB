@@ -12,8 +12,13 @@ rust-version.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+disk-storage = ["dep:kaya-io"]
+
 [dependencies]
 kaya-core.workspace = true
+kaya-io = { workspace = true, optional = true }
 
 [lib]
 path = "src/lib.rs"
