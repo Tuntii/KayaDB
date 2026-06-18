@@ -3,6 +3,7 @@ mod command;
 mod log;
 mod message;
 mod node;
+mod storage;
 mod types;
 
 pub use cluster_config::{ClusterConfiguration, EffectiveConfig};
@@ -13,6 +14,7 @@ pub use message::{
     InstallSnapshotRequest, InstallSnapshotResponse, Message, VoteRequest, VoteResponse,
 };
 pub use node::{RaftConfig, RaftNode, RaftStatus, Role};
+pub use storage::{decode_hard_state, encode_hard_state, HardState, RAFT_HARD_STATE_LEN};
 pub use types::{LogIndex, NodeId, RaftApplyCommand, Term};
 
 /// Build a combined snapshot payload (engine data + membership members).
