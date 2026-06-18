@@ -64,6 +64,86 @@ pub fn decode_hard_state(bytes: &[u8]) -> Result<HardState, String> {
     })
 }
 
+// Wire layout per frame (32-byte header + command payload, little-endian):
+//   [0..4]   magic "RLGF"
+//   [4..6]   version
+//   [6..8]   reserved (zero)
+//   [8..16]  logical index
+//   [16..24] term
+//   [24..28] cmd_len
+//   [28..32] frame_crc = crc32c(index || term || cmd_len || command)
+pub const RAFT_LOG_FRAME_MAGIC: u32 = 0x4647_4C52; // "RLGF" LE
+pub const RAFT_LOG_FRAME_VERSION: u16 = 1;
+pub const RAFT_LOG_FRAME_HEADER_LEN: usize = 32;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogFrame {
+    pub index: LogIndex,
+    pub term: Term,
+    pub command: Vec<u8>,
+}
+
+pub fn encode_log_file(frames: &[LogFrame]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for f in frames {
+        let mut header = [0u8; RAFT_LOG_FRAME_HEADER_LEN];
+        header[0..4].copy_from_slice(&RAFT_LOG_FRAME_MAGIC.to_le_bytes());
+        header[4..6].copy_from_slice(&RAFT_LOG_FRAME_VERSION.to_le_bytes());
+        header[8..16].copy_from_slice(&f.index.0.to_le_bytes());
+        header[16..24].copy_from_slice(&f.term.0.to_le_bytes());
+        header[24..28].copy_from_slice(&(f.command.len() as u32).to_le_bytes());
+        let mut crc_input = Vec::new();
+        crc_input.extend_from_slice(&f.index.0.to_le_bytes());
+        crc_input.extend_from_slice(&f.term.0.to_le_bytes());
+        crc_input.extend_from_slice(&(f.command.len() as u32).to_le_bytes());
+        crc_input.extend_from_slice(&f.command);
+        let frame_crc = crc32c(&crc_input);
+        header[28..32].copy_from_slice(&frame_crc.to_le_bytes());
+        out.extend_from_slice(&header);
+        out.extend_from_slice(&f.command);
+    }
+    out
+}
+
+pub fn decode_log_file(bytes: &[u8]) -> Result<Vec<LogFrame>, String> {
+    let mut frames = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes.len() - offset < RAFT_LOG_FRAME_HEADER_LEN {
+            return Err("truncated log frame header".into());
+        }
+        let hdr = &bytes[offset..offset + RAFT_LOG_FRAME_HEADER_LEN];
+        let magic = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
+        if magic != RAFT_LOG_FRAME_MAGIC {
+            return Err(format!("bad log frame magic at {offset}"));
+        }
+        let index = LogIndex(u64::from_le_bytes(hdr[8..16].try_into().unwrap()));
+        let term = Term(u64::from_le_bytes(hdr[16..24].try_into().unwrap()));
+        let payload_len = u32::from_le_bytes(hdr[24..28].try_into().unwrap()) as usize;
+        let frame_crc = u32::from_le_bytes(hdr[28..32].try_into().unwrap());
+        offset += RAFT_LOG_FRAME_HEADER_LEN;
+        if bytes.len() - offset < payload_len {
+            return Err("truncated log payload".into());
+        }
+        let command = bytes[offset..offset + payload_len].to_vec();
+        offset += payload_len;
+        let mut crc_input = Vec::new();
+        crc_input.extend_from_slice(&index.0.to_le_bytes());
+        crc_input.extend_from_slice(&term.0.to_le_bytes());
+        crc_input.extend_from_slice(&(payload_len as u32).to_le_bytes());
+        crc_input.extend_from_slice(&command);
+        if crc32c(&crc_input) != frame_crc {
+            return Err(format!("log frame crc mismatch at index {}", index.0));
+        }
+        frames.push(LogFrame {
+            index,
+            term,
+            command,
+        });
+    }
+    Ok(frames)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +222,23 @@ mod tests {
         enc[10] ^= 0xFF;
         let err = decode_hard_state(&enc).unwrap_err();
         assert!(err.contains("crc mismatch"));
+    }
+
+    #[test]
+    fn log_file_roundtrip() {
+        let frames = vec![
+            LogFrame {
+                index: LogIndex(1),
+                term: Term(1),
+                command: b"noop".to_vec(),
+            },
+            LogFrame {
+                index: LogIndex(2),
+                term: Term(1),
+                command: b"put:k".to_vec(),
+            },
+        ];
+        let bytes = encode_log_file(&frames);
+        assert_eq!(decode_log_file(&bytes).unwrap(), frames);
     }
 }
