@@ -5,6 +5,7 @@ use crate::{
     command::{ClusterMember, ConfigChangePhase, RaftCommand},
     log::{LogEntry, MemLog},
     message::{AppendRequest, AppendResponse, Envelope, Message, VoteRequest, VoteResponse},
+    storage::{HardState, PersistedRaftState},
     types::{LogIndex, NodeId, Term},
 };
 
@@ -127,6 +128,64 @@ impl RaftNode {
             effective_config,
             pending_membership: None,
         }
+    }
+
+    /// Restore a node from persisted Raft state after restart.
+    ///
+    /// Persistent fields (term, vote, log) are copied from `state`; all volatile
+    /// election/leader state is reset. `commit_index` and `last_applied` start at
+    /// zero until [`RaftNode::set_recovered_apply_floor`] is called.
+    pub fn recover(config: RaftConfig, state: PersistedRaftState) -> Self {
+        let mut voters: BTreeSet<NodeId> = config.peers.iter().copied().collect();
+        voters.insert(config.id);
+        let effective_config = EffectiveConfig::stable(voters);
+        Self {
+            config,
+            current_term: state.hard_state.current_term,
+            voted_for: state.hard_state.voted_for,
+            log: state.log,
+            commit_index: LogIndex(0),
+            last_applied: LogIndex(0),
+            role: Role::Follower,
+            leader_id: None,
+            election_ticks: 0,
+            votes_received: HashSet::new(),
+            next_index: HashMap::new(),
+            match_index: HashMap::new(),
+            heartbeat_ticks: 0,
+            applied_entries: Vec::new(),
+            pending_reads: Vec::new(),
+            current_ack_seq: 0,
+            last_sent_ack_seq: HashMap::new(),
+            ready_reads: Vec::new(),
+            pending_snapshot: None,
+            effective_config,
+            pending_membership: None,
+        }
+    }
+
+    /// Snapshot of durable Raft state for persistence.
+    pub fn persist_view(&self) -> PersistedRaftState {
+        PersistedRaftState {
+            hard_state: HardState {
+                current_term: self.current_term,
+                voted_for: self.voted_for,
+                last_included_index: self.log.last_included_index(),
+                last_included_term: self.log.last_included_term(),
+            },
+            log: self.log.clone(),
+        }
+    }
+
+    /// Set apply/commit floor after loading persisted apply-index metadata on startup.
+    pub fn set_recovered_apply_floor(&mut self, last_applied: LogIndex) {
+        self.last_applied = last_applied;
+        self.commit_index = last_applied;
+    }
+
+    /// Highest logical index in the local log (including snapshot boundary).
+    pub fn log_last_index(&self) -> LogIndex {
+        self.log.last_index()
     }
 
     /// This node's identity.
@@ -954,6 +1013,7 @@ impl RaftNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{HardState, PersistedRaftState};
 
     fn make_node(id: u64, peers: Vec<u64>) -> RaftNode {
         RaftNode::new(RaftConfig {
@@ -1104,6 +1164,34 @@ mod tests {
 
         assert_eq!(node.role, Role::Follower);
         assert_eq!(node.pending_reads.len(), 0);
+    }
+
+    #[test]
+    fn recover_restores_term_and_log() {
+        let cfg = RaftConfig {
+            id: NodeId(1),
+            peers: vec![NodeId(2), NodeId(3)],
+            election_timeout_ticks: 10,
+            heartbeat_interval_ticks: 3,
+        };
+        let mut log = MemLog::new();
+        log.append(LogEntry {
+            term: Term(2),
+            command: b"x".to_vec(),
+        });
+        let state = PersistedRaftState {
+            hard_state: HardState {
+                current_term: Term(2),
+                voted_for: Some(NodeId(2)),
+                last_included_index: LogIndex(0),
+                last_included_term: Term(0),
+            },
+            log,
+        };
+        let node = RaftNode::recover(cfg, state);
+        assert_eq!(node.status().current_term, Term(2));
+        assert_eq!(node.status().role, Role::Follower);
+        assert_eq!(node.log_last_index(), LogIndex(1));
     }
 
     #[test]
