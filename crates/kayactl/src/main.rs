@@ -1147,8 +1147,7 @@ fn print_stats_human(stats: &EngineStats, recovery: &RecoveryReport) {
     println!("wal_fsync_count:   {}", stats.wal_fsync_count);
     println!("wal_fsync_total_us:{}", stats.wal_fsync_total_us);
     println!("wal_fsync_max_us:  {}", stats.wal_fsync_max_us);
-    if stats.wal_fsync_count > 0 {
-        let avg = stats.wal_fsync_total_us / stats.wal_fsync_count;
+    if let Some(avg) = stats.wal_fsync_total_us.checked_div(stats.wal_fsync_count) {
         println!("wal_fsync_avg_us:  {} (total/count)", avg);
     }
     println!("memtable_entries:  {}", stats.memtable_entries);
@@ -1158,15 +1157,16 @@ fn print_stats_human(stats: &EngineStats, recovery: &RecoveryReport) {
     println!("flush_count:       {}", stats.flush_count);
     println!("flush_total_us:    {}", stats.flush_total_us);
     println!("flush_max_us:      {}", stats.flush_max_us);
-    if stats.flush_count > 0 {
-        let avg = stats.flush_total_us / stats.flush_count;
+    if let Some(avg) = stats.flush_total_us.checked_div(stats.flush_count) {
         println!("flush_avg_us:      {} (total/count)", avg);
     }
     println!("compaction_count:  {}", stats.compaction_count);
     println!("compaction_total_us: {}", stats.compaction_total_us);
     println!("compaction_max_us:   {}", stats.compaction_max_us);
-    if stats.compaction_count > 0 {
-        let avg = stats.compaction_total_us / stats.compaction_count;
+    if let Some(avg) = stats
+        .compaction_total_us
+        .checked_div(stats.compaction_count)
+    {
         println!("compaction_avg_us: {} (total/count)", avg);
     }
     println!();
@@ -1245,30 +1245,27 @@ fn print_latency_human(stats: &EngineStats) {
     println!("  count:   {}", stats.wal_fsync_count);
     println!("  total_us:{}", stats.wal_fsync_total_us);
     println!("  max_us:  {}", stats.wal_fsync_max_us);
-    if stats.wal_fsync_count > 0 {
-        println!(
-            "  avg_us:  {}",
-            stats.wal_fsync_total_us / stats.wal_fsync_count
-        );
+    if let Some(avg) = stats.wal_fsync_total_us.checked_div(stats.wal_fsync_count) {
+        println!("  avg_us:  {avg}");
     }
     println!();
     println!("Flush (memtable -> SSTable publish, manifest, dir fsyncs):");
     println!("  count:   {}", stats.flush_count);
     println!("  total_us:{}", stats.flush_total_us);
     println!("  max_us:  {}", stats.flush_max_us);
-    if stats.flush_count > 0 {
-        println!("  avg_us:  {}", stats.flush_total_us / stats.flush_count);
+    if let Some(avg) = stats.flush_total_us.checked_div(stats.flush_count) {
+        println!("  avg_us:  {avg}");
     }
     println!();
     println!("Compaction (L0 merge + publish):");
     println!("  count:   {}", stats.compaction_count);
     println!("  total_us:{}", stats.compaction_total_us);
     println!("  max_us:  {}", stats.compaction_max_us);
-    if stats.compaction_count > 0 {
-        println!(
-            "  avg_us:  {}",
-            stats.compaction_total_us / stats.compaction_count
-        );
+    if let Some(avg) = stats
+        .compaction_total_us
+        .checked_div(stats.compaction_count)
+    {
+        println!("  avg_us:  {avg}");
     }
     println!();
     println!("Cross-reference with:");
