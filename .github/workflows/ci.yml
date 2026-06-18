@@ -31,3 +31,15 @@ jobs:
       - name: Smoke benchmark (bounded)
         run: cargo bench -p kaya-bench --bench smoke -- --noplot
 
+  # CHAOS_CI_ENABLED defaults false until repo variable is set in GitHub settings.
+  chaos-smoke:
+    runs-on: ubuntu-latest
+    needs: rust
+    if: vars.CHAOS_CI_ENABLED == 'true'
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p kaya-jepsen-test --test smoke -- --nocapture
+

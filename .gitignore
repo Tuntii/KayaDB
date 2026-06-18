@@ -24,3 +24,4 @@ docs/KayaDB_Explained_TR.md
 Thumbs.db
 *.swp
 *~
+/terminals

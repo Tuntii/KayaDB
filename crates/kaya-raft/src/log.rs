@@ -15,6 +15,7 @@ pub struct LogEntry {
 ///   snapshotted and removed from `entries`.
 /// - The first real entry in `entries` (if any) is at logical index `last_included_index + 1`.
 /// - `snapshot` holds opaque state-machine snapshot bytes (optional, for transfer).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemLog {
     entries: Vec<LogEntry>,
     last_included_index: LogIndex,

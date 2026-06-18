@@ -811,4 +811,100 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir3);
         let _ = std::fs::remove_dir_all(&data_dir4);
     }
+
+    #[tokio::test]
+    async fn test_node_restart_preserves_raft_term() {
+        use kaya_raft::{decode_hard_state, Term, RAFT_HARD_STATE_LEN};
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_restart_term_{test_id}"));
+
+        let r1 = get_free_port().await;
+        let c1 = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{r1}").parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{c1}").parse().unwrap();
+
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![]);
+
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config.clone()).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "single-node leader not ready");
+
+        let put_payload = encode_put_payload(b"restart-key", b"restart-val");
+        let (status, _) = roundtrip(client_addr, 1, &put_payload).await.unwrap();
+        assert_eq!(status, 0);
+
+        for _ in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let hs_path = data_dir.join("raft-hard-state");
+            if hs_path.exists() {
+                let bytes = std::fs::read(&hs_path).unwrap();
+                if bytes.len() == RAFT_HARD_STATE_LEN {
+                    let hs = decode_hard_state(&bytes).unwrap();
+                    if hs.current_term.0 > 0 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        handle.abort();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let hs_path = data_dir.join("raft-hard-state");
+        assert!(hs_path.exists(), "raft-hard-state missing after run");
+        let bytes = std::fs::read(&hs_path).unwrap();
+        let persisted = decode_hard_state(&bytes).unwrap();
+        assert!(
+            persisted.current_term.0 > 0,
+            "expected persisted term > 0"
+        );
+
+        let restart_config =
+            ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![]);
+        let restart_handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(restart_config).run().await;
+        });
+
+        let mut restarted = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                restarted = true;
+                break;
+            }
+        }
+        assert!(restarted, "node did not become leader after restart");
+
+        let get_payload = encode_key_payload(b"restart-key");
+        let (status, body) = roundtrip(client_addr, 2, &get_payload).await.unwrap();
+        assert_eq!(status, 0);
+        assert_eq!(decode_value_payload(&body).unwrap(), b"restart-val");
+
+        let after_bytes = std::fs::read(&hs_path).unwrap();
+        let after = decode_hard_state(&after_bytes).unwrap();
+        assert!(
+            after.current_term >= persisted.current_term,
+            "term regressed after restart: {} < {}",
+            after.current_term.0,
+            persisted.current_term.0
+        );
+        assert!(after.current_term >= Term(1));
+
+        restart_handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
 }
