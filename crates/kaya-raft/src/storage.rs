@@ -1,3 +1,4 @@
+use crate::log::{LogEntry, MemLog};
 use crate::types::{LogIndex, NodeId, Term};
 use kaya_core::crc32c;
 
@@ -144,6 +145,43 @@ pub fn decode_log_file(bytes: &[u8]) -> Result<Vec<LogFrame>, String> {
     Ok(frames)
 }
 
+/// Serialize in-memory log entries after the snapshot boundary into wire frames.
+pub fn memlog_to_frames(log: &MemLog) -> Vec<LogFrame> {
+    let start = log.last_included_index().0 + 1;
+    let end = log.last_index().0;
+    let mut frames = Vec::new();
+    for idx in start..=end {
+        let index = LogIndex(idx);
+        let entry = log.get(index).expect("memlog entry missing for in-range index");
+        frames.push(LogFrame {
+            index,
+            term: entry.term,
+            command: entry.command.clone(),
+        });
+    }
+    frames
+}
+
+/// Rebuild an in-memory log from hard-state snapshot metadata and wire frames.
+pub fn frames_to_memlog(hs: &HardState, frames: Vec<LogFrame>) -> MemLog {
+    let mut log = MemLog::new();
+    if hs.last_included_index.0 > 0 {
+        log.install_snapshot(
+            hs.last_included_index,
+            hs.last_included_term,
+            Vec::new(),
+        );
+    }
+    for frame in frames {
+        debug_assert_eq!(frame.index.0, log.last_index().0 + 1);
+        log.append(LogEntry {
+            term: frame.term,
+            command: frame.command,
+        });
+    }
+    log
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +278,30 @@ mod tests {
         ];
         let bytes = encode_log_file(&frames);
         assert_eq!(decode_log_file(&bytes).unwrap(), frames);
+    }
+
+    #[test]
+    fn memlog_frames_roundtrip() {
+        let mut log = MemLog::new();
+        for i in 1u64..=3 {
+            log.append(LogEntry {
+                term: Term(i),
+                command: vec![i as u8],
+            });
+        }
+        let last_index = log.last_index();
+        assert_eq!(last_index, LogIndex(3));
+
+        let frames = memlog_to_frames(&log);
+        assert_eq!(frames.len(), 3);
+
+        let hs = HardState {
+            current_term: Term(0),
+            voted_for: None,
+            last_included_index: LogIndex(0),
+            last_included_term: Term(0),
+        };
+        let restored = frames_to_memlog(&hs, frames);
+        assert_eq!(restored.last_index(), last_index);
     }
 }
