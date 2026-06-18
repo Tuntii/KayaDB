@@ -43,10 +43,15 @@ pub mod cluster_controller;
 pub mod history;
 pub mod nemesis;
 pub mod runner;
+pub mod scenario;
 pub mod workload;
 
 pub use cluster_controller::{ClusterController, LeaderInfo, ManagedNode};
 pub use history::{History, Operation, OperationResult};
-pub use nemesis::{Nemesis, NemesisConfig, NemesisType};
+pub use nemesis::{MemberSpec, Nemesis, NemesisConfig, NemesisType};
 pub use runner::{TestConfig, TestResult, TestRunner};
-pub use workload::{Workload, WorkloadConfig};
+pub use scenario::{
+    scenario_registry, smoke_scenario, t1_scenario, t2_scenario, t3_scenario, t4_scenario,
+    t5_scenario, t6_scenario, t7_scenario, Scenario, Topology, VerifyMode,
+};
+pub use workload::{Workload, WorkloadConfig, WorkloadType};

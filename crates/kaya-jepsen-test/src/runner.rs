@@ -1,12 +1,15 @@
 //! Test orchestration and verification.
 
+use crate::cluster_controller::ClusterController;
 use crate::history::History;
-use crate::nemesis::{Nemesis, NemesisConfig};
+use crate::nemesis::{Nemesis, NemesisAction, NemesisConfig};
+use crate::scenario::{Scenario, VerifyMode};
 use crate::workload::{Workload, WorkloadConfig};
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::watch;
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, watch};
 
 /// Test configuration.
 #[derive(Debug, Clone)]
@@ -39,6 +42,19 @@ impl Default for TestConfig {
     }
 }
 
+impl TestConfig {
+    /// Build a [`TestConfig`] from a [`Scenario`] and cluster base directory.
+    pub fn from_scenario(scenario: &Scenario, cluster_dir: &Path) -> Self {
+        Self {
+            nodes: vec![],
+            workload: scenario.workload.clone(),
+            nemesis: scenario.nemesis.clone(),
+            duration_secs: scenario.duration_secs,
+            cluster_dir: cluster_dir.to_string_lossy().into_owned(),
+        }
+    }
+}
+
 /// Test result.
 #[derive(Debug)]
 pub struct TestResult {
@@ -63,7 +79,7 @@ impl TestRunner {
         Self { config }
     }
 
-    /// Run the test.
+    /// Run the test using script-based cluster control.
     pub async fn run(&self) -> Result<TestResult, String> {
         eprintln!("Starting Jepsen-style test...");
         eprintln!("  Nodes: {:?}", self.config.nodes);
@@ -75,11 +91,8 @@ impl TestRunner {
         );
 
         let history = Arc::new(History::new());
-
-        // Create stop signal
         let (stop_tx, stop_rx) = watch::channel(false);
 
-        // Start nemesis (if configured)
         let nemesis_handle = if let Some(nemesis_config) = &self.config.nemesis {
             let nemesis = Nemesis::new(nemesis_config.clone(), self.config.cluster_dir.clone());
             let stop_rx = stop_rx.clone();
@@ -90,7 +103,6 @@ impl TestRunner {
             None
         };
 
-        // Run workload
         let workload = Workload::new(
             self.config.workload.clone(),
             self.config.nodes.clone(),
@@ -101,26 +113,101 @@ impl TestRunner {
             workload.run().await;
         });
 
-        // Wait for duration
         tokio::time::sleep(Duration::from_secs(self.config.duration_secs)).await;
-
-        // Signal stop
         let _ = stop_tx.send(true);
-
-        // Wait for workload to finish
         let _ = workload_handle.await;
 
-        // Wait for nemesis to finish
         if let Some(handle) = nemesis_handle {
             let _ = handle.await;
         }
 
-        // Verify linearizability
-        eprintln!("Verifying linearizability...");
+        Self::verify_history(&history, VerifyMode::Sequential)
+    }
+
+    /// Run a declarative scenario against an in-process [`ClusterController`].
+    pub async fn run_scenario(
+        &self,
+        scenario: &Scenario,
+        cluster: &mut ClusterController,
+    ) -> Result<TestResult, String> {
+        eprintln!("Starting scenario '{}'...", scenario.id);
+        eprintln!("  Topology: {:?}", scenario.topology);
+        eprintln!("  Duration: {}s", scenario.duration_secs);
+        eprintln!("  Clients: {}", scenario.workload.clients);
+        eprintln!("  Verify: {:?}", scenario.verify);
+        eprintln!(
+            "  Nemesis: {:?}",
+            scenario.nemesis.as_ref().map(|n| &n.nemesis_type)
+        );
+
+        cluster
+            .wait_for_leader(Duration::from_secs(15))
+            .await?;
+
+        let endpoints = cluster.client_endpoints();
+        eprintln!("  Endpoints: {:?}", endpoints);
+
+        let history = Arc::new(History::new());
+        let (stop_tx, stop_rx) = watch::channel(false);
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let nemesis_handle = if let Some(nemesis_config) = &scenario.nemesis {
+            let nemesis = Nemesis::new(
+                nemesis_config.clone(),
+                self.config.cluster_dir.clone(),
+            );
+            let stop_rx = stop_rx.clone();
+            let endpoints = endpoints.clone();
+            Some(tokio::spawn(async move {
+                nemesis
+                    .run_controller_commands(cmd_tx, endpoints, stop_rx)
+                    .await;
+            }))
+        } else {
+            None
+        };
+
+        let mut workload_config = scenario.workload.clone();
+        workload_config.duration = Duration::from_secs(scenario.duration_secs);
+
+        let workload = Workload::new(workload_config, endpoints.clone(), history.clone());
+        let workload_handle = tokio::spawn(async move {
+            workload.run().await;
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(scenario.duration_secs);
+        while Instant::now() < deadline {
+            tokio::select! {
+                action = cmd_rx.recv() => {
+                    if let Some(action) = action {
+                        apply_nemesis_action(cluster, action).await?;
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            }
+        }
+
+        let _ = stop_tx.send(true);
+        let _ = workload_handle.await;
+
+        if let Some(handle) = nemesis_handle {
+            let _ = handle.await;
+        }
+
+        Self::verify_history(&history, scenario.verify)
+    }
+
+    fn verify_history(history: &History, verify: VerifyMode) -> Result<TestResult, String> {
+        eprintln!("Verifying {:?} linearizability...", verify);
         let stats = history.stats();
         eprintln!("{}", stats);
 
-        match history.check_linearizability() {
+        let verify_result = match verify {
+            VerifyMode::Sequential => history.check_linearizability(),
+            VerifyMode::Concurrent => history.check_concurrent(),
+        };
+
+        match verify_result {
             Ok(()) => {
                 eprintln!("✓ Test PASSED: No linearizability violations");
                 Ok(TestResult {
@@ -154,4 +241,42 @@ impl TestRunner {
             }
         }
     }
+}
+
+async fn apply_nemesis_action(
+    cluster: &mut ClusterController,
+    action: NemesisAction,
+) -> Result<(), String> {
+    match action {
+        NemesisAction::KillNode(id) => {
+            eprintln!("[Runner] Killing node {id}");
+            cluster.kill_node(id)?;
+        }
+        NemesisAction::RestartNode(id) => {
+            eprintln!("[Runner] Restarting node {id}");
+            cluster.restart_node(id)?;
+        }
+        NemesisAction::PartitionNode(id) => {
+            eprintln!("[Runner] Partitioning node {id}");
+            if let Err(e) = cluster.partition_node(id).await {
+                eprintln!("[Runner] Partition failed (non-fatal): {e}");
+            }
+        }
+        NemesisAction::HealPartition(id) => {
+            eprintln!("[Runner] Healing partition for node {id}");
+            let _ = cluster.heal_partition(id).await;
+        }
+        NemesisAction::AddMember(spec) => {
+            eprintln!("[Runner] ADD_MEMBER node {}", spec.node_id);
+            // Membership roundtrip is performed inside the nemesis task.
+        }
+        NemesisAction::RemoveMember(node_id) => {
+            eprintln!("[Runner] REMOVE_MEMBER node {node_id}");
+            // Membership roundtrip is performed inside the nemesis task.
+        }
+        NemesisAction::Sleep(duration) => {
+            tokio::time::sleep(duration).await;
+        }
+    }
+    Ok(())
 }
