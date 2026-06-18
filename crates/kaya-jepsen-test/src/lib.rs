@@ -39,11 +39,13 @@
 //! }
 //! ```
 
+pub mod cluster_controller;
 pub mod history;
 pub mod nemesis;
 pub mod runner;
 pub mod workload;
 
+pub use cluster_controller::{ClusterController, LeaderInfo, ManagedNode};
 pub use history::{History, Operation, OperationResult};
 pub use nemesis::{Nemesis, NemesisConfig, NemesisType};
 pub use runner::{TestConfig, TestResult, TestRunner};
