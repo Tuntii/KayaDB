@@ -3,7 +3,11 @@ mod command;
 mod log;
 mod message;
 mod node;
+mod storage;
 mod types;
+
+#[cfg(feature = "disk-storage")]
+mod disk_storage;
 
 pub use cluster_config::{ClusterConfiguration, EffectiveConfig};
 pub use command::{ClusterMember, ConfigChangePhase, RaftCommand};
@@ -13,6 +17,14 @@ pub use message::{
     InstallSnapshotRequest, InstallSnapshotResponse, Message, VoteRequest, VoteResponse,
 };
 pub use node::{RaftConfig, RaftNode, RaftStatus, Role};
+#[cfg(feature = "disk-storage")]
+pub use disk_storage::DiskRaftStorage;
+pub use storage::{
+    decode_hard_state, decode_log_file, encode_hard_state, encode_log_file, default_hard_state,
+    frames_to_memlog, memlog_to_frames, HardState, LogFrame, PersistedRaftState, RaftStorage,
+    RaftStorageError, RAFT_HARD_STATE_LEN, RAFT_LOG_FRAME_HEADER_LEN, RAFT_LOG_FRAME_MAGIC,
+    RAFT_LOG_FRAME_VERSION,
+};
 pub use types::{LogIndex, NodeId, RaftApplyCommand, Term};
 
 /// Build a combined snapshot payload (engine data + membership members).

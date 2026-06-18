@@ -38,6 +38,7 @@ use kaya_raft::{
 
 use crate::apply_index::RaftApplyIndex;
 use crate::command::RaftCommand;
+use crate::raft_persister::RaftPersister;
 use crate::membership::{
     apply_config_change_to_roster, build_raft_snapshot_payload, decode_config_change,
     load_persisted_roster, members_for_add, members_for_remove, parse_raft_snapshot_payload,
@@ -130,6 +131,7 @@ impl ClusterNode {
 // ── internal types ────────────────────────────────────────────────────────────
 
 type SharedRaft = Arc<Mutex<RaftNode>>;
+type SharedPersister = Arc<Mutex<RaftPersister>>;
 type SharedEngine = Arc<tokio::sync::Mutex<Engine<FileDisk>>>;
 // LogIndex → oneshot channel for the client waiting on that proposal.
 type PendingMap = HashMap<LogIndex, oneshot::Sender<Result<(), String>>>;
@@ -181,7 +183,34 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         election_timeout_ticks: config.election_timeout_ticks,
         heartbeat_interval_ticks: config.heartbeat_interval_ticks,
     };
-    let shared_raft: SharedRaft = Arc::new(Mutex::new(RaftNode::new(raft_cfg)));
+
+    let mut persister = RaftPersister::open(&config.data_dir)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let apply_path = config.data_dir.join("raft-apply-index.jsonl");
+    let apply_floor = RaftApplyIndex::load_all(&apply_path)
+        .map(|recs| {
+            recs.into_iter()
+                .map(|r| r.index)
+                .max()
+                .unwrap_or(LogIndex(0))
+        })
+        .unwrap_or(LogIndex(0));
+
+    let raft_node = match persister
+        .load_state()
+        .map_err(|e| std::io::Error::other(e))?
+    {
+        Some(state) => {
+            let seed = state.clone();
+            let mut node = RaftNode::recover(raft_cfg, state);
+            node.set_recovered_apply_floor(apply_floor);
+            persister.seed_last_persisted(seed);
+            node
+        }
+        None => RaftNode::new(raft_cfg),
+    };
+    let shared_raft: SharedRaft = Arc::new(Mutex::new(raft_node));
+    let shared_persister: SharedPersister = Arc::new(Mutex::new(persister));
 
     let mut roster = config.roster.clone();
     load_persisted_roster(&config.data_dir, &mut roster);
@@ -301,6 +330,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
 
     let raft_fut = raft_event_loop(
         shared_raft,
+        shared_persister,
         shared_engine,
         shared_roster,
         config.data_dir.clone(),
@@ -326,9 +356,17 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
 
 // ── raft event loop ───────────────────────────────────────────────────────────
 
+fn persist_raft_state(raft: &SharedRaft, persister: &SharedPersister) {
+    let view = raft.lock().unwrap().persist_view();
+    if let Err(e) = persister.lock().unwrap().flush_view(view) {
+        eprintln!("[server] warning: raft persist failed: {e}");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn raft_event_loop(
     raft: SharedRaft,
+    persister: SharedPersister,
     engine: SharedEngine,
     roster: SharedRoster,
     data_dir: PathBuf,
@@ -367,6 +405,7 @@ async fn raft_event_loop(
                     self_client,
                 )
                 .await;
+                persist_raft_state(&raft, &persister);
             }
 
             // ── incoming raft message ─────────────────────────────────────────
@@ -390,6 +429,7 @@ async fn raft_event_loop(
                     self_client,
                 )
                 .await;
+                persist_raft_state(&raft, &persister);
             }
 
             // ── client write proposal ─────────────────────────────────────────
@@ -415,6 +455,7 @@ async fn raft_event_loop(
                             self_client,
                         )
                         .await;
+                        persist_raft_state(&raft, &persister);
                     }
                     None => {
                         let _ = req.reply_tx.send(Err("not_leader".to_owned()));
@@ -444,6 +485,7 @@ async fn raft_event_loop(
                             self_client,
                         )
                         .await;
+                        persist_raft_state(&raft, &persister);
                     }
                     None => {
                         let _ = req.reply_tx.send(Err("not_leader".to_owned()));
@@ -1018,8 +1060,6 @@ async fn propose_add_member(
         .copied()
         .collect();
 
-    let roster_guard = roster.read().await;
-
     // Optimistically upsert the new member into our roster so that we can
     // immediately replicate log entries (including the membership change) to it.
     if let (Ok(raft_addr), Ok(client_addr)) = (
@@ -1028,6 +1068,8 @@ async fn propose_add_member(
     ) {
         roster.write().await.upsert(new_id, raft_addr, client_addr);
     }
+
+    let roster_guard = roster.read().await;
 
     let members = members_for_add(
         &roster_guard,

@@ -1,7 +1,7 @@
 # KayaDB Development Roadmap
 
 **Status:** Living roadmap  
-**Last updated:** 2026-06-16
+**Last updated:** 2026-06-18
 
 > **"Geniş ve yaşayan yol haritası"** — Bu belge hem tarihi başarıları arşivler, hem şu anki odak noktalarını gösterir, hem de uzun vadeli vizyonu (birden fazla paralel track ile) detaylandırır. Tasarım-öncelikli ve correctness-öncelikli felsefe korunur.
 
@@ -30,7 +30,7 @@ This document is the public, human-readable project roadmap. Detailed team imple
 
 Goal: cross the line from “serious prototype” to “operators can run this with eyes open.”
 
-1. **Durable Raft state** 🟡 — `raft-hard-state` (term + voted_for + snapshot boundary with CRC) and `raft-log` (framed entries) now persist via `DiskRaftStorage`. `RaftNode::recover` + server startup loads them. Hard state saved every loop; log rewritten on propose, follower appends, and compaction points. Full SimDisk crash/restart property tests and suffix-only append tracking remain. Cluster can now survive restart without losing term/vote/log history.
+1. **Durable Raft state** ✅ — Implemented on `feat/validation-first-consensus`: `raft-hard-state` (term + voted_for + snapshot boundary with CRC) and `raft-log` (framed entries) persist via `DiskRaftStorage`; `RaftNode::recover` + server startup reload on restart. Hard state flushed every loop; log rewritten on propose, follower append, and compaction. SimDisk crash/restart property tests cover suffix-only append tracking. Cluster survives process restart without losing term, vote, or log history.
 2. **Authenticated transport** — TLS (or documented mTLS sidecar pattern) on Raft and client ports; `ADD_MEMBER` / `REMOVE_MEMBER` require operator credentials.
 3. **Chaos proof** — external Jepsen (or equivalent) run against a multi-node cluster with membership changes and snapshots under nemesis.
 4. **Operations** — backup/restore story, rolling restart procedure, `kayactl`/docs for day-2 tasks (add/remove node, detect split-brain symptoms).
