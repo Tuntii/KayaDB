@@ -1,6 +1,15 @@
 use crate::types::{LogIndex, NodeId, Term};
 use kaya_core::crc32c;
 
+// Wire layout (64 bytes, little-endian):
+//   [0..4]   magic "HSKR"
+//   [4..8]   version
+//   [8..16]  current_term
+//   [16..24] voted_for (0 = none)
+//   [24..32] last_included_index
+//   [32..40] last_included_term
+//   [40..60] reserved (zero)
+//   [60..64] crc32c of bytes [0..60]
 pub const RAFT_HARD_STATE_MAGIC: u32 = 0x484B_5352; // "HSKR" LE
 pub const RAFT_HARD_STATE_VERSION: u32 = 1;
 pub const RAFT_HARD_STATE_LEN: usize = 64;
@@ -72,6 +81,57 @@ mod tests {
     }
 
     #[test]
+    fn hard_state_roundtrip_voted_for_none() {
+        let hs = HardState {
+            current_term: Term(3),
+            voted_for: None,
+            last_included_index: LogIndex(42),
+            last_included_term: Term(2),
+        };
+        let enc = encode_hard_state(&hs);
+        assert_eq!(decode_hard_state(&enc).unwrap(), hs);
+    }
+
+    #[test]
+    fn hard_state_rejects_wrong_length() {
+        let enc = encode_hard_state(&HardState {
+            current_term: Term(1),
+            voted_for: None,
+            last_included_index: LogIndex(0),
+            last_included_term: Term(0),
+        });
+        let short = &enc[..RAFT_HARD_STATE_LEN - 1];
+        let err = decode_hard_state(short).unwrap_err();
+        assert!(err.contains("wrong len"));
+    }
+
+    #[test]
+    fn hard_state_rejects_bad_magic() {
+        let mut enc = encode_hard_state(&HardState {
+            current_term: Term(1),
+            voted_for: None,
+            last_included_index: LogIndex(0),
+            last_included_term: Term(0),
+        });
+        enc[0] ^= 0xFF;
+        let err = decode_hard_state(&enc).unwrap_err();
+        assert!(err.contains("bad hard-state magic"));
+    }
+
+    #[test]
+    fn hard_state_rejects_unsupported_version() {
+        let mut enc = encode_hard_state(&HardState {
+            current_term: Term(1),
+            voted_for: None,
+            last_included_index: LogIndex(0),
+            last_included_term: Term(0),
+        });
+        enc[4..8].copy_from_slice(&2u32.to_le_bytes());
+        let err = decode_hard_state(&enc).unwrap_err();
+        assert!(err.contains("unsupported hard-state version"));
+    }
+
+    #[test]
     fn hard_state_rejects_bad_crc() {
         let mut enc = encode_hard_state(&HardState {
             current_term: Term(1),
@@ -80,6 +140,7 @@ mod tests {
             last_included_term: Term(0),
         });
         enc[10] ^= 0xFF;
-        assert!(decode_hard_state(&enc).is_err());
+        let err = decode_hard_state(&enc).unwrap_err();
+        assert!(err.contains("crc mismatch"));
     }
 }
