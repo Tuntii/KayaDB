@@ -20,5 +20,12 @@ disk-storage = ["dep:kaya-io"]
 kaya-core.workspace = true
 kaya-io = { workspace = true, optional = true }
 
+[dev-dependencies]
+kaya-io = { workspace = true }
+
+[[test]]
+name = "raft_persist_crash"
+required-features = ["disk-storage"]
+
 [lib]
 path = "src/lib.rs"
