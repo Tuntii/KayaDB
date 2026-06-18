@@ -1,7 +1,7 @@
 # KayaDB Jepsen-Style Test Design
 
 **Status:** Draft  
-**Last updated:** 2026-06-10
+**Last updated:** 2026-06-18
 
 This document defines the workloads, nemeses, and test scenarios for Jepsen-style correctness testing of KayaDB clusters.
 
@@ -288,6 +288,53 @@ Success criteria:
 
 ---
 
+### T6: Membership Change Under Nemesis (M13 extension)
+
+**Workload:** W1 (register)  
+**Nemesis:** `ADD_MEMBER` (node 4) + N1 (kill random node during joint consensus)  
+**Duration:** 120 seconds  
+**Clients:** 5 concurrent  
+**Topology:** 4-node join (3-node cluster + pre-spawned join node 4)
+
+**Steps:**
+1. Start 3-node cluster via `ClusterController`
+2. Spawn join-cluster node 4 (not yet in roster)
+3. Start 5 concurrent clients running W1 against nodes 1–3
+4. Nemesis alternates every 20s: `ADD_MEMBER` for node 4, then kill a random node (restart after 10s)
+5. After 120s, stop clients and nemeses
+6. Verify concurrent linearizability with WGL (`check_concurrent`)
+
+**Pass criteria:**
+- No concurrent linearizability violations
+- `ADD_MEMBER` completes under joint consensus while kills are in flight
+- Cluster remains writable on the majority partition
+
+---
+
+### T7: Snapshot Catch-up Under Nemesis (M13 extension)
+
+**Workload:** W1 (register) + burst writes (`snap-0` … `snap-127`)  
+**Nemesis:** Kill follower before compaction burst, restart after 15s  
+**Duration:** 120 seconds  
+**Clients:** 5 concurrent  
+**Topology:** 3-node
+
+**Steps:**
+1. Start 3-node cluster via `ClusterController`
+2. Identify a follower and kill it before the burst-write hook
+3. Leader writes 128 keys (`snap-{i}`) to force log growth / snapshot install
+4. Restart the killed follower; continue Register workload
+5. After 120s, stop clients and nemeses
+6. Verify WGL linearizability
+7. **Durability assert:** `GET snap-127` succeeds on every node endpoint (snapshot catch-up)
+
+**Pass criteria:**
+- No concurrent linearizability violations
+- Killed follower catches up via InstallSnapshot after restart
+- `snap-127` readable on all nodes
+
+---
+
 ## Implementation Plan
 
 ### Phase 1: Process-Control Scripts (current)
@@ -303,18 +350,43 @@ Create shell/PowerShell scripts to manage cluster lifecycle:
 
 Build a Rust-based test harness in `crates/kaya-jepsen-test/`:
 - **Workload generators** - Concurrent clients running W1-W4 (Register/Counter/Set/Map)
-- **Nemesis injectors** - Kill (via scripts), **Partition** (newly implemented cross-platform: `partition-node.ps1` + `heal-partition.ps1` using Windows Firewall `New-NetFirewallRule`, Linux `iptables` with comments; falls back gracefully). Restart also completed for Windows symmetry (`restart-node.ps1`).
+- **Nemesis injectors** - Kill (via scripts or `ClusterController`), **Partition** (cross-platform: `partition-node.ps1` + `heal-partition.ps1` using Windows Firewall `New-NetFirewallRule`, Linux `iptables` with comments; falls back gracefully). Restart also completed for Windows symmetry (`restart-node.ps1`).
 - **History recorder** - Thread-safe `History` + `Operation` recording with `kaya_sim` Op/OpResult
-- **Linearizability checker** - Uses `kaya_sim::LinearizabilityChecker::check_sequential()` (errors are recorded and tolerated)
+- **Linearizability checker** - Sequential (`check_sequential`) for PR smoke; WGL concurrent (`check_concurrent`) for nightly full gate
 - **Test runner** - `TestRunner` + `TestConfig` + `TestResult` (duration-based orchestration, nemesis + workload, post-run verification + trace export on failure)
+- **Scenario registry** - Declarative `smoke` + T1–T7 scenarios in `scenario.rs`; `run_scenario()` drives workloads, hooks, and nemeses against an in-process cluster
+- **`ClusterController`** - Programmatic cluster lifecycle for CI: spawns in-process `ClusterNode` instances on **dynamic ports** (`127.0.0.1:0`), kill/restart, `ADD_MEMBER` / `REMOVE_MEMBER`, and port-aware partition (see below). Existing `scripts/` remain for manual operator demos.
 
 A ready-to-run `examples/jepsen_demo.rs` was added for end-to-end "tam deneme" (cargo run -p kaya-jepsen-test --example jepsen_demo). It exercises Partition nemesis + real clients against a live cluster started via the scripts.
 
-### Phase 3: CI Integration (future)
+#### Dynamic-port partition via `ClusterController`
 
-- Run T1-T4 in CI on every PR
-- Run T5 (stress test) nightly
-- Publish results to dashboard
+Script-based partition (`partition-node.sh`) assumes fixed ports from `start-cluster.sh`. CI clusters bind ephemeral ports, so partition nemeses in scenario tests use `ClusterController::partition_node` / `heal_partition` instead:
+
+- On **Linux**, inserts `iptables` OUTPUT DROP rules targeting each node's **actual** `client_addr` and `raft_addr` ports (comment tag `kaya-jepsen-n{id}`)
+- Requires `sudo` on the runner host; nightly T2/T5 partition scenarios fail hard if rules cannot be installed
+- PR **chaos-smoke** uses kill-only nemesis (no partition) to stay fast and avoid iptables dependency
+
+### Phase 3: CI Integration (done)
+
+Chaos gates live in `.github/workflows/` and are **disabled by default** until the repository variable `CHAOS_CI_ENABLED` is set to `true` in GitHub **Settings → Secrets and variables → Actions → Variables**. This keeps `cargo test --workspace` fast on every PR while allowing operators to opt in once durable Raft + harness criteria are green locally.
+
+| Job | Workflow | Trigger | What runs | Budget |
+|-----|----------|---------|-----------|--------|
+| **chaos-smoke** | `ci.yml` | Every PR (after `rust` job) | `cargo test -p kaya-jepsen-test --test smoke` — 30s Register + kill-node, **sequential** verify | ≤ 10 min |
+| **chaos-full** | `chaos-nightly.yml` | Nightly cron (`0 3 * * *`), `workflow_dispatch`, release tags `v*` | `cargo test -p kaya-jepsen-test --test full_gate -- --ignored --nocapture --test-threads=1` — T1–T7 sequentially, **WGL concurrent** verify | ≤ 45 min |
+
+**Activation timeline:**
+
+| Stage | `CHAOS_CI_ENABLED` | What runs |
+|-------|-------------------|-----------|
+| Default | unset / not `true` | Unit tests only; chaos jobs skipped |
+| Phase 2 | `true` | PR `chaos-smoke` on every pull request |
+| Phase 3 | `true` + `chaos-nightly.yml` merged | Nightly `chaos-full` + release-tag gate |
+
+**Failure artifacts:** On `chaos-full` failure, JSONL traces under `{tmpdir}/traces/{scenario}-*.jsonl` are uploaded as the `chaos-traces` artifact (14-day retention).
+
+**M13 exit gate #3 mapping:** Nightly green on T1–T7 (including T6 membership + T7 snapshot under nemesis) satisfies the "Jepsen or equivalent" chaos-proof requirement in `ROADMAP.md`.
 
 ---
 
@@ -333,4 +405,9 @@ KayaDB's approach: build a lightweight Rust-native test harness instead of using
 - `crates/kaya-sim/src/linear.rs` - Sequential linearizability checker
 - `crates/kaya-server/src/integration_tests.rs` - Existing cluster tests
 - `crates/kaya-jepsen-test/examples/jepsen_demo.rs` - Runnable full demo (Partition + runner)
-- `ROADMAP.md` - M12 milestone (Jepsen prep harness complete; full external Jepsen + more nemeses later)
+- `crates/kaya-jepsen-test/src/cluster_controller.rs` - In-process cluster spawn, dynamic ports, port-aware partition
+- `crates/kaya-jepsen-test/tests/smoke.rs` - PR `chaos-smoke` gate
+- `crates/kaya-jepsen-test/tests/full_gate.rs` - Nightly T1–T7 WGL gate (`#[ignore]` locally)
+- `.github/workflows/ci.yml` - `chaos-smoke` job (gated by `CHAOS_CI_ENABLED`)
+- `.github/workflows/chaos-nightly.yml` - `chaos-full` nightly + release-tag gate
+- `ROADMAP.md` - M12 harness complete; M13 chaos gates (T6/T7) + durable Raft on `feat/validation-first-consensus`
