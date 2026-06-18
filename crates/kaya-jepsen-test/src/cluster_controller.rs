@@ -7,11 +7,14 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use kaya_net::roundtrip;
+use crate::nemesis::MemberSpec;
+use kaya_net::{
+    encode_member_payload, encode_remove_member_payload, roundtrip, STATUS_OK,
+};
 use kaya_server::{ClusterConfig, ClusterNode};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 /// A cluster member managed by [`ClusterController`].
 pub struct ManagedNode {
@@ -33,6 +36,8 @@ pub struct LeaderInfo {
 pub struct ClusterController {
     base_dir: PathBuf,
     nodes: Vec<ManagedNode>,
+    /// Last node killed via [`Self::kill_node`] (used by T7 follower restart).
+    last_killed: Option<u64>,
 }
 
 impl ClusterController {
@@ -75,7 +80,117 @@ impl ClusterController {
             });
         }
 
-        Ok(Self { base_dir, nodes })
+        Ok(Self {
+            base_dir,
+            nodes,
+            last_killed: None,
+        })
+    }
+
+    /// Spawn a join-cluster node that discovers the roster via seed peers.
+    pub async fn spawn_join_node(
+        &mut self,
+        id: u64,
+        seeds: Vec<(u64, SocketAddr, SocketAddr)>,
+    ) -> Result<(), String> {
+        if self.node(id).is_ok() {
+            return Err(format!("node {id} already exists"));
+        }
+
+        let raft_addr = alloc_local_addr().await?;
+        let client_addr = alloc_local_addr().await?;
+        let data_dir = self.base_dir.join(format!("node{id}"));
+        std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+
+        let config = ClusterConfig::new(id, &data_dir, raft_addr, client_addr, seeds)
+            .with_join_cluster();
+        let handle = spawn_node(config);
+
+        self.nodes.push(ManagedNode {
+            id,
+            data_dir,
+            raft_addr,
+            client_addr,
+            handle: Some(handle),
+        });
+        Ok(())
+    }
+
+    /// Seed peer list for join-cluster nodes (all currently managed nodes).
+    pub fn seed_peers(&self) -> Vec<(u64, SocketAddr, SocketAddr)> {
+        self.nodes
+            .iter()
+            .map(|n| (n.id, n.raft_addr, n.client_addr))
+            .collect()
+    }
+
+    /// Build a [`MemberSpec`] from a managed node's live addresses.
+    pub fn member_spec_for_node(&self, node_id: u64) -> Result<MemberSpec, String> {
+        let node = self.node(node_id)?;
+        Ok(MemberSpec {
+            node_id,
+            raft_addr: node.raft_addr.to_string(),
+            client_addr: node.client_addr.to_string(),
+        })
+    }
+
+    /// Propose adding a member via ADD_MEMBER (opcode 7) on the leader.
+    pub async fn add_member(&self, leader: SocketAddr, spec: &MemberSpec) -> Result<(), String> {
+        eprintln!(
+            "[ClusterController] ADD_MEMBER node {} via {}",
+            spec.node_id, leader
+        );
+        let payload = encode_member_payload(
+            spec.node_id,
+            &spec.raft_addr,
+            &spec.client_addr,
+        );
+        match timeout(Duration::from_secs(10), roundtrip(leader, 7, &payload)).await {
+            Ok(Ok((status, _body))) if status == STATUS_OK => Ok(()),
+            Ok(Ok((status, body))) => {
+                let msg = String::from_utf8_lossy(&body);
+                if status == kaya_net::STATUS_INVALID_ARGUMENT && msg.contains("already a voter") {
+                    Ok(())
+                } else {
+                    Err(format!("ADD_MEMBER failed status={status}: {msg}"))
+                }
+            }
+            Ok(Err(e)) => Err(format!("ADD_MEMBER roundtrip error: {e}")),
+            Err(_) => Err("ADD_MEMBER roundtrip timed out".into()),
+        }
+    }
+
+    /// Propose removing a member via REMOVE_MEMBER (opcode 8) on the leader.
+    pub async fn remove_member(&self, leader: SocketAddr, node_id: u64) -> Result<(), String> {
+        eprintln!("[ClusterController] REMOVE_MEMBER node {node_id} via {leader}");
+        let payload = encode_remove_member_payload(node_id);
+        match timeout(Duration::from_secs(10), roundtrip(leader, 8, &payload)).await {
+            Ok(Ok((status, _body))) if status == STATUS_OK => Ok(()),
+            Ok(Ok((status, body))) => Err(format!(
+                "REMOVE_MEMBER failed status={status}: {:?}",
+                String::from_utf8(body)
+            )),
+            Ok(Err(e)) => Err(format!("REMOVE_MEMBER roundtrip error: {e}")),
+            Err(_) => Err("REMOVE_MEMBER roundtrip timed out".into()),
+        }
+    }
+
+    /// Return the id of a node that is not the current Raft leader.
+    pub async fn find_follower_id(&self) -> Result<u64, String> {
+        let leader = self.wait_for_leader(Duration::from_secs(10)).await?;
+        self.nodes
+            .iter()
+            .find(|n| n.id != leader.id)
+            .map(|n| n.id)
+            .ok_or_else(|| "no follower found".into())
+    }
+
+    /// Restart the node most recently killed via [`Self::kill_node`].
+    pub fn restart_last_killed(&mut self) -> Result<(), String> {
+        let id = self
+            .last_killed
+            .ok_or_else(|| "no node to restart".to_string())?;
+        self.restart_node(id)
     }
 
     /// Poll client endpoints until one reports `"leader"` or `timeout` elapses.
@@ -109,6 +224,7 @@ impl ClusterController {
         if let Some(handle) = node.handle.take() {
             handle.abort();
         }
+        self.last_killed = Some(id);
         Ok(())
     }
 
@@ -177,6 +293,18 @@ impl ClusterController {
     /// Return all live client listener addresses.
     pub fn client_endpoints(&self) -> Vec<SocketAddr> {
         self.nodes.iter().map(|n| n.client_addr).collect()
+    }
+
+    /// Return client endpoints for a subset of node ids (stable iteration order by id).
+    pub fn client_endpoints_for_ids(&self, ids: &[u64]) -> Vec<SocketAddr> {
+        let mut endpoints: Vec<SocketAddr> = self
+            .nodes
+            .iter()
+            .filter(|n| ids.contains(&n.id))
+            .map(|n| n.client_addr)
+            .collect();
+        endpoints.sort_by_key(|a| a.port());
+        endpoints
     }
 
     /// Abort every node task and remove the cluster base directory.

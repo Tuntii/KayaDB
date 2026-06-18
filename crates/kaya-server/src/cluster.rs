@@ -1060,8 +1060,6 @@ async fn propose_add_member(
         .copied()
         .collect();
 
-    let roster_guard = roster.read().await;
-
     // Optimistically upsert the new member into our roster so that we can
     // immediately replicate log entries (including the membership change) to it.
     if let (Ok(raft_addr), Ok(client_addr)) = (
@@ -1070,6 +1068,8 @@ async fn propose_add_member(
     ) {
         roster.write().await.upsert(new_id, raft_addr, client_addr);
     }
+
+    let roster_guard = roster.read().await;
 
     let members = members_for_add(
         &roster_guard,

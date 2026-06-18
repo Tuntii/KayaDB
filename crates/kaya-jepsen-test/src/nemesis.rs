@@ -50,6 +50,8 @@ pub enum NemesisType {
     KillNode,
     /// Kill a specific node
     KillNodeById(usize),
+    /// Kill a non-leader node (resolved at injection time)
+    KillFollower,
     /// Partition a random node
     Partition,
     /// Partition a specific node
@@ -73,6 +75,8 @@ pub enum NemesisAction {
     HealPartition(u64),
     AddMember(MemberSpec),
     RemoveMember(u64),
+    KillFollower,
+    RestartFollower,
     Sleep(Duration),
 }
 
@@ -179,6 +183,9 @@ impl Nemesis {
                 sleep(failure_duration).await;
                 Self::restart_node_script(*id, cluster_dir).await;
             }
+            NemesisType::KillFollower => {
+                eprintln!("[Nemesis] KillFollower requires ClusterController (script path unsupported)");
+            }
             NemesisType::Partition => {
                 let node_id = rng.gen_range(1..=3);
                 Self::partition_node_script(node_id, cluster_dir).await;
@@ -237,7 +244,7 @@ impl Nemesis {
         nemesis_type: &NemesisType,
         rng: &mut StdRng,
         cmd_tx: &mpsc::UnboundedSender<NemesisAction>,
-        client_endpoints: &[SocketAddr],
+        _client_endpoints: &[SocketAddr],
         failure_duration: Duration,
     ) {
         match nemesis_type {
@@ -253,6 +260,11 @@ impl Nemesis {
                 let _ = cmd_tx.send(NemesisAction::Sleep(failure_duration));
                 let _ = cmd_tx.send(NemesisAction::RestartNode(node_id));
             }
+            NemesisType::KillFollower => {
+                let _ = cmd_tx.send(NemesisAction::KillFollower);
+                let _ = cmd_tx.send(NemesisAction::Sleep(failure_duration));
+                let _ = cmd_tx.send(NemesisAction::RestartFollower);
+            }
             NemesisType::Partition => {
                 let node_id = rng.gen_range(1..=3) as u64;
                 let _ = cmd_tx.send(NemesisAction::PartitionNode(node_id));
@@ -267,15 +279,9 @@ impl Nemesis {
             }
             NemesisType::AddMember(spec) => {
                 let _ = cmd_tx.send(NemesisAction::AddMember(spec.clone()));
-                if let Some(leader) = find_leader(client_endpoints).await {
-                    Self::add_member_roundtrip(&[leader], spec).await;
-                }
             }
             NemesisType::RemoveMember(node_id) => {
                 let _ = cmd_tx.send(NemesisAction::RemoveMember(*node_id));
-                if let Some(leader) = find_leader(client_endpoints).await {
-                    Self::remove_member_roundtrip(&[leader], *node_id).await;
-                }
             }
             NemesisType::Composite(_) => {}
             NemesisType::None => {}

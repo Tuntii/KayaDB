@@ -2,14 +2,16 @@
 
 use crate::cluster_controller::ClusterController;
 use crate::history::History;
-use crate::nemesis::{Nemesis, NemesisAction, NemesisConfig};
-use crate::scenario::{Scenario, VerifyMode};
+use crate::nemesis::{MemberSpec, Nemesis, NemesisAction, NemesisConfig};
+use crate::scenario::{Scenario, Topology, VerifyMode, WorkloadHook};
 use crate::workload::{Workload, WorkloadConfig};
+use kaya_client::KayaClient;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
+use tokio::time::timeout;
 
 /// Test configuration.
 #[derive(Debug, Clone)]
@@ -144,7 +146,34 @@ impl TestRunner {
             .wait_for_leader(Duration::from_secs(15))
             .await?;
 
-        let endpoints = cluster.client_endpoints();
+        if scenario.topology == Topology::FourNodeJoin {
+            let seeds = cluster.seed_peers();
+            cluster.spawn_join_node(4, seeds).await?;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            eprintln!("  Join node 4 spawned (awaiting ADD_MEMBER nemesis)");
+        }
+
+        let t7_leader = if scenario.id == "t7" {
+            let follower_id = cluster.find_follower_id().await?;
+            eprintln!("[Runner] T7: stopping follower {follower_id} before burst writes");
+            cluster.kill_node(follower_id)?;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let leader = cluster.wait_for_leader(Duration::from_secs(15)).await?;
+            Some(leader.client_addr)
+        } else {
+            None
+        };
+
+        for hook in &scenario.hooks {
+            run_workload_hook(cluster, hook, t7_leader).await?;
+        }
+
+        let endpoints = match scenario.topology {
+            Topology::FourNodeJoin => {
+                cluster.client_endpoints_for_ids(&[1, 2, 3])
+            }
+            _ => cluster.client_endpoints(),
+        };
         eprintln!("  Endpoints: {:?}", endpoints);
 
         let history = Arc::new(History::new());
@@ -192,6 +221,12 @@ impl TestRunner {
 
         if let Some(handle) = nemesis_handle {
             let _ = handle.await;
+        }
+
+        if scenario.id == "t7" {
+            let _ = cluster.restart_last_killed();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            t7_durability_check(cluster).await?;
         }
 
         Self::verify_history(&history, scenario.verify)
@@ -267,16 +302,140 @@ async fn apply_nemesis_action(
             let _ = cluster.heal_partition(id).await;
         }
         NemesisAction::AddMember(spec) => {
-            eprintln!("[Runner] ADD_MEMBER node {}", spec.node_id);
-            // Membership roundtrip is performed inside the nemesis task.
+            let resolved = resolve_member_spec(cluster, &spec)?;
+            let leader = cluster.wait_for_leader(Duration::from_secs(10)).await?;
+            cluster
+                .add_member(leader.client_addr, &resolved)
+                .await?;
         }
         NemesisAction::RemoveMember(node_id) => {
-            eprintln!("[Runner] REMOVE_MEMBER node {node_id}");
-            // Membership roundtrip is performed inside the nemesis task.
+            let leader = cluster.wait_for_leader(Duration::from_secs(10)).await?;
+            cluster.remove_member(leader.client_addr, node_id).await?;
+        }
+        NemesisAction::KillFollower => {
+            let follower_id = cluster.find_follower_id().await?;
+            eprintln!("[Runner] Killing follower node {follower_id}");
+            cluster.kill_node(follower_id)?;
+        }
+        NemesisAction::RestartFollower => {
+            eprintln!("[Runner] Restarting last killed follower");
+            cluster.restart_last_killed()?;
         }
         NemesisAction::Sleep(duration) => {
             tokio::time::sleep(duration).await;
         }
     }
+    Ok(())
+}
+
+fn resolve_member_spec(cluster: &ClusterController, spec: &MemberSpec) -> Result<MemberSpec, String> {
+    if spec.raft_addr.ends_with(":0") || spec.client_addr.ends_with(":0") {
+        cluster.member_spec_for_node(spec.node_id)
+    } else {
+        Ok(spec.clone())
+    }
+}
+
+async fn run_workload_hook(
+    cluster: &ClusterController,
+    hook: &WorkloadHook,
+    leader_hint: Option<SocketAddr>,
+) -> Result<(), String> {
+    match hook {
+        WorkloadHook::BurstWrites { count, key_prefix } => {
+            eprintln!(
+                "[Runner] BurstWrites: {count} keys with prefix '{key_prefix}'"
+            );
+            let leader = if let Some(addr) = leader_hint {
+                addr
+            } else {
+                cluster
+                    .wait_for_leader(Duration::from_secs(15))
+                    .await?
+                    .client_addr
+            };
+            let mut client = KayaClient::connect(leader)
+                .await
+                .map_err(|e| e.to_string())?;
+            for i in 0..*count {
+                let key = format!("{key_prefix}-{i}");
+                let val = format!("v{i}");
+                client
+                    .put(key.as_bytes(), val.as_bytes())
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+
+            let mut compacted = false;
+            for _ in 0..80 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if let Ok(mut leader_client) = KayaClient::connect(leader).await {
+                    if let Ok(stats) = leader_client.stats().await {
+                        if applied_index_from_stats(&stats).unwrap_or(0) >= 64 {
+                            compacted = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !compacted {
+                return Err("leader did not reach compaction threshold after burst writes".into());
+            }
+            Ok(())
+        }
+    }
+}
+
+fn applied_index_from_stats(stats: &str) -> Option<u64> {
+    let needle = "\"applied_index\":";
+    let start = stats.find(needle)? + needle.len();
+    let rest = &stats[start..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+async fn t7_durability_check(cluster: &ClusterController) -> Result<(), String> {
+    eprintln!("[Runner] T7 durability check: GET snap-127 on all endpoints");
+    let key = b"snap-127";
+    let expected = b"v127";
+
+    for endpoint in cluster.client_endpoints() {
+        let mut found = false;
+        for attempt in 0..60 {
+            if let Ok(Ok(mut client)) =
+                timeout(Duration::from_millis(500), KayaClient::connect(endpoint)).await
+            {
+                if let Ok(Ok(stats)) =
+                    timeout(Duration::from_millis(500), client.stats()).await
+                {
+                    let applied = applied_index_from_stats(&stats).unwrap_or(0);
+                    if applied < 64 {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                }
+                if let Ok(Ok(Some(val))) =
+                    timeout(Duration::from_millis(500), client.get(key)).await
+                {
+                    if val == expected {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if attempt % 10 == 9 {
+                eprintln!("[Runner] T7 durability: still waiting on {endpoint}...");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if !found {
+            return Err(format!(
+                "T7 durability check failed: snap-127 not found on {endpoint}"
+            ));
+        }
+    }
+    eprintln!("[Runner] T7 durability check passed");
     Ok(())
 }

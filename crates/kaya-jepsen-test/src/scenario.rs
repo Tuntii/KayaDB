@@ -13,6 +13,16 @@ pub enum VerifyMode {
     Concurrent,
 }
 
+/// Timed workload actions fired during a scenario (e.g. T7 snapshot forcing).
+#[derive(Debug, Clone)]
+pub enum WorkloadHook {
+    /// Write `count` keys `{prefix}-{i}` with values `v{i}` via the leader.
+    BurstWrites {
+        count: usize,
+        key_prefix: &'static str,
+    },
+}
+
 /// Cluster topology required by a scenario.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Topology {
@@ -27,6 +37,7 @@ pub enum Topology {
 pub struct Scenario {
     pub id: &'static str,
     pub workload: WorkloadConfig,
+    pub hooks: Vec<WorkloadHook>,
     pub duration_secs: u64,
     pub verify: VerifyMode,
     pub topology: Topology,
@@ -56,6 +67,7 @@ pub fn smoke_scenario() -> Scenario {
     Scenario {
         id: "smoke",
         workload: workload(WorkloadType::Register, 2, 30),
+        hooks: vec![],
         duration_secs: 30,
         verify: VerifyMode::Sequential,
         topology: Topology::ThreeNode,
@@ -68,6 +80,7 @@ pub fn t1_scenario() -> Scenario {
     Scenario {
         id: "t1",
         workload: workload(WorkloadType::Register, 5, 120),
+        hooks: vec![],
         duration_secs: 120,
         verify: VerifyMode::Concurrent,
         topology: Topology::ThreeNode,
@@ -80,6 +93,7 @@ pub fn t2_scenario() -> Scenario {
     Scenario {
         id: "t2",
         workload: workload(WorkloadType::Set, 5, 120),
+        hooks: vec![],
         duration_secs: 120,
         verify: VerifyMode::Concurrent,
         topology: Topology::ThreeNode,
@@ -97,6 +111,7 @@ pub fn t3_scenario() -> Scenario {
     Scenario {
         id: "t3",
         workload: workload(WorkloadType::Register, 10, 90),
+        hooks: vec![],
         duration_secs: 90,
         verify: VerifyMode::Concurrent,
         topology: Topology::ThreeNode,
@@ -114,6 +129,7 @@ pub fn t4_scenario() -> Scenario {
     Scenario {
         id: "t4",
         workload: workload(WorkloadType::Set, 5, 120),
+        hooks: vec![],
         duration_secs: 120,
         verify: VerifyMode::Concurrent,
         topology: Topology::ThreeNode,
@@ -135,6 +151,7 @@ pub fn t5_scenario() -> Scenario {
     Scenario {
         id: "t5",
         workload: workload(WorkloadType::Register, 20, 300),
+        hooks: vec![],
         duration_secs: 300,
         verify: VerifyMode::Concurrent,
         topology: Topology::ThreeNode,
@@ -150,11 +167,12 @@ pub fn t5_scenario() -> Scenario {
     }
 }
 
-/// T6: membership change during joint consensus (stub — full flow in Task 11).
+/// T6: membership change during joint consensus with kill nemesis.
 pub fn t6_scenario() -> Scenario {
     Scenario {
         id: "t6",
         workload: workload(WorkloadType::Register, 5, 120),
+        hooks: vec![],
         duration_secs: 120,
         verify: VerifyMode::Concurrent,
         topology: Topology::FourNodeJoin,
@@ -174,16 +192,20 @@ pub fn t6_scenario() -> Scenario {
     }
 }
 
-/// T7: snapshot catch-up after follower kill (stub — full flow in Task 11).
+/// T7: snapshot catch-up after killing a follower mid-compaction.
 pub fn t7_scenario() -> Scenario {
     Scenario {
         id: "t7",
         workload: workload(WorkloadType::Register, 5, 120),
+        hooks: vec![WorkloadHook::BurstWrites {
+            count: 128,
+            key_prefix: "snap",
+        }],
         duration_secs: 120,
         verify: VerifyMode::Concurrent,
         topology: Topology::ThreeNode,
         nemesis: Some(NemesisConfig {
-            nemesis_type: NemesisType::KillNodeById(2),
+            nemesis_type: NemesisType::KillFollower,
             interval: Duration::from_secs(5),
             duration: Duration::from_secs(15),
             probability: 1.0,

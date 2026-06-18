@@ -52,6 +52,6 @@ pub use nemesis::{MemberSpec, Nemesis, NemesisConfig, NemesisType};
 pub use runner::{TestConfig, TestResult, TestRunner};
 pub use scenario::{
     scenario_registry, smoke_scenario, t1_scenario, t2_scenario, t3_scenario, t4_scenario,
-    t5_scenario, t6_scenario, t7_scenario, Scenario, Topology, VerifyMode,
+    t5_scenario, t6_scenario, t7_scenario, Scenario, Topology, VerifyMode, WorkloadHook,
 };
 pub use workload::{Workload, WorkloadConfig, WorkloadType};
