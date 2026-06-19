@@ -31,6 +31,15 @@ const MSG_INSTALL_SNAPSHOT_RESPONSE: u8 = 6;
 const MSG_CONFIG_CHANGE_REQUEST: u8 = 7;
 const MSG_CONFIG_CHANGE_RESPONSE: u8 = 8;
 
+/// Opcode constants for admin (membership) operations. These match the
+/// client protocol opcodes and Opcode enum values.
+pub const ADD_MEMBER_OPCODE: u8 = 7;
+pub const REMOVE_MEMBER_OPCODE: u8 = 8;
+
+/// Prefix used to optionally frame an operator token before admin opcode+payload.
+/// Format when present: ADMIN\x00 | token_len(u16 LE) | token_bytes | opcode(u8) | inner
+pub const ADMIN_AUTH_PREFIX: &[u8] = b"ADMIN\x00";
+
 /// Max snapshot payload bytes on the wire (frame budget minus headers).
 pub const MAX_SNAPSHOT_DATA_LEN: u32 = DEFAULT_MAX_FRAME_LEN.saturating_sub(64);
 
@@ -365,6 +374,57 @@ pub fn decode_member_payload(data: &[u8]) -> Result<(u64, String, String), Strin
     let client = String::from_utf8(take_bytes(&mut cur, client_len)?)
         .map_err(|e| format!("invalid client addr utf-8: {e}"))?;
     Ok((node_id, raft, client))
+}
+
+// ── optional operator credential framing for admin payloads ──────────────────
+// These define the credential model and wire format for Task 1.
+// The optional ADMIN prefix may appear at the start of a client frame's
+// payload for opcodes 7/8. This keeps the frame opcode byte unchanged for
+// backward compat (when no token, no prefix is emitted by callers).
+
+/// Encode an admin operation payload, optionally prefixing an operator token.
+/// Wire for the returned bytes: [ADMIN\x00 | u16(len) | token | ] opcode | inner
+pub fn encode_admin_payload(opcode: u8, inner: &[u8], operator_token: Option<&str>) -> Vec<u8> {
+    let mut out = Vec::new();
+    if let Some(tok) = operator_token {
+        out.extend_from_slice(ADMIN_AUTH_PREFIX);
+        out.extend_from_slice(&(tok.len() as u16).to_le_bytes());
+        out.extend_from_slice(tok.as_bytes());
+    }
+    out.push(opcode);
+    out.extend_from_slice(inner);
+    out
+}
+
+/// Decode an (optionally) admin-auth-prefixed payload.
+/// Returns (opcode, inner, Some(token)) when prefix was present.
+pub fn decode_admin_payload(data: &[u8]) -> Result<(u8, Vec<u8>, Option<String>), String> {
+    let mut cur = data;
+
+    let token = if cur.len() >= ADMIN_AUTH_PREFIX.len() && cur.starts_with(ADMIN_AUTH_PREFIX) {
+        cur = &cur[ADMIN_AUTH_PREFIX.len()..];
+        if cur.len() < 2 {
+            return Err("truncated admin auth token length".to_owned());
+        }
+        let tlen = u16::from_le_bytes([cur[0], cur[1]]) as usize;
+        cur = &cur[2..];
+        if cur.len() < tlen {
+            return Err("truncated admin auth token".to_owned());
+        }
+        let tok_bytes = take_bytes(&mut cur, tlen)?;
+        let tok = String::from_utf8(tok_bytes)
+            .map_err(|e| format!("invalid utf-8 in operator token: {e}"))?;
+        Some(tok)
+    } else {
+        None
+    };
+
+    if cur.is_empty() {
+        return Err("missing opcode after optional admin auth prefix".to_owned());
+    }
+    let opcode = take_u8(&mut cur)?;
+    let inner = cur.to_vec();
+    Ok((opcode, inner, token))
 }
 
 /// Encode a SCAN request payload: `prefix_len(u32) | prefix`.
@@ -897,5 +957,28 @@ mod tests {
             let _ = decode_error_payload(input);
             let _ = decode_envelope(input);
         }
+    }
+
+    // ── operator credential / admin auth framing (TDD start) ─────────────────
+
+    #[test]
+    fn operator_token_roundtrips() {
+        let token = "super-secret-operator-token-123";
+        let member_bytes = encode_member_payload(42, "127.0.0.1:7000", "127.0.0.1:8000");
+        let payload = encode_admin_payload(ADD_MEMBER_OPCODE, &member_bytes, Some(token));
+        let (opcode, inner, presented) = decode_admin_payload(&payload).unwrap();
+        assert_eq!(opcode, ADD_MEMBER_OPCODE);
+        assert_eq!(inner, member_bytes);
+        assert_eq!(presented.as_deref(), Some(token));
+    }
+
+    #[test]
+    fn admin_payload_no_token_roundtrips() {
+        let inner = b"raw-inner-bytes-for-remove".to_vec();
+        let payload = encode_admin_payload(REMOVE_MEMBER_OPCODE, &inner, None);
+        let (opcode, decoded_inner, presented) = decode_admin_payload(&payload).unwrap();
+        assert_eq!(opcode, REMOVE_MEMBER_OPCODE);
+        assert_eq!(decoded_inner, inner);
+        assert!(presented.is_none());
     }
 }

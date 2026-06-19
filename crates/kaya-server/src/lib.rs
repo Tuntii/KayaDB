@@ -2,6 +2,7 @@ pub mod apply_index;
 pub mod cluster;
 pub mod command;
 pub mod membership;
+pub mod operator_auth;
 pub mod raft_persister;
 pub mod security;
 

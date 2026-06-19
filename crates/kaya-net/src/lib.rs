@@ -3,11 +3,12 @@ pub mod roster;
 pub mod transport;
 
 pub use codec::{
-    decode_envelope, decode_error_payload, decode_key_payload, decode_member_payload,
-    decode_put_payload, decode_remove_member_payload, decode_scan_payload, decode_scan_response,
-    decode_value_payload, encode_envelope, encode_error_payload, encode_key_payload,
-    encode_member_payload, encode_put_payload, encode_remove_member_payload, encode_scan_payload,
-    encode_scan_response, encode_value_payload,
+    decode_admin_payload, decode_envelope, decode_error_payload, decode_key_payload,
+    decode_member_payload, decode_put_payload, decode_remove_member_payload, decode_scan_payload,
+    decode_scan_response, decode_value_payload, encode_admin_payload, encode_envelope,
+    encode_error_payload, encode_key_payload, encode_member_payload, encode_put_payload,
+    encode_remove_member_payload, encode_scan_payload, encode_scan_response, encode_value_payload,
+    ADMIN_AUTH_PREFIX, ADD_MEMBER_OPCODE, REMOVE_MEMBER_OPCODE,
 };
 pub use roster::NodeRoster;
 pub use transport::{
