@@ -94,15 +94,12 @@ fn run() -> Result<(), String> {
         return Err("--join-cluster requires at least one --peer seed address".to_owned());
     }
 
-    let operator_token = take_value(&mut args, "--operator-token")
-        .or_else(|| env::var("KAYA_OPERATOR_TOKEN").ok());
+    let operator_token =
+        take_value(&mut args, "--operator-token").or_else(|| env::var("KAYA_OPERATOR_TOKEN").ok());
 
-    let tls_cert = take_value(&mut args, "--tls-cert")
-        .or_else(|| env::var("KAYA_TLS_CERT").ok());
-    let tls_key = take_value(&mut args, "--tls-key")
-        .or_else(|| env::var("KAYA_TLS_KEY").ok());
-    let tls_ca = take_value(&mut args, "--tls-ca")
-        .or_else(|| env::var("KAYA_TLS_CA").ok());
+    let tls_cert = take_value(&mut args, "--tls-cert").or_else(|| env::var("KAYA_TLS_CERT").ok());
+    let tls_key = take_value(&mut args, "--tls-key").or_else(|| env::var("KAYA_TLS_KEY").ok());
+    let tls_ca = take_value(&mut args, "--tls-ca").or_else(|| env::var("KAYA_TLS_CA").ok());
 
     let enable_tls = tls_cert.is_some() && tls_key.is_some();
 

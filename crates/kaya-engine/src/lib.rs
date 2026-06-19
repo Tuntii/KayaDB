@@ -661,28 +661,22 @@ impl<D: Disk> Engine<D> {
             // Heuristic: very large table count or insufficient bytes => not our new format.
             if num_candidate > 0 && num_candidate < 4096 && cur.len() >= 4 + num_candidate {
                 let _ = Self::take_u32(&mut cur); // consume num
-                let mut ok = true;
                 for _ in 0..num_candidate {
-                    if !ok || cur.len() < 4 {
-                        ok = false;
+                    if cur.len() < 4 {
                         break;
                     }
                     let plen = Self::take_u32(&mut cur).unwrap_or(0) as usize;
                     if cur.len() < plen {
-                        ok = false;
                         break;
                     }
-                    let path = String::from_utf8(cur[..plen].to_vec())
-                        .unwrap_or_default();
+                    let path = String::from_utf8(cur[..plen].to_vec()).unwrap_or_default();
                     cur = &cur[plen..];
 
                     if cur.len() < 8 {
-                        ok = false;
                         break;
                     }
                     let clen = Self::take_u64(&mut cur).unwrap_or(0) as usize;
                     if cur.len() < clen {
-                        ok = false;
                         break;
                     }
                     let content = cur[..clen].to_vec();

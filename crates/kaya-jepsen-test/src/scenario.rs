@@ -67,7 +67,7 @@ fn workload(workload_type: WorkloadType, clients: usize, duration_secs: u64) -> 
 pub fn smoke_scenario() -> Scenario {
     Scenario {
         id: "smoke",
-        workload: workload(WorkloadType::Register, 1, 30),  // 1 client to keep operations sequential for the simple checker
+        workload: workload(WorkloadType::Register, 1, 30), // 1 client to keep operations sequential for the simple checker
         hooks: vec![],
         duration_secs: 30,
         verify: VerifyMode::Sequential,

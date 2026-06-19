@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[allow(unused_imports)]
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 
@@ -46,8 +47,10 @@ use crate::membership::{
     load_persisted_roster, members_for_add, members_for_remove, parse_raft_snapshot_payload,
     persist_roster, shared_roster, SharedRoster,
 };
+use crate::operator_auth::{
+    decode_admin_payload, ADD_MEMBER_OPCODE, ADMIN_AUTH_PREFIX, REMOVE_MEMBER_OPCODE,
+};
 use crate::raft_persister::RaftPersister;
-use crate::operator_auth::{decode_admin_payload, ADMIN_AUTH_PREFIX, ADD_MEMBER_OPCODE, REMOVE_MEMBER_OPCODE};
 
 // ── public API ────────────────────────────────────────────────────────────────
 
@@ -259,9 +262,10 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
 
     // ── raft listener ─────────────────────────────────────────────────────────
     let (incoming_tx, incoming_rx) = mpsc::channel::<Envelope>(512);
-    let raft_bound = if let Some(ref tls_cfg) = config.tls {
+    let raft_bound = if config.tls.is_some() {
         #[cfg(feature = "tls")]
         {
+            let tls_cfg = config.tls.as_ref().unwrap();
             start_raft_listener_tls(config.raft_addr, incoming_tx, tls_cfg)
                 .await
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::AddrInUse, e))?
@@ -876,8 +880,7 @@ async fn handle_connection<S>(
     self_raft: SocketAddr,
     self_client: SocketAddr,
     operator_token: Option<String>,
-)
-where
+) where
     S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin,
 {
     loop {
@@ -940,26 +943,25 @@ async fn dispatch(
     // payloads when clients present the credential. If server has token set, must match.
     if opcode == ADD_MEMBER_OPCODE || opcode == REMOVE_MEMBER_OPCODE {
         // Peel optional ADMIN prefix + token if present; otherwise treat payload as legacy raw.
-        let (clean_payload, presented) = if payload.len() >= ADMIN_AUTH_PREFIX.len()
-            && payload.starts_with(ADMIN_AUTH_PREFIX)
-        {
-            match decode_admin_payload(&payload) {
-                Ok((got_opcode, inner, tok)) => {
-                    if got_opcode != opcode {
-                        return (
-                            STATUS_INVALID_ARGUMENT,
-                            encode_error_payload("admin opcode mismatch"),
-                        );
+        let (clean_payload, presented) =
+            if payload.len() >= ADMIN_AUTH_PREFIX.len() && payload.starts_with(ADMIN_AUTH_PREFIX) {
+                match decode_admin_payload(&payload) {
+                    Ok((got_opcode, inner, tok)) => {
+                        if got_opcode != opcode {
+                            return (
+                                STATUS_INVALID_ARGUMENT,
+                                encode_error_payload("admin opcode mismatch"),
+                            );
+                        }
+                        (inner, tok)
                     }
-                    (inner, tok)
+                    Err(e) => {
+                        return (STATUS_INVALID_ARGUMENT, encode_error_payload(&e));
+                    }
                 }
-                Err(e) => {
-                    return (STATUS_INVALID_ARGUMENT, encode_error_payload(&e));
-                }
-            }
-        } else {
-            (payload, None)
-        };
+            } else {
+                (payload, None)
+            };
 
         if let Some(expected) = &operator_token {
             if presented.as_deref() != Some(expected.as_str()) {

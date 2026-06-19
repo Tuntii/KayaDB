@@ -28,9 +28,9 @@ use tokio::sync::mpsc;
 #[cfg(feature = "tls")]
 use std::sync::Arc;
 #[cfg(feature = "tls")]
-use tokio_rustls::{TlsAcceptor, TlsConnector};
-#[cfg(feature = "tls")]
 use tokio_rustls::rustls::ServerConfig;
+#[cfg(feature = "tls")]
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use kaya_raft::{Envelope, NodeId};
 
@@ -75,7 +75,9 @@ mod tls_impl {
         let mut reader = BufReader::new(certfile);
         rustls_pemfile::certs(&mut reader)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad certs: {e}")))
+            .map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad certs: {e}"))
+            })
     }
 
     pub(crate) fn load_private_key(path: &PathBuf) -> std::io::Result<PrivateKeyDer<'static>> {
@@ -83,8 +85,12 @@ mod tls_impl {
         let mut reader = BufReader::new(keyfile);
         let mut keys = rustls_pemfile::pkcs8_private_keys(&mut reader)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad key: {e}")))?;
-        keys.pop().map(PrivateKeyDer::Pkcs8).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no private key found"))
+            .map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad key: {e}"))
+            })?;
+        keys.pop().map(PrivateKeyDer::Pkcs8).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "no private key found")
+        })
     }
 
     pub(crate) async fn build_server_config(
@@ -98,11 +104,15 @@ mod tls_impl {
                 let ca_certs = load_certs(ca_path)?;
                 let mut root_store = rustls::RootCertStore::empty();
                 for cert in ca_certs {
-                    root_store.add(cert).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                    root_store
+                        .add(cert)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
                 }
                 ServerConfig::builder()
                     .with_client_cert_verifier(
-                        rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store)).build().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+                        rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
+                            .build()
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
                     )
                     .with_single_cert(certs, key)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
@@ -401,7 +411,10 @@ pub async fn roundtrip_tls(
 
     let resp_len = tls_stream.read_u32_le().await? as usize;
     if resp_len < 2 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "response frame too short"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "response frame too short",
+        ));
     }
     let status = tls_stream.read_u16_le().await?;
     let body_len = resp_len - 2;
@@ -413,7 +426,11 @@ pub async fn roundtrip_tls(
 }
 
 #[cfg(feature = "tls")]
-pub async fn send_envelopes_tls(envelopes: Vec<Envelope>, roster: &NodeRoster, tls_config: &TlsConfig) {
+pub async fn send_envelopes_tls(
+    envelopes: Vec<Envelope>,
+    roster: &NodeRoster,
+    tls_config: &TlsConfig,
+) {
     if envelopes.is_empty() {
         return;
     }
@@ -433,11 +450,17 @@ pub async fn send_envelopes_tls(envelopes: Vec<Envelope>, roster: &NodeRoster, t
 }
 
 #[cfg(feature = "tls")]
-async fn send_to_addr_tls(addr: SocketAddr, envs: &[Envelope], tls_config: &TlsConfig) -> std::io::Result<()> {
+async fn send_to_addr_tls(
+    addr: SocketAddr,
+    envs: &[Envelope],
+    tls_config: &TlsConfig,
+) -> std::io::Result<()> {
     let root_store = if let Some(ca) = &tls_config.ca_path {
         let cas = tls_impl::load_certs(ca)?;
         let mut store = rustls::RootCertStore::empty();
-        for c in cas { let _ = store.add(c); }
+        for c in cas {
+            let _ = store.add(c);
+        }
         store
     } else {
         rustls::RootCertStore::empty()

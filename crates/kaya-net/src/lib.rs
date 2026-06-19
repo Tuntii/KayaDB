@@ -8,13 +8,13 @@ pub use codec::{
     decode_scan_response, decode_value_payload, encode_admin_payload, encode_envelope,
     encode_error_payload, encode_key_payload, encode_member_payload, encode_put_payload,
     encode_remove_member_payload, encode_scan_payload, encode_scan_response, encode_value_payload,
-    ADMIN_AUTH_PREFIX, ADD_MEMBER_OPCODE, REMOVE_MEMBER_OPCODE,
+    ADD_MEMBER_OPCODE, ADMIN_AUTH_PREFIX, REMOVE_MEMBER_OPCODE,
 };
 pub use roster::NodeRoster;
 pub use transport::{
     encode_client_frame, read_client_frame, roundtrip, send_envelopes, start_raft_listener,
-    write_client_response, STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND,
-    STATUS_NOT_LEADER, STATUS_OK, TlsConfig,
+    write_client_response, TlsConfig, STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND,
+    STATUS_NOT_LEADER, STATUS_OK,
 };
 
 #[cfg(feature = "tls")]

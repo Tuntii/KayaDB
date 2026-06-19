@@ -143,7 +143,8 @@ async fn run_client(
         // Reconnect on error to handle killed nodes / leader changes (helps avoid stale connections causing spurious errors/violations)
         // Simple heuristic: if last op had error recorded, try a different node.
         // Note: actual errors are inside the op functions; here we just periodically re-pick to be resilient.
-        if rng.gen_bool(0.1) {  // occasionally re-resolve to handle partitions/kills
+        if rng.gen_bool(0.1) {
+            // occasionally re-resolve to handle partitions/kills
             let new_node = nodes[rng.gen_range(0..nodes.len())];
             if let Ok(new_client) = KayaClient::connect(new_node).await {
                 client = new_client;
@@ -189,7 +190,11 @@ async fn run_register_op<R: Rng>(
         if let Some(value) = got {
             history.record(client_id, op, OperationResult::Value(value));
         } else {
-            history.record(client_id, op, OperationResult::Error("get failed after retries".into()));
+            history.record(
+                client_id,
+                op,
+                OperationResult::Error("get failed after retries".into()),
+            );
         }
     } else {
         // PUT - retry until Ok
@@ -202,7 +207,7 @@ async fn run_register_op<R: Rng>(
         for _ in 0..5 {
             match client.put(key, &value).await {
                 Ok(()) => {
-                    history.record(client_id, op, OperationResult::Ok);
+                    history.record(client_id, op.clone(), OperationResult::Ok);
                     success = true;
                     break;
                 }
@@ -212,7 +217,11 @@ async fn run_register_op<R: Rng>(
             }
         }
         if !success {
-            history.record(client_id, op, OperationResult::Error("put failed after retries".into()));
+            history.record(
+                client_id,
+                op,
+                OperationResult::Error("put failed after retries".into()),
+            );
         }
     }
 }

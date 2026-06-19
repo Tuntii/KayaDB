@@ -18,6 +18,10 @@ kaya-wal.workspace = true
 kaya-net.workspace = true
 tokio.workspace = true
 
+[features]
+default = []
+tls = ["kaya-net/tls"]
+
 [[bin]]
 name = "kayactl"
 path = "src/main.rs"

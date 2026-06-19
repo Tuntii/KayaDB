@@ -881,8 +881,7 @@ mod tests {
         let leader_addr = leader_addr.expect("no leader elected in token-protected cluster");
 
         // A would-be add payload (no 4th node actually started)
-        let add_payload =
-            encode_member_payload(99, "127.0.0.1:19991", "127.0.0.1:19992");
+        let add_payload = encode_member_payload(99, "127.0.0.1:19991", "127.0.0.1:19992");
 
         // 1) try add without token (raw payload) -> must error
         let (status, _body) = roundtrip(leader_addr, 7, &add_payload).await.unwrap();
@@ -894,16 +893,14 @@ mod tests {
         // 2) try with wrong token -> error
         let wrong_admin = encode_admin_payload(7, &add_payload, Some("wrong-token-xyz"));
         let (status, _body) = roundtrip(leader_addr, 7, &wrong_admin).await.unwrap();
-        assert_ne!(
-            status, 0,
-            "add with wrong token should be rejected"
-        );
+        assert_ne!(status, 0, "add with wrong token should be rejected");
 
         // 3) try with correct token -> succeeds (status 0)
         let correct_admin = encode_admin_payload(7, &add_payload, Some(&token));
         let (status, _body) = roundtrip(leader_addr, 7, &correct_admin).await.unwrap();
         assert_eq!(
-            status, 0,
+            status,
+            0,
             "add with correct operator token should succeed: {:?}",
             String::from_utf8_lossy(&_body)
         );
@@ -912,11 +909,17 @@ mod tests {
         // (token is only for admin membership ops)
         let put_payload = encode_put_payload(b"token-test-key", b"token-test-val");
         let (status, _body) = roundtrip(leader_addr, 1, &put_payload).await.unwrap();
-        assert_eq!(status, 0, "put should succeed without providing operator token");
+        assert_eq!(
+            status, 0,
+            "put should succeed without providing operator token"
+        );
 
         let get_payload = encode_key_payload(b"token-test-key");
         let (status, body) = roundtrip(leader_addr, 2, &get_payload).await.unwrap();
-        assert_eq!(status, 0, "get should succeed without providing operator token");
+        assert_eq!(
+            status, 0,
+            "get should succeed without providing operator token"
+        );
         let val = decode_value_payload(&body).expect("decode get value");
         assert_eq!(val, b"token-test-val".to_vec(), "data op roundtrip value");
 
