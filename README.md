@@ -270,7 +270,7 @@ Detailed numbers and methodology live in [BENCHMARKS.md](BENCHMARKS.md).
 
 See the **[full status and roadmap](ROADMAP.md)** and the tracked **[productization north star](docs/productization.md)** (M13 exit gates — prototype → deployable product).
 
-KayaDB is experimental today but is **deliberately being evolved into a deployable product** once durability, auth/TLS, chaos validation, and ops runbooks are complete. Current gaps include unauthenticated admin RPCs and in-memory Raft state across restarts. Read the [Security guide](docs/security.md) before any deployment.
+KayaDB is experimental today but is **deliberately being evolved into a deployable product** once durability, auth/TLS, chaos validation, and ops runbooks are complete. See `docs/runbooks/` for day-2 procedures. Current gaps include unauthenticated admin RPCs (progress on operator tokens + mTLS sidecars) and full production hardening. Read the [Security guide](docs/security.md) before any deployment.
 
 For the complete picture and deeper explanations, use the **[official GitBook documentation](docs/README.md)**.
 

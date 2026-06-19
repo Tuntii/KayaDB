@@ -27,7 +27,8 @@ Correctness-first milestones (local engine, simulation, Raft, membership, snapsh
 2. **Authenticated transport** — TLS (or documented mTLS sidecar pattern) on Raft and client ports; `ADD_MEMBER` / `REMOVE_MEMBER` require operator credentials.
 3. **Chaos proof** 🟡 — Rust `kaya-jepsen-test` harness + T1–T7 + sequential/WGL verify. T7 snapshot catch-up fixed (embedded SST data in snapshots so restarted followers materialize state). Local scenarios pass.
 4. **Operations** — backup/restore story, rolling restart procedure, `kayactl`/docs for day-2 tasks (add/remove node, detect split-brain symptoms).
-5. **Security audit pass** — [security.md](security.md) enforcement table fully implemented in code, not advisory only.
+   See `docs/runbooks/` for `add-remove-node.md`, `rolling-restart.md`, `backup-restore.md`, `detecting-split-brain.md`.
+5. **Security audit pass** — [security.md](security.md) enforcement table expanded (operator credentials, mTLS sidecar, snapshot protections etc. cross-referenced to code and new runbooks).
 6. **Performance envelope** ✅ — published benchmark methodology + regression budget in CI ([BENCHMARKS.md](../BENCHMARKS.md) gates + `perf_gate` release assertion). CI regression gate runs on every PR/push.
 
 ### Exit criteria (drop the “experimental” label)

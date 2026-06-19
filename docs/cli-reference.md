@@ -371,14 +371,20 @@ Followers may return `NOT_LEADER` for some client operations. When a leader hint
 Propose a joint-consensus membership change on the current leader (requires `--server`).
 
 ```bash
-# Add node 4 after it has started with --join-cluster and seed peers
-kayactl --server 127.0.0.1:7379 add-node 4 127.0.0.1:7484 127.0.0.1:7383
+# Add node 4 (with operator token if the server requires one)
+kayactl --server 127.0.0.1:7379 \
+  --operator-token "$KAYA_OPERATOR_TOKEN" \
+  add-node 4 127.0.0.1:7484 127.0.0.1:7383
 
-# Remove node 4 from the voter set (cannot shrink below 2 voters)
-kayactl --server 127.0.0.1:7379 remove-node 4
+# Remove node 4
+kayactl --server 127.0.0.1:7379 \
+  --operator-token "$KAYA_OPERATOR_TOKEN" \
+  remove-node 4
 ```
 
 These map to client opcodes `ADD_MEMBER` (7) and `REMOVE_MEMBER` (8). The change commits asynchronously; poll `status` on all nodes until `peer_count` reflects the new roster.
+
+See `docs/runbooks/add-remove-node.md` for full day-2 procedures.
 
 ---
 

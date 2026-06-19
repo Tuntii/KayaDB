@@ -62,9 +62,11 @@ For local demos, bind to `127.0.0.1`. For multi-host experiments, bind to a priv
 | Public bind guard | rejects public/wildcard | `--allow-public-bind` | Banner + allow; no built-in auth/TLS | ✅ startup + security.rs |
 | Raft / client frame size | 64 MiB max | compile-time in codec | Oversize → decode error | ✅ |
 | Roster / unknown peer | drop | static at start (RaftNode) | Unknown `from` ids ignored | ✅ |
-| Snapshot file protection (refcounts) | pinned SSTs during active snapshot | engine refcounts + release on new snapshot | Compaction cannot delete live snap data | ✅ kaya-engine (create/install/release) |
-| Durable snapshot on restart | loads `raft-snapshot.bin` + engine state | startup in cluster.rs | Follower/leader restart preserves applied state | ✅ (improved M13 for T7) |
+| Snapshot file protection (refcounts) | pinned SSTs during active snapshot | engine refcounts + release on new snapshot | Compaction cannot delete live snap data | ✅ kaya-engine |
+| Durable snapshot on restart | loads `raft-snapshot.bin` + engine state | startup in cluster.rs | Follower/leader restart preserves applied state | ✅ |
 | Crash safety on snapshot persist | tmp + rename + fsync + dir sync | compaction path | Atomic snapshot file | ✅ |
+| Operator credential on admin ops | none (open) | `--operator-token` / `KAYA_OPERATOR_TOKEN` (server + kayactl) | ADD/REMOVE_MEMBER (op 7/8) require matching token when configured | ✅ (M13) kaya-server + kayactl |
+| mTLS sidecar support | documented | ghostunnel/stunnel + new runbook + scripts | Full transport auth via sidecar (recommended path) | ✅ docs + scripts (M13) |
 
 `kayadb-server` calls security checks before binding listeners. See `crates/kaya-server/src/security.rs` and `cluster.rs` (snapshot load + compaction).
 
@@ -253,7 +255,7 @@ ufw allow from 10.0.0.2 to any port 8379
 - Rotate certs before expiry.
 - Combine with `--operator-token` (required for `add-node` / `remove-node` when set on servers).
 - In K8s consider cert-manager + ghostunnel or Envoy / Linkerd / Istio for automatic mTLS.
-- See `scripts/mtls-sidecar/` for the cert script and compose example.
+- See `scripts/mtls-sidecar/` for the cert script and compose example, and `docs/runbooks/` for day-2 procedures.
 - See `docs/runbooks/mtls-sidecar.md` for operational runbook.
 
 ---

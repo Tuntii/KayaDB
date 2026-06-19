@@ -156,6 +156,8 @@ kayactl --server 127.0.0.1:7381 status --json
 
 ## 4. Küme Üyeliği Yönetimi (Add/Remove Node)
 
+**Günlük operasyonlar için runbook:** `docs/runbooks/add-remove-node.md`
+
 **Yeni düğüm ekleme (join + üyelik değişikliği):**
 
 ```bash
