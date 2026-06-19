@@ -78,9 +78,9 @@ If your network spans across non-trusted environments or requires data-in-transi
 
 We recommend using **[ghostunnel](https://github.com/ghostunnel/ghostunnel)**, a simple SSL/TLS proxy with mutual authentication support, or **stunnel**.
 
-### mTLS Wrapping Example with Ghostunnel:
+### mTLS Wrapping Example with Ghostunnel (basic)
 
-For each KayaDB node:
+For each KayaDB node (single-node sketch):
 1. **Secure Raft Port:**
    Set up `ghostunnel` on each node to listen on public port `8481` (with mTLS certificates) and proxy to local KayaDB Raft listener on `127.0.0.1:7481`.
    ```bash
@@ -94,6 +94,167 @@ For each KayaDB node:
    ```
 2. **Secure Client Port:**
    Configure a similar wrapper for the client endpoint to ensure client-to-server traffic is fully encrypted.
+
+---
+
+### Production mTLS with Sidecar (copy-paste demo)
+
+For production-like authenticated transport use **ghostunnel sidecars** (mTLS on "public" ports, plain TCP only to localhost KayaDB).
+
+**Together with `--operator-token`** (see operator auth section below) this gives:
+- Encrypted + mutually-authenticated transport (mTLS)
+- Authorization for sensitive membership operations (operator token)
+
+**This is the supported pattern until native TLS is added to KayaDB.**
+
+### Step-by-step (3-node demo)
+
+#### 1. Generate certs (self-signed for demo only)
+
+```bash
+# From repo root
+mkdir -p certs
+CERTS_DIR=./certs ./scripts/mtls-sidecar/setup-certs.sh
+```
+
+This creates:
+- `ca.crt` / `ca.key`
+- `node1.p12`, `node2.p12`, `node3.p12` (for sidecars + inter-node client auth)
+- `client.p12` (for external clients / kayactl via proxy)
+
+**Production warning:** Never use these self-signed certs in real deployments. Use your CA, short lifetimes, and secrets management. Protect all `.key`/`.p12` files (chmod 600, never commit).
+
+#### 2. Start plain KayaDB nodes (localhost only)
+
+Use the usual scripts or manual (bind to 127.0.0.1, **never** 0.0.0.0 without sidecar + firewall).
+
+```bash
+# Example: start internal plain cluster
+CLUSTER_DIR=/tmp/kayadb-mtls-demo ./scripts/start-cluster.sh
+```
+
+Each node listens only on `127.0.0.1:7481` (raft) / `127.0.0.1:7379` (client) etc.
+
+Start servers with the operator token for protected membership:
+
+```bash
+# (when not using the start script directly)
+kayadb-server \
+  --node-id 1 \
+  --raft-addr 127.0.0.1:7481 \
+  --client-addr 127.0.0.1:7379 \
+  ... \
+  --operator-token "super-secret-demo-token-CHANGE-ME"
+```
+
+#### 3. Start the mTLS sidecar wrappers
+
+**Option A: Manual (one shell / node)**
+
+For node 1 (repeat for 2/3 with incremented ports):
+
+```bash
+# Raft sidecar (mTLS public 8481 -> plain internal 7481)
+ghostunnel server \
+  --listen 0.0.0.0:8481 \
+  --target 127.0.0.1:7481 \
+  --keystore certs/node1.p12 \
+  --cacert certs/ca.crt \
+  --allow-cn node1.kaya.local \
+  --allow-cn node2.kaya.local \
+  --allow-cn node3.kaya.local \
+  --allow-cn admin-client.kaya.local
+
+# Client sidecar (in another terminal)
+ghostunnel server \
+  --listen 0.0.0.0:8379 \
+  --target 127.0.0.1:7379 \
+  --keystore certs/node1.p12 \
+  --cacert certs/ca.crt \
+  --allow-cn node1.kaya.local \
+  --allow-cn node2.kaya.local \
+  --allow-cn node3.kaya.local \
+  --allow-cn admin-client.kaya.local
+```
+
+**Option B: Docker Compose (recommended for local 3-node demo)**
+
+```bash
+# From repo root (after generating certs)
+cd scripts/mtls-sidecar
+CERTS_DIR=../../certs docker compose -f docker-compose.mtls.yml up -d
+
+# Verify
+docker compose -f docker-compose.mtls.yml ps
+```
+
+See the compose file comments for exposed ports:
+- Raft mTLS: `8481,8482,8483`
+- Client mTLS: `8379,8380,8381`
+- Convenience local proxy for kayactl: `127.0.0.1:7399`
+
+#### 4. Connect clients / kayactl to the TLS side (via local proxy)
+
+Because kayactl (and most current clients) speak plain TCP, run a **client-mode** ghostunnel proxy locally:
+
+```bash
+# One-time: proxy plain local port to the mTLS client sidecar
+ghostunnel client \
+  --listen 127.0.0.1:7399 \
+  --target 127.0.0.1:8379 \
+  --keystore certs/client.p12 \
+  --cacert certs/ca.crt
+```
+
+Now use the plain proxy port:
+
+```bash
+# Status (no token needed for read ops)
+kayactl --server 127.0.0.1:7399 status --json
+
+# Write
+kayactl --server 127.0.0.1:7399 put hello world
+
+# Membership operations REQUIRE the operator token
+# (servers must also be started with --operator-token)
+kayactl --server 127.0.0.1:7399 \
+  --operator-token "super-secret-demo-token-CHANGE-ME" \
+  add-node 4 127.0.0.1:7484 127.0.0.1:7383
+```
+
+**Point kayactl / clients at the local proxy port (or any node’s client mTLS via its own client proxy).** The sidecar performs the mTLS handshake on your behalf.
+
+If your custom client supports TLS + client certs, you can point it directly at `127.0.0.1:8379` (or remote public equivalent) presenting `client.p12` (or equiv).
+
+#### 5. Firewall / network rules
+
+- **Allow** inbound TCP to the **mTLS ports only** (`8481-8483`, `8379-8381`) **from**:
+  - Other cluster nodes (for raft)
+  - Authorized app servers + operator machines (for client)
+- **Deny** everything else to those ports.
+- **Never** allow direct access to the plain internal ports (`7481-7483`, `7379-7381`) from outside localhost / the sidecar containers.
+- On multi-host: use security groups / iptables / cloud firewalls. Sidecar ports become the only externally reachable.
+
+Example (ufw):
+
+```bash
+# Only from the other node IPs + your client hosts
+ufw allow from 10.0.0.2 to any port 8481
+ufw allow from 10.0.0.2 to any port 8379
+# ... repeat for 8482/3 + 8380/1
+# No rules for 7xxx
+```
+
+#### Full production notes
+
+- Run ghostunnel under the same unprivileged user or as a systemd unit / container sidecar.
+- Mount certs read-only.
+- Monitor ghostunnel logs for auth failures.
+- Rotate certs before expiry.
+- Combine with `--operator-token` (required for `add-node` / `remove-node` when set on servers).
+- In K8s consider cert-manager + ghostunnel or Envoy / Linkerd / Istio for automatic mTLS.
+- See `scripts/mtls-sidecar/` for the cert script and compose example.
+- See `docs/runbooks/mtls-sidecar.md` for operational runbook.
 
 ---
 

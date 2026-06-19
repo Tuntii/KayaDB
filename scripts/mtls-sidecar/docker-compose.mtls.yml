@@ -1,0 +1,174 @@
+version: "3.8"
+
+# docker-compose.mtls.yml
+#
+# Example that provides ghostunnel mTLS sidecar wrappers around 3 KayaDB nodes.
+#
+# PRE-REQS:
+#   1. Generate certs first:
+#        CERTS_DIR=$(pwd)/certs ./scripts/mtls-sidecar/setup-certs.sh
+#   2. Start the 3 KayaDB nodes on their *plain* localhost ports, e.g.:
+#        CLUSTER_DIR=/tmp/kayadb-mtls-demo ./scripts/start-cluster.sh
+#      (nodes listen on 127.0.0.1:7481/7379 etc.)
+#
+#   3. (Optional) Install ghostunnel docker image:
+#      docker pull ghostunnel/ghostunnel:v1.7.1   # or latest
+#
+# USAGE (Linux/macOS with Docker + network_mode:host support):
+#   cd scripts/mtls-sidecar
+#   CERTS_DIR=../../certs docker compose -f docker-compose.mtls.yml up -d
+#
+#   This brings up:
+#     - raft-sidecar-1/2/3   : mTLS on 8481/8482/8483  -> plain localhost 748x
+#     - client-sidecar-1/2/3 : mTLS on 8379/8380/8381  -> plain localhost 737x
+#     - client-proxy         : plain 127.0.0.1:7399    -> mTLS to node1 client sidecar (use this for kayactl)
+#
+# To talk from outside:
+#   kayactl --server 127.0.0.1:7399 status
+#   # or directly (if your kayactl/tool supports TLS - most don't yet):
+#   # point at the sidecar TLS port and handle mTLS at the tool layer.
+#
+# IMPORTANT:
+# - Raft inter-node traffic in this demo uses the *plain internal* addresses.
+#   In real multi-host prod each host runs *additional* ghostunnel *client* proxies
+#   (using that node's .p12) listening locally, and --peer points at the local plain proxies.
+#   The public mTLS ports are what remote hosts' client-proxies dial.
+# - Firewall: only expose the mTLS sidecar ports (8xxx). Never expose plain 7xxx publicly.
+# - Use --operator-token on both kayadb-server and kayactl for membership ops.
+# - These are demo self-signed certs. See setup-certs.sh header.
+#
+# Stop:
+#   docker compose -f docker-compose.mtls.yml down
+#
+# Customize ports, add real DNS names, or move to k8s DaemonSet/sidecar pattern.
+
+services:
+  # --- Raft mTLS server-side wrappers (incoming from peers / operators) ---
+  raft-sidecar-1:
+    image: ghostunnel/ghostunnel:v1.7.1
+    network_mode: "host"
+    restart: unless-stopped
+    volumes:
+      - ${CERTS_DIR:-../../certs}:/certs:ro
+    command: >
+      server
+      --listen 0.0.0.0:8481
+      --target 127.0.0.1:7481
+      --keystore /certs/node1.p12
+      --cacert /certs/ca.crt
+      --allow-cn node1.kaya.local
+      --allow-cn node2.kaya.local
+      --allow-cn node3.kaya.local
+      --allow-cn admin-client.kaya.local
+
+  raft-sidecar-2:
+    image: ghostunnel/ghostunnel:v1.7.1
+    network_mode: "host"
+    restart: unless-stopped
+    volumes:
+      - ${CERTS_DIR:-../../certs}:/certs:ro
+    command: >
+      server
+      --listen 0.0.0.0:8482
+      --target 127.0.0.1:7482
+      --keystore /certs/node2.p12
+      --cacert /certs/ca.crt
+      --allow-cn node1.kaya.local
+      --allow-cn node2.kaya.local
+      --allow-cn node3.kaya.local
+      --allow-cn admin-client.kaya.local
+
+  raft-sidecar-3:
+    image: ghostunnel/ghostunnel:v1.7.1
+    network_mode: "host"
+    restart: unless-stopped
+    volumes:
+      - ${CERTS_DIR:-../../certs}:/certs:ro
+    command: >
+      server
+      --listen 0.0.0.0:8483
+      --target 127.0.0.1:7483
+      --keystore /certs/node3.p12
+      --cacert /certs/ca.crt
+      --allow-cn node1.kaya.local
+      --allow-cn node2.kaya.local
+      --allow-cn node3.kaya.local
+      --allow-cn admin-client.kaya.local
+
+  # --- Client mTLS server-side wrappers (incoming from applications / kayactl) ---
+  client-sidecar-1:
+    image: ghostunnel/ghostunnel:v1.7.1
+    network_mode: "host"
+    restart: unless-stopped
+    volumes:
+      - ${CERTS_DIR:-../../certs}:/certs:ro
+    command: >
+      server
+      --listen 0.0.0.0:8379
+      --target 127.0.0.1:7379
+      --keystore /certs/node1.p12
+      --cacert /certs/ca.crt
+      --allow-cn node1.kaya.local
+      --allow-cn node2.kaya.local
+      --allow-cn node3.kaya.local
+      --allow-cn admin-client.kaya.local
+
+  client-sidecar-2:
+    image: ghostunnel/ghostunnel:v1.7.1
+    network_mode: "host"
+    restart: unless-stopped
+    volumes:
+      - ${CERTS_DIR:-../../certs}:/certs:ro
+    command: >
+      server
+      --listen 0.0.0.0:8380
+      --target 127.0.0.1:7380
+      --keystore /certs/node2.p12
+      --cacert /certs/ca.crt
+      --allow-cn node1.kaya.local
+      --allow-cn node2.kaya.local
+      --allow-cn node3.kaya.local
+      --allow-cn admin-client.kaya.local
+
+  client-sidecar-3:
+    image: ghostunnel/ghostunnel:v1.7.1
+    network_mode: "host"
+    restart: unless-stopped
+    volumes:
+      - ${CERTS_DIR:-../../certs}:/certs:ro
+    command: >
+      server
+      --listen 0.0.0.0:8381
+      --target 127.0.0.1:7381
+      --keystore /certs/node3.p12
+      --cacert /certs/ca.crt
+      --allow-cn node1.kaya.local
+      --allow-cn node2.kaya.local
+      --allow-cn node3.kaya.local
+      --allow-cn admin-client.kaya.local
+
+  # --- Convenience client-side proxy (plain local -> mTLS to node 1 client sidecar) ---
+  # Point kayactl / apps here. Uses the admin client cert to satisfy mTLS.
+  # In production you would run an equivalent per-client host or in your app's outbound path.
+  client-proxy:
+    image: ghostunnel/ghostunnel:v1.7.1
+    network_mode: "host"
+    restart: unless-stopped
+    volumes:
+      - ${CERTS_DIR:-../../certs}:/certs:ro
+    command: >
+      client
+      --listen 127.0.0.1:7399
+      --target 127.0.0.1:8379
+      --keystore /certs/client.p12
+      --cacert /certs/ca.crt
+
+# Example access after up:
+#   kayactl --server 127.0.0.1:7399 --operator-token "..." status
+#   kayactl --server 127.0.0.1:7399 --operator-token "..." put demo:1 value
+#
+# To reach via "public" TLS port directly (requires TLS client support in caller):
+#   kayactl would normally not; instead use the local plain proxy above.
+#
+# Firewall note: allow inbound only to 8481-8483 and 8379-8381 (mTLS) from trusted sources.
+# Block 7379-7381 and 7481-7483 from anything except localhost / the sidecars.
