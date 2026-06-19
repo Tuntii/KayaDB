@@ -54,7 +54,7 @@ If any of those assumptions are false in your environment, treat KayaDB as a loc
 
 For local demos, bind to `127.0.0.1`. For multi-host experiments, bind to a private subnet address and enforce firewall rules before starting the node.
 
-### Server enforcement (M11 + M13 progress)
+### Server enforcement (M11 + M13 final)
 
 | Control | Default | Override / Location | Effect | Enforced in code? |
 |---|---|---|---|---|
@@ -66,11 +66,16 @@ For local demos, bind to `127.0.0.1`. For multi-host experiments, bind to a priv
 | Durable snapshot on restart | loads `raft-snapshot.bin` + engine state | startup in cluster.rs | Follower/leader restart preserves applied state | ✅ |
 | Crash safety on snapshot persist | tmp + rename + fsync + dir sync | compaction path | Atomic snapshot file | ✅ |
 | Operator credential on admin ops | none (open) | `--operator-token` / `KAYA_OPERATOR_TOKEN` (server + kayactl) | ADD/REMOVE_MEMBER (op 7/8) require matching token when configured | ✅ (M13) kaya-server + kayactl |
-| mTLS sidecar support | documented | ghostunnel/stunnel + new runbook + scripts | Full transport auth via sidecar (recommended path) | ✅ docs + scripts (M13) |
+| TLS configuration validation | no TLS by default | `--tls-cert` / `--tls-key` / `--tls-ca` + env vars (when `tls` feature enabled) | Listeners use rustls; invalid paths/config fail startup | ✅ kaya-server + kaya-net (feature-gated) |
+| mTLS sidecar support | documented | ghostunnel/stunnel + runbook + scripts | Full transport auth via sidecar | ✅ |
+| Native TLS transport (raft + client) | `tls` feature + --tls-* flags | kaya-net + kaya-server + kaya-client | In-process rustls encryption (mTLS optional) | ✅ (M13) |
+| Client-side TLS + token usage | plain TCP + no token | `kayactl --tls --tls-ca-cert ... --operator-token ...` | Authenticated + encrypted client + admin ops | ✅ kayactl + kaya-client |
 
-`kayadb-server` calls security checks before binding listeners. See `crates/kaya-server/src/security.rs` and `cluster.rs` (snapshot load + compaction).
+`kayadb-server` calls security checks before binding listeners. See `crates/kaya-server/src/security.rs` and `cluster.rs` (snapshot load + compaction, TLS listener setup).
 
-Treat `--allow-public-bind` as explicit ack that you have perimeter controls (firewall + mTLS sidecar or equivalent).
+Treat `--allow-public-bind` as explicit ack that you have perimeter controls (firewall + mTLS sidecar or native TLS).
+
+**M13 progress:** Operator token (admin auth) + native TLS transport are implemented (feature-gated). See runbooks for day-2 usage.
 
 ---
 
@@ -107,7 +112,7 @@ For production-like authenticated transport use **ghostunnel sidecars** (mTLS on
 - Encrypted + mutually-authenticated transport (mTLS)
 - Authorization for sensitive membership operations (operator token)
 
-**This is the supported pattern until native TLS is added to KayaDB.**
+**Native TLS is now available** (behind `tls` feature). Sidecar remains a zero-change option for existing deploys.
 
 ### Step-by-step (3-node demo)
 
@@ -255,8 +260,12 @@ ufw allow from 10.0.0.2 to any port 8379
 - Rotate certs before expiry.
 - Combine with `--operator-token` (required for `add-node` / `remove-node` when set on servers).
 - In K8s consider cert-manager + ghostunnel or Envoy / Linkerd / Istio for automatic mTLS.
-- See `scripts/mtls-sidecar/` for the cert script and compose example, and `docs/runbooks/` for day-2 procedures.
-- See `docs/runbooks/mtls-sidecar.md` for operational runbook.
+- See `scripts/mtls-sidecar/` for the cert script and compose example, and `docs/runbooks/` for day-2 procedures:
+- `add-remove-node.md`
+- `rolling-restart.md`
+- `backup-restore.md`
+- `detecting-split-brain.md`
+- `mtls-sidecar.md` (sidecar operations + native TLS notes)
 
 ---
 
@@ -321,14 +330,15 @@ Never paste inspection output from real datasets into public issue trackers unle
 
 ---
 
-## 7. What KayaDB Does Not Yet Provide
+## 7. What KayaDB Does Not Yet Provide (post M13)
 
-- Authentication or authorization.
-- TLS/mTLS built into the server.
-- Encrypted storage files.
+- Full built-in authentication/authorization (operator token protects only membership ops).
+- Encrypted storage files (data at rest).
 - Multi-tenant isolation.
-- Automatic TLS or auth on membership/admin RPCs (ADD_MEMBER is leader-only but unauthenticated).
+- Automatic client cert enforcement on every connection (opt-in via `require_client_cert` + sidecar).
 - Audit logging suitable for compliance.
-- A hardened remote administration API.
+- A hardened remote administration API beyond current `kayactl`.
 
-These are future hardening areas. Until they exist, infrastructure-level isolation is mandatory.
+**Native TLS + operator token** now provide transport encryption and basic admin auth. Infrastructure controls (firewall, mTLS sidecar, operator token) remain mandatory for production.
+
+These remaining items are future hardening areas.

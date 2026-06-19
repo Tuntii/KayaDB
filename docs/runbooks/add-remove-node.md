@@ -57,9 +57,11 @@ Monitor until `peer_count` decreases on all remaining nodes.
 ## Tips
 - Always target a current leader when possible (`kayactl status` shows role).
 - Use `--operator-token` (or set `KAYA_OPERATOR_TOKEN`) if the servers require it.
+- When using native TLS (`--tls-*` flags or `tls` feature), point `kayactl` at the mTLS endpoint (or use a local client proxy if using sidecars). See `docs/runbooks/mtls-sidecar.md`.
 - After removal, you can safely shut down the node process and delete its data dir (after making sure it is no longer in the roster).
 
 See also:
 - `docs/runbooks/rolling-restart.md`
-- `docs/security.md` (operator credentials section)
+- `docs/runbooks/mtls-sidecar.md` (TLS connection details)
+- `docs/security.md` (operator credentials + native TLS sections)
 - `scripts/start-cluster.sh` and related scripts for local testing.

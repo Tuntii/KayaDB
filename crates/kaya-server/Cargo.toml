@@ -20,6 +20,10 @@ kaya-net.workspace = true
 kaya-raft = { workspace = true, features = ["disk-storage"] }
 tokio.workspace = true
 
+[features]
+default = []
+tls = ["kaya-net/tls"]
+
 [lib]
 path = "src/lib.rs"
 

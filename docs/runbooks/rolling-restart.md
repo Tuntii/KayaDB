@@ -44,13 +44,15 @@ Goal: restart nodes one-by-one with minimal disruption.
 - No linearizability violations in ongoing workloads (if running chaos or client load).
 
 ## With Operator Token
-The token is not usually needed for pure restarts (only for membership changes).
+The token is not usually needed for pure restarts (only for membership changes). If using `--tls-*` for native TLS, ensure clients/kayactl connect via the TLS-wrapped ports.
 
 ## Tips
 - Do not restart more than one node at a time.
 - In production, combine with load balancer / client retry logic.
 - Use `scripts/restart-node.sh` (or `.ps1`) for local/scripted testing.
+- When TLS is enabled, verify the restarted node re-establishes TLS handshakes successfully.
 
 See also:
 - `docs/runbooks/add-remove-node.md`
 - `docs/runbooks/detecting-split-brain.md`
+- `docs/runbooks/mtls-sidecar.md` and native TLS in security.md

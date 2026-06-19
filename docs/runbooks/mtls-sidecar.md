@@ -4,7 +4,14 @@ This runbook covers day-2 operations for the recommended mTLS sidecar pattern us
 
 **See also:** [Security & Deployment Guide](../security.md#production-mtls-with-sidecar-copy-paste-demo)
 
-The sidecar pattern keeps KayaDB itself free of TLS dependencies while providing authenticated transport for Raft and client traffic.
+The sidecar pattern keeps KayaDB itself free of TLS dependencies.
+
+**Native in-process TLS** (via `tls` feature + `--tls-cert` / `--tls-key` / `--tls-ca` flags or env vars) is now implemented for Raft and client listeners. Sidecar remains useful for:
+- Builds without the `tls` feature
+- Additional proxy features (e.g. rate limiting, logging)
+- Gradual migration
+
+Use `--operator-token` together with either approach for authenticated membership changes.
 
 **Prerequisites**
 - `ghostunnel` binary or the Docker image (`ghostunnel/ghostunnel`)
@@ -85,16 +92,20 @@ The token protects `ADD_MEMBER`/`REMOVE_MEMBER` at the KayaDB layer. mTLS protec
 ## Verifying the Setup
 
 ```bash
-# From a client host
-curl -v --cacert certs/ca.crt --cert certs/client.crt --key certs/client.key \
-  https://127.0.0.1:8379   # won't work directly (plain protocol) but shows handshake
+# From a client host (through local proxy)
+kayactl --server 127.0.0.1:7399 status
 
-# Or just use kayactl through proxy + check sidecar logs for "accepted connection"
+# With operator token for membership
+kayactl --server 127.0.0.1:7399 \
+  --operator-token "$KAYA_OPERATOR_TOKEN" \
+  status
 ```
 
 On the server sidecar logs you should see successful `TLS handshake complete` from allowed CNs.
 
-Use `kayactl --server ... status` and confirm cluster is healthy.
+When using **native TLS** (no sidecar), point kayactl directly at the TLS port and use `--tls --tls-ca-cert`.
+
+Use `kayactl --server ... status` and confirm cluster is healthy. Also run `kayactl recover --dry-run` on data dirs after any restore.
 
 ## Inter-node Raft over mTLS (production hosts)
 

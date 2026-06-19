@@ -1,9 +1,12 @@
 use kaya_core::{KayaError, Result};
 use kaya_net::{
     decode_error_payload, decode_scan_response, decode_value_payload, encode_key_payload,
-    encode_put_payload, encode_scan_payload, roundtrip, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND,
+    encode_put_payload, encode_scan_payload, roundtrip, TlsConfig, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND,
     STATUS_NOT_LEADER, STATUS_OK,
 };
+
+#[cfg(feature = "tls")]
+use kaya_net::roundtrip_tls;
 use kaya_sim::{LinearizabilityChecker, Op, OpResult};
 use std::net::SocketAddr;
 
@@ -11,6 +14,7 @@ pub struct KayaClient {
     addr: SocketAddr,
     max_redirects: usize,
     trace: Option<LinearizabilityChecker>,
+    tls_config: Option<TlsConfig>,
 }
 
 impl KayaClient {
@@ -19,6 +23,17 @@ impl KayaClient {
             addr,
             max_redirects: 3,
             trace: None,
+            tls_config: None,
+        })
+    }
+
+    #[cfg(feature = "tls")]
+    pub async fn connect_tls(addr: SocketAddr, tls_config: TlsConfig) -> Result<Self> {
+        Ok(Self {
+            addr,
+            max_redirects: 3,
+            trace: None,
+            tls_config: Some(tls_config),
         })
     }
 
@@ -65,7 +80,15 @@ impl KayaClient {
         let mut last_error = None;
 
         for attempt in 0..=self.max_redirects {
-            match roundtrip(current_addr, opcode, payload).await {
+            let res: Result<(u16, Vec<u8>)> = if let Some(ref tls_cfg) = self.tls_config {
+                #[cfg(feature = "tls")]
+                { roundtrip_tls(current_addr, opcode, payload, tls_cfg).await.map_err(Into::into) }
+                #[cfg(not(feature = "tls"))]
+                { Err(KayaError::internal("tls not compiled in")) }
+            } else {
+                roundtrip(current_addr, opcode, payload).await.map_err(Into::into)
+            };
+            match res {
                 Ok((status, body)) => {
                     if status == STATUS_NOT_LEADER {
                         if let Ok(hint_str) = std::str::from_utf8(&body) {

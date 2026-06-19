@@ -35,6 +35,9 @@ fn run() -> Result<()> {
         .or_else(|| env::var("KAYA_OPERATOR_TOKEN").ok())
         .filter(|t| !t.trim().is_empty());
 
+    let use_tls = remove_flag(&mut args, "--tls");
+    let tls_ca_cert = remove_value_flag(&mut args, "--tls-ca-cert");
+
     let server_addrs: Vec<SocketAddr> = remove_all_value_flags(&mut args, "--server")
         .into_iter()
         .map(|s| {

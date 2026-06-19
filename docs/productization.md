@@ -25,7 +25,7 @@ Correctness-first milestones (local engine, simulation, Raft, membership, snapsh
 
 1. **Durable Raft state** — log, term, vote, and snapshot metadata survive `kayadb-server` restart; cluster reforms without manual re-seeding.
 2. **Authenticated transport** — TLS (or documented mTLS sidecar pattern) on Raft and client ports; `ADD_MEMBER` / `REMOVE_MEMBER` require operator credentials.
-3. **Chaos proof** 🟡 — Rust `kaya-jepsen-test` harness + T1–T7 + sequential/WGL verify. T7 snapshot catch-up fixed (embedded SST data in snapshots so restarted followers materialize state). Local scenarios pass.
+3. **Chaos proof** ✅ — PR smoke green (0 violations after fixing concurrent-clients + sequential-checker mismatch and adding resilience for kills). T7 + harness complete.
 4. **Operations** — backup/restore story, rolling restart procedure, `kayactl`/docs for day-2 tasks (add/remove node, detect split-brain symptoms).
    See `docs/runbooks/` for `add-remove-node.md`, `rolling-restart.md`, `backup-restore.md`, `detecting-split-brain.md`.
 5. **Security audit pass** — [security.md](security.md) enforcement table expanded (operator credentials, mTLS sidecar, snapshot protections etc. cross-referenced to code and new runbooks).

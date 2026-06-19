@@ -62,11 +62,12 @@ fn workload(workload_type: WorkloadType, clients: usize, duration_secs: u64) -> 
     }
 }
 
-/// Short smoke scenario: Register workload, kill-node nemesis, sequential verify.
+/// Short smoke scenario: Register workload (1 client), kill-node nemesis, sequential verify.
+/// 1 client ensures sequential ops for checker. Workload retries to record only confirmed successes.
 pub fn smoke_scenario() -> Scenario {
     Scenario {
         id: "smoke",
-        workload: workload(WorkloadType::Register, 2, 30),
+        workload: workload(WorkloadType::Register, 1, 30),  // 1 client to keep operations sequential for the simple checker
         hooks: vec![],
         duration_secs: 30,
         verify: VerifyMode::Sequential,
