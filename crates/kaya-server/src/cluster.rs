@@ -44,6 +44,7 @@ use crate::membership::{
     persist_roster, shared_roster, SharedRoster,
 };
 use crate::raft_persister::RaftPersister;
+use crate::operator_auth::{decode_admin_payload, ADMIN_AUTH_PREFIX, ADD_MEMBER_OPCODE, REMOVE_MEMBER_OPCODE};
 
 // ── public API ────────────────────────────────────────────────────────────────
 
@@ -68,6 +69,10 @@ pub struct ClusterConfig {
     pub heartbeat_interval_ticks: u64,
     /// When true, this node is joining an existing cluster via seed peers only.
     pub join_cluster: bool,
+    /// Optional operator token. If set, ADD/REMOVE_MEMBER (opcodes 7/8) require the
+    /// presented credential (via ADMIN auth prefix) to match exactly. If None, any
+    /// caller may perform membership changes (backward compat for dev).
+    pub operator_token: Option<String>,
 }
 
 impl ClusterConfig {
@@ -100,12 +105,20 @@ impl ClusterConfig {
             election_timeout_ticks: 15 + offset,
             heartbeat_interval_ticks: 3,
             join_cluster: false,
+            operator_token: None,
         }
     }
 
     /// Mark this node as a join-cluster participant (seed `--peer` entries required).
     pub fn with_join_cluster(mut self) -> Self {
         self.join_cluster = true;
+        self
+    }
+
+    /// Require the given operator token for ADD_MEMBER / REMOVE_MEMBER operations.
+    /// Callers must present it using the ADMIN auth framing.
+    pub fn with_operator_token(mut self, token: String) -> Self {
+        self.operator_token = Some(token);
         self
     }
 }
@@ -266,6 +279,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     let self_id = config.node_id;
     let self_raft = config.raft_addr;
     let self_client = config.client_addr;
+    let operator_token = config.operator_token.clone();
 
     let accept_fut = client_accept_loop(
         client_listener,
@@ -280,6 +294,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         self_id,
         self_raft,
         self_client,
+        operator_token,
     );
     // Load persisted Raft snapshot once at startup (before the event loop applies entries).
     // This brings the engine LSM state to the last Raft snapshot point.
@@ -778,6 +793,7 @@ async fn client_accept_loop(
     self_id: NodeId,
     self_raft: SocketAddr,
     self_client: SocketAddr,
+    operator_token: Option<String>,
 ) {
     while let Ok((stream, _peer)) = listener.accept().await {
         let r = raft.clone();
@@ -788,6 +804,7 @@ async fn client_accept_loop(
         let rtx = read_propose_tx.clone();
         let next_id = next_read_req_id.clone();
         let ros = roster.clone();
+        let tok = operator_token.clone();
         tokio::spawn(async move {
             handle_connection(
                 stream,
@@ -802,6 +819,7 @@ async fn client_accept_loop(
                 self_id,
                 self_raft,
                 self_client,
+                tok,
             )
             .await;
         });
@@ -822,6 +840,7 @@ async fn handle_connection(
     self_id: NodeId,
     self_raft: SocketAddr,
     self_client: SocketAddr,
+    operator_token: Option<String>,
 ) {
     loop {
         let (opcode, payload) = match read_client_frame(&mut stream).await {
@@ -840,6 +859,7 @@ async fn handle_connection(
             self_id,
             self_raft,
             self_client,
+            operator_token.clone(),
         )
         .await;
         if write_client_response(&mut stream, status, &body)
@@ -875,40 +895,76 @@ async fn dispatch(
     self_id: NodeId,
     self_raft: SocketAddr,
     self_client: SocketAddr,
+    operator_token: Option<String>,
 ) -> (u16, Vec<u8>) {
-    if opcode == 7 {
-        return match decode_member_payload(&payload) {
-            Ok((node_id, raft_addr, client_addr)) => {
-                propose_add_member(
-                    raft,
-                    roster,
-                    self_id,
-                    self_raft,
-                    self_client,
-                    NodeId(node_id),
-                    raft_addr,
-                    client_addr,
-                )
-                .await
+    // Handle admin opcodes 7/8 (ADD/REMOVE) with optional operator token enforcement.
+    // Supports backward-compat raw payloads (no token configured) and ADMIN-prefixed
+    // payloads when clients present the credential. If server has token set, must match.
+    if opcode == ADD_MEMBER_OPCODE || opcode == REMOVE_MEMBER_OPCODE {
+        // Peel optional ADMIN prefix + token if present; otherwise treat payload as legacy raw.
+        let (clean_payload, presented) = if payload.len() >= ADMIN_AUTH_PREFIX.len()
+            && payload.starts_with(ADMIN_AUTH_PREFIX)
+        {
+            match decode_admin_payload(&payload) {
+                Ok((got_opcode, inner, tok)) => {
+                    if got_opcode != opcode {
+                        return (
+                            STATUS_INVALID_ARGUMENT,
+                            encode_error_payload("admin opcode mismatch"),
+                        );
+                    }
+                    (inner, tok)
+                }
+                Err(e) => {
+                    return (STATUS_INVALID_ARGUMENT, encode_error_payload(&e));
+                }
             }
-            Err(e) => (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
+        } else {
+            (payload, None)
         };
-    }
-    if opcode == 8 {
-        return match decode_remove_member_payload(&payload) {
-            Ok(node_id) => {
-                propose_remove_member(
-                    raft,
-                    roster,
-                    self_id,
-                    self_raft,
-                    self_client,
-                    NodeId(node_id),
-                )
-                .await
+
+        if let Some(expected) = &operator_token {
+            if presented.as_deref() != Some(expected.as_str()) {
+                return (
+                    STATUS_ERROR,
+                    encode_error_payload("operator credential required or invalid"),
+                );
             }
-            Err(e) => (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
-        };
+        }
+
+        if opcode == ADD_MEMBER_OPCODE {
+            return match decode_member_payload(&clean_payload) {
+                Ok((node_id, raft_addr, client_addr)) => {
+                    propose_add_member(
+                        raft,
+                        roster,
+                        self_id,
+                        self_raft,
+                        self_client,
+                        NodeId(node_id),
+                        raft_addr,
+                        client_addr,
+                    )
+                    .await
+                }
+                Err(e) => (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
+            };
+        } else {
+            return match decode_remove_member_payload(&clean_payload) {
+                Ok(node_id) => {
+                    propose_remove_member(
+                        raft,
+                        roster,
+                        self_id,
+                        self_raft,
+                        self_client,
+                        NodeId(node_id),
+                    )
+                    .await
+                }
+                Err(e) => (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
+            };
+        }
     }
 
     let roster_snapshot = roster.read().await.clone();

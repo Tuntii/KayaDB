@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::cluster::{ClusterConfig, ClusterNode};
+    use crate::operator_auth::encode_admin_payload;
     use kaya_net::{
         decode_value_payload, encode_key_payload, encode_member_payload, encode_put_payload,
         encode_remove_member_payload, roundtrip,
@@ -810,6 +811,109 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir2);
         let _ = std::fs::remove_dir_all(&data_dir3);
         let _ = std::fs::remove_dir_all(&data_dir4);
+    }
+
+    #[tokio::test]
+    async fn add_member_requires_correct_operator_token() {
+        // TDD test for Task 2: servers started with operator token must reject
+        // add/remove unless correct token is presented via ADMIN framing.
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir1 = std::env::temp_dir().join(format!("kayadb_tok_n1_{}", test_id));
+        let data_dir2 = std::env::temp_dir().join(format!("kayadb_tok_n2_{}", test_id));
+        let data_dir3 = std::env::temp_dir().join(format!("kayadb_tok_n3_{}", test_id));
+
+        let r1 = get_free_port().await;
+        let c1 = get_free_port().await;
+        let r2 = get_free_port().await;
+        let c2 = get_free_port().await;
+        let r3 = get_free_port().await;
+        let c3 = get_free_port().await;
+
+        let raft_addr1: SocketAddr = format!("127.0.0.1:{}", r1).parse().unwrap();
+        let client_addr1: SocketAddr = format!("127.0.0.1:{}", c1).parse().unwrap();
+        let raft_addr2: SocketAddr = format!("127.0.0.1:{}", r2).parse().unwrap();
+        let client_addr2: SocketAddr = format!("127.0.0.1:{}", c2).parse().unwrap();
+        let raft_addr3: SocketAddr = format!("127.0.0.1:{}", r3).parse().unwrap();
+        let client_addr3: SocketAddr = format!("127.0.0.1:{}", c3).parse().unwrap();
+
+        let peers1 = vec![(2, raft_addr2, client_addr2), (3, raft_addr3, client_addr3)];
+        let peers2 = vec![(1, raft_addr1, client_addr1), (3, raft_addr3, client_addr3)];
+        let peers3 = vec![(1, raft_addr1, client_addr1), (2, raft_addr2, client_addr2)];
+
+        let token = "test-operator-token-42".to_string();
+        let config1 = ClusterConfig::new(1, &data_dir1, raft_addr1, client_addr1, peers1)
+            .with_operator_token(token.clone());
+        let config2 = ClusterConfig::new(2, &data_dir2, raft_addr2, client_addr2, peers2)
+            .with_operator_token(token.clone());
+        let config3 = ClusterConfig::new(3, &data_dir3, raft_addr3, client_addr3, peers3)
+            .with_operator_token(token.clone());
+
+        let handle1 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config1).run().await;
+        });
+        let handle2 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config2).run().await;
+        });
+        let handle3 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config3).run().await;
+        });
+
+        // Wait for a leader
+        let mut leader_addr = None;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr1).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr1);
+                break;
+            }
+            if check_health(client_addr2).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr2);
+                break;
+            }
+            if check_health(client_addr3).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr3);
+                break;
+            }
+        }
+        let leader_addr = leader_addr.expect("no leader elected in token-protected cluster");
+
+        // A would-be add payload (no 4th node actually started)
+        let add_payload =
+            encode_member_payload(99, "127.0.0.1:19991", "127.0.0.1:19992");
+
+        // 1) try add without token (raw payload) -> must error
+        let (status, _body) = roundtrip(leader_addr, 7, &add_payload).await.unwrap();
+        assert_ne!(
+            status, 0,
+            "add without token should be rejected when operator_token is configured"
+        );
+
+        // 2) try with wrong token -> error
+        let wrong_admin = encode_admin_payload(7, &add_payload, Some("wrong-token-xyz"));
+        let (status, _body) = roundtrip(leader_addr, 7, &wrong_admin).await.unwrap();
+        assert_ne!(
+            status, 0,
+            "add with wrong token should be rejected"
+        );
+
+        // 3) try with correct token -> succeeds (status 0)
+        let correct_admin = encode_admin_payload(7, &add_payload, Some(&token));
+        let (status, _body) = roundtrip(leader_addr, 7, &correct_admin).await.unwrap();
+        assert_eq!(
+            status, 0,
+            "add with correct operator token should succeed: {:?}",
+            String::from_utf8_lossy(&_body)
+        );
+
+        handle1.abort();
+        handle2.abort();
+        handle3.abort();
+        let _ = std::fs::remove_dir_all(&data_dir1);
+        let _ = std::fs::remove_dir_all(&data_dir2);
+        let _ = std::fs::remove_dir_all(&data_dir3);
     }
 
     #[tokio::test]

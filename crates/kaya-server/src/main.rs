@@ -94,6 +94,9 @@ fn run() -> Result<(), String> {
         return Err("--join-cluster requires at least one --peer seed address".to_owned());
     }
 
+    let operator_token = take_value(&mut args, "--operator-token")
+        .or_else(|| env::var("KAYA_OPERATOR_TOKEN").ok());
+
     if !args.is_empty() {
         return Err(format!("unexpected arguments: {:?}", args));
     }
@@ -105,6 +108,11 @@ fn run() -> Result<(), String> {
         client_addr,
         peers,
     );
+    if let Some(tok) = operator_token {
+        if !tok.trim().is_empty() {
+            config = config.with_operator_token(tok);
+        }
+    }
     if join_cluster {
         config = config.with_join_cluster();
     }
