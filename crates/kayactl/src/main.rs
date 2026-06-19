@@ -13,10 +13,10 @@ use kaya_engine::{
 use kaya_io::FileDisk;
 use kaya_lsm::{inspect_manifest_path, inspect_sstable_path, ManifestInspection, SstInspection};
 use kaya_net::{
-    decode_error_payload, decode_scan_response, decode_value_payload, encode_key_payload,
-    encode_member_payload, encode_put_payload, encode_remove_member_payload, encode_scan_payload,
-    roundtrip, STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER,
-    STATUS_OK,
+    decode_error_payload, decode_scan_response, decode_value_payload, encode_admin_payload,
+    encode_key_payload, encode_member_payload, encode_put_payload, encode_remove_member_payload,
+    encode_scan_payload, roundtrip, ADD_MEMBER_OPCODE, REMOVE_MEMBER_OPCODE, STATUS_ERROR,
+    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
 };
 use kaya_wal::{inspect_wal_path, WalInspection};
 
@@ -30,6 +30,10 @@ fn main() {
 fn run() -> Result<()> {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     let json = remove_flag(&mut args, "--json");
+
+    let operator_token = remove_value_flag(&mut args, "--operator-token")
+        .or_else(|| env::var("KAYA_OPERATOR_TOKEN").ok())
+        .filter(|t| !t.trim().is_empty());
 
     let server_addrs: Vec<SocketAddr> = remove_all_value_flags(&mut args, "--server")
         .into_iter()
@@ -76,7 +80,7 @@ fn run() -> Result<()> {
 
     // ── server mode ───────────────────────────────────────────────────────────
     if !server_addrs.is_empty() {
-        return run_server_mode(args, server_addrs, json, timeout, latency_view);
+        return run_server_mode(args, server_addrs, json, timeout, latency_view, operator_token);
     }
 
     // ── local engine mode (unchanged) ─────────────────────────────────────────
@@ -373,20 +377,24 @@ fn run_server_mode(
     json: bool,
     timeout: Option<Duration>,
     latency_view: bool,
+    operator_token: Option<String>,
 ) -> Result<()> {
     block_on(
-        async move { run_server_mode_async(args, endpoints, json, timeout, latency_view).await },
+        async move {
+            run_server_mode_async(args, endpoints, json, timeout, latency_view, operator_token).await
+        },
     )
 }
 
 async fn run_server_mode_async(
-    mut args: Vec<String>,
+    args: Vec<String>,
     endpoints: Vec<SocketAddr>,
     json: bool,
     timeout: Option<Duration>,
     latency_view: bool,
+    operator_token: Option<String>,
 ) -> Result<()> {
-    let _operator_token = remove_value_flag(&mut args, "--operator-token").unwrap_or_default();
+    // operator_token already parsed from flag/env at top level (global)
 
     match args.as_slice() {
         [] => {
@@ -556,25 +564,33 @@ async fn run_server_mode_async(
             }
         }
         [cmd] if cmd == "add-node" => Err(KayaError::invalid_argument(
-            "usage: kayactl --server <addr> add-node <id> <raft-addr> <client-addr>",
+            "usage: kayactl --server <addr> [--operator-token <tok>] add-node <id> <raft-addr> <client-addr>",
         )),
         [cmd, id, raft_addr, client_addr] if cmd == "add-node" => {
             let node_id: u64 = id
                 .parse()
                 .map_err(|e| KayaError::invalid_argument(format!("node id: {e}")))?;
-            let payload = encode_member_payload(node_id, raft_addr, client_addr);
-            let (status, body) = roundtrip_with_retry(&endpoints, 7, &payload, timeout).await?;
+            let inner = encode_member_payload(node_id, raft_addr, client_addr);
+            let payload = match &operator_token {
+                Some(tok) => encode_admin_payload(ADD_MEMBER_OPCODE, &inner, Some(tok.as_str())),
+                None => inner,
+            };
+            let (status, body) = roundtrip_with_retry(&endpoints, ADD_MEMBER_OPCODE, &payload, timeout).await?;
             handle_membership_response(status, &body, json, "add-node")
         }
         [cmd] if cmd == "remove-node" => Err(KayaError::invalid_argument(
-            "usage: kayactl --server <addr> remove-node <id>",
+            "usage: kayactl --server <addr> [--operator-token <tok>] remove-node <id>",
         )),
         [cmd, id] if cmd == "remove-node" => {
             let node_id: u64 = id
                 .parse()
                 .map_err(|e| KayaError::invalid_argument(format!("node id: {e}")))?;
-            let payload = encode_remove_member_payload(node_id);
-            let (status, body) = roundtrip_with_retry(&endpoints, 8, &payload, timeout).await?;
+            let inner = encode_remove_member_payload(node_id);
+            let payload = match &operator_token {
+                Some(tok) => encode_admin_payload(REMOVE_MEMBER_OPCODE, &inner, Some(tok.as_str())),
+                None => inner,
+            };
+            let (status, body) = roundtrip_with_retry(&endpoints, REMOVE_MEMBER_OPCODE, &payload, timeout).await?;
             handle_membership_response(status, &body, json, "remove-node")
         }
         _ => Err(KayaError::invalid_argument(
@@ -657,20 +673,20 @@ fn print_usage() {
     println!("  kayactl ebpf [fsync-latency|...|list|status|help] [--pid <pid>] [--run] [--duration 30s]   (Linux eBPF experiments, Track A)");
     println!();
     println!("CLUSTER MODE (via running kayadb-server)");
-    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] put <key> <value>");
+    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--operator-token <tok>] [--json] put <key> <value>");
     println!(
-        "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] get <key>"
+        "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--operator-token <tok>] [--json] get <key>"
     );
     println!(
-        "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] delete <key>"
+        "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--operator-token <tok>] [--json] delete <key>"
     );
     println!(
-        "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] scan <prefix>"
+        "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--operator-token <tok>] [--json] scan <prefix>"
     );
-    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] health");
-    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--json] [--latency] status");
-    println!("  kayactl --server <addr> add-node <id> <raft-addr> <client-addr>");
-    println!("  kayactl --server <addr> remove-node <id>");
+    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--operator-token <tok>] [--json] health");
+    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--operator-token <tok>] [--json] [--latency] status");
+    println!("  kayactl --server <addr> [--operator-token <tok>] add-node <id> <raft-addr> <client-addr>");
+    println!("  kayactl --server <addr> [--operator-token <tok>] remove-node <id>");
     println!();
     println!("INSPECT COMMANDS");
     println!("  kayactl [--json] inspect wal <path>");
@@ -681,6 +697,7 @@ fn print_usage() {
     println!("  --data ./data");
     println!("  --durability strict");
     println!("  --timeout (none)");
+    println!("  --operator-token (none, or KAYA_OPERATOR_TOKEN env var)");
 }
 
 /// Handle `kayactl ebpf ...` subcommands.
