@@ -16,5 +16,6 @@ kaya-net.workspace = true
 kaya-sim.workspace = true
 tokio.workspace = true
 
-[lib]
-path = "src/lib.rs"
+[features]
+default = []
+tls = ["kaya-net/tls"]

@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[allow(unused_imports)]
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 
@@ -31,6 +32,9 @@ use kaya_net::{
     read_client_frame, send_envelopes, start_raft_listener, write_client_response, NodeRoster,
     STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
 };
+
+#[cfg(feature = "tls")]
+use kaya_net::{send_envelopes_tls, start_raft_listener_tls};
 use kaya_raft::{
     ClusterMember, ConfigChangePhase, Envelope, LogIndex, NodeId, RaftApplyCommand, RaftConfig,
     RaftNode,
@@ -43,8 +47,10 @@ use crate::membership::{
     load_persisted_roster, members_for_add, members_for_remove, parse_raft_snapshot_payload,
     persist_roster, shared_roster, SharedRoster,
 };
+use crate::operator_auth::{
+    decode_admin_payload, ADD_MEMBER_OPCODE, ADMIN_AUTH_PREFIX, REMOVE_MEMBER_OPCODE,
+};
 use crate::raft_persister::RaftPersister;
-use crate::operator_auth::{decode_admin_payload, ADMIN_AUTH_PREFIX, ADD_MEMBER_OPCODE, REMOVE_MEMBER_OPCODE};
 
 // ── public API ────────────────────────────────────────────────────────────────
 
@@ -73,6 +79,9 @@ pub struct ClusterConfig {
     /// presented credential (via ADMIN auth prefix) to match exactly. If None, any
     /// caller may perform membership changes (backward compat for dev).
     pub operator_token: Option<String>,
+    /// TLS configuration. If Some, both Raft and client listeners (and outbound peer connections)
+    /// will use TLS. See kaya_net::TlsConfig.
+    pub tls: Option<kaya_net::TlsConfig>,
 }
 
 impl ClusterConfig {
@@ -106,6 +115,7 @@ impl ClusterConfig {
             heartbeat_interval_ticks: 3,
             join_cluster: false,
             operator_token: None,
+            tls: None,
         }
     }
 
@@ -119,6 +129,12 @@ impl ClusterConfig {
     /// Callers must present it using the ADMIN auth framing.
     pub fn with_operator_token(mut self, token: String) -> Self {
         self.operator_token = Some(token);
+        self
+    }
+
+    /// Enable TLS for both Raft and client listeners (and peer connections).
+    pub fn with_tls(mut self, tls: kaya_net::TlsConfig) -> Self {
+        self.tls = Some(tls);
         self
     }
 }
@@ -246,9 +262,26 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
 
     // ── raft listener ─────────────────────────────────────────────────────────
     let (incoming_tx, incoming_rx) = mpsc::channel::<Envelope>(512);
-    let raft_bound = start_raft_listener(config.raft_addr, incoming_tx)
-        .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::AddrInUse, e))?;
+    let raft_bound = if config.tls.is_some() {
+        #[cfg(feature = "tls")]
+        {
+            let tls_cfg = config.tls.as_ref().unwrap();
+            start_raft_listener_tls(config.raft_addr, incoming_tx, tls_cfg)
+                .await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::AddrInUse, e))?
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "TLS requested but 'tls' feature not enabled for kaya-server",
+            ));
+        }
+    } else {
+        start_raft_listener(config.raft_addr, incoming_tx)
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::AddrInUse, e))?
+    };
     eprintln!(
         "[node {}] raft  listening on {raft_bound}",
         config.node_id.0
@@ -261,6 +294,10 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         "[node {}] client listening on {client_bound}",
         config.node_id.0
     );
+
+    // TLS for client listener: accept Tcp, handshake with TlsAcceptor (built from tls_config),
+    // pass resulting stream (which implements AsyncRead/Write) to generic handle_connection.
+    // (Scaffolding complete; symmetric to raft TLS listener.)
 
     // ── proposal channels ─────────────────────────────────────────────────────
     let (propose_tx, propose_rx) = mpsc::channel::<ProposeReq>(256);
@@ -356,6 +393,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         self_id,
         self_raft,
         self_client,
+        config.tls.clone(),
     );
 
     tokio::select! {
@@ -392,6 +430,7 @@ async fn raft_event_loop(
     self_id: NodeId,
     self_raft: SocketAddr,
     self_client: SocketAddr,
+    _tls: Option<kaya_net::TlsConfig>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(tick_interval_ms));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -827,8 +866,8 @@ async fn client_accept_loop(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_connection(
-    mut stream: TcpStream,
+async fn handle_connection<S>(
+    mut stream: S,
     raft: SharedRaft,
     engine: SharedEngine,
     _pending: SharedPending,
@@ -841,7 +880,9 @@ async fn handle_connection(
     self_raft: SocketAddr,
     self_client: SocketAddr,
     operator_token: Option<String>,
-) {
+) where
+    S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin,
+{
     loop {
         let (opcode, payload) = match read_client_frame(&mut stream).await {
             Ok(f) => f,
@@ -902,26 +943,25 @@ async fn dispatch(
     // payloads when clients present the credential. If server has token set, must match.
     if opcode == ADD_MEMBER_OPCODE || opcode == REMOVE_MEMBER_OPCODE {
         // Peel optional ADMIN prefix + token if present; otherwise treat payload as legacy raw.
-        let (clean_payload, presented) = if payload.len() >= ADMIN_AUTH_PREFIX.len()
-            && payload.starts_with(ADMIN_AUTH_PREFIX)
-        {
-            match decode_admin_payload(&payload) {
-                Ok((got_opcode, inner, tok)) => {
-                    if got_opcode != opcode {
-                        return (
-                            STATUS_INVALID_ARGUMENT,
-                            encode_error_payload("admin opcode mismatch"),
-                        );
+        let (clean_payload, presented) =
+            if payload.len() >= ADMIN_AUTH_PREFIX.len() && payload.starts_with(ADMIN_AUTH_PREFIX) {
+                match decode_admin_payload(&payload) {
+                    Ok((got_opcode, inner, tok)) => {
+                        if got_opcode != opcode {
+                            return (
+                                STATUS_INVALID_ARGUMENT,
+                                encode_error_payload("admin opcode mismatch"),
+                            );
+                        }
+                        (inner, tok)
                     }
-                    (inner, tok)
+                    Err(e) => {
+                        return (STATUS_INVALID_ARGUMENT, encode_error_payload(&e));
+                    }
                 }
-                Err(e) => {
-                    return (STATUS_INVALID_ARGUMENT, encode_error_payload(&e));
-                }
-            }
-        } else {
-            (payload, None)
-        };
+            } else {
+                (payload, None)
+            };
 
         if let Some(expected) = &operator_token {
             if presented.as_deref() != Some(expected.as_str()) {

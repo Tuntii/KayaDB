@@ -19,9 +19,7 @@ fn smoke_benchmarks(c: &mut Criterion) {
     group.throughput(Throughput::Elements(10));
 
     group.bench_function("smoke_put_get", |b| {
-        b.iter(|| {
-            rt.block_on(run_smoke_put_get())
-        })
+        b.iter(|| rt.block_on(run_smoke_put_get()))
     });
 
     group.finish();

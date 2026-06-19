@@ -19,10 +19,18 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
+
+#[cfg(feature = "tls")]
+use std::sync::Arc;
+#[cfg(feature = "tls")]
+use tokio_rustls::rustls::ServerConfig;
+#[cfg(feature = "tls")]
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use kaya_raft::{Envelope, NodeId};
 
@@ -42,6 +50,89 @@ pub const STATUS_NOT_FOUND: u16 = 2;
 pub const STATUS_ERROR: u16 = 9;
 /// This node is not the current Raft leader; the client should retry.
 pub const STATUS_NOT_LEADER: u16 = 10;
+
+/// TLS configuration for encrypted connections (Raft + client protocol).
+///
+/// When `ca_path` is Some and `require_client_cert` true, mTLS is used.
+#[derive(Clone, Debug, Default)]
+pub struct TlsConfig {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    pub ca_path: Option<PathBuf>,
+    pub require_client_cert: bool,
+}
+
+#[cfg(feature = "tls")]
+mod tls_impl {
+    use super::*;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls_pemfile;
+    use std::fs::File;
+    use std::io::BufReader;
+
+    pub(crate) fn load_certs(path: &PathBuf) -> std::io::Result<Vec<CertificateDer<'static>>> {
+        let certfile = File::open(path)?;
+        let mut reader = BufReader::new(certfile);
+        rustls_pemfile::certs(&mut reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad certs: {e}"))
+            })
+    }
+
+    pub(crate) fn load_private_key(path: &PathBuf) -> std::io::Result<PrivateKeyDer<'static>> {
+        let keyfile = File::open(path)?;
+        let mut reader = BufReader::new(keyfile);
+        let mut keys = rustls_pemfile::pkcs8_private_keys(&mut reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad key: {e}"))
+            })?;
+        keys.pop().map(PrivateKeyDer::Pkcs8).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "no private key found")
+        })
+    }
+
+    pub(crate) async fn build_server_config(
+        tls_config: &TlsConfig,
+    ) -> std::io::Result<Arc<ServerConfig>> {
+        let certs = load_certs(&tls_config.cert_path)?;
+        let key = load_private_key(&tls_config.key_path)?;
+
+        let mut config = if tls_config.require_client_cert {
+            if let Some(ca_path) = &tls_config.ca_path {
+                let ca_certs = load_certs(ca_path)?;
+                let mut root_store = rustls::RootCertStore::empty();
+                for cert in ca_certs {
+                    root_store
+                        .add(cert)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                }
+                ServerConfig::builder()
+                    .with_client_cert_verifier(
+                        rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
+                            .build()
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+                    )
+                    .with_single_cert(certs, key)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+            } else {
+                ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(certs, key)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+            }
+        } else {
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+        };
+
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        Ok(Arc::new(config))
+    }
+}
 
 // ── raft transport ────────────────────────────────────────────────────────────
 
@@ -96,6 +187,54 @@ pub async fn start_raft_listener(
     Ok(bound)
 }
 
+#[cfg(feature = "tls")]
+pub async fn start_raft_listener_tls(
+    addr: SocketAddr,
+    tx: mpsc::Sender<Envelope>,
+    tls_config: &TlsConfig,
+) -> std::io::Result<SocketAddr> {
+    let server_config = tls_impl::build_server_config(tls_config).await?;
+    let acceptor = TlsAcceptor::from(server_config);
+    let listener = TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+    tokio::spawn(async move {
+        accept_raft_loop_tls(listener, tx, acceptor).await;
+    });
+    Ok(bound)
+}
+
+#[cfg(feature = "tls")]
+async fn accept_raft_loop_tls(
+    listener: TcpListener,
+    tx: mpsc::Sender<Envelope>,
+    acceptor: TlsAcceptor,
+) {
+    loop {
+        tokio::select! {
+            _ = tx.closed() => break,
+            incoming = listener.accept() => {
+                match incoming {
+                    Ok((stream, _peer)) => {
+                        let tx = tx.clone();
+                        let acceptor = acceptor.clone();
+                        tokio::spawn(async move {
+                            match acceptor.accept(stream).await {
+                                Ok(mut tls_stream) => {
+                                    while let Ok(env) = read_raft_envelope(&mut tls_stream).await {
+                                        if tx.send(env).await.is_err() { break; }
+                                    }
+                                }
+                                Err(_) => {}
+                            }
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+}
+
 async fn accept_raft_loop(listener: TcpListener, tx: mpsc::Sender<Envelope>) {
     loop {
         tokio::select! {
@@ -126,7 +265,10 @@ async fn accept_raft_loop(listener: TcpListener, tx: mpsc::Sender<Envelope>) {
 /// Read a single Raft envelope from `stream`.
 ///
 /// Wire: `frame_len(u32 LE) | payload(frame_len bytes)`.
-async fn read_raft_envelope(stream: &mut TcpStream) -> std::io::Result<Envelope> {
+async fn read_raft_envelope<S>(stream: &mut S) -> std::io::Result<Envelope>
+where
+    S: AsyncReadExt + Unpin,
+{
     let len = stream.read_u32_le().await? as usize;
     if len > DEFAULT_MAX_FRAME_LEN as usize {
         return Err(std::io::Error::new(
@@ -144,7 +286,10 @@ async fn read_raft_envelope(stream: &mut TcpStream) -> std::io::Result<Envelope>
 /// Read one client request frame from `stream`.
 ///
 /// Returns `(opcode, payload)`.
-pub async fn read_client_frame(stream: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
+pub async fn read_client_frame<S>(stream: &mut S) -> std::io::Result<(u8, Vec<u8>)>
+where
+    S: AsyncReadExt + Unpin,
+{
     let len = stream.read_u32_le().await? as usize;
     if len == 0 {
         return Err(std::io::Error::new(
@@ -170,11 +315,14 @@ pub async fn read_client_frame(stream: &mut TcpStream) -> std::io::Result<(u8, V
 /// Write one client response frame to `stream`.
 ///
 /// Frame: `frame_len(u32 LE) | status(u16 LE) | payload`.
-pub async fn write_client_response(
-    stream: &mut TcpStream,
+pub async fn write_client_response<S>(
+    stream: &mut S,
     status: u16,
     payload: &[u8],
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: AsyncWriteExt + Unpin,
+{
     let frame_len = (2 + payload.len()) as u32;
     stream.write_u32_le(frame_len).await?;
     stream.write_u16_le(status).await?;
@@ -224,6 +372,117 @@ pub async fn roundtrip(
         stream.read_exact(&mut body).await?;
     }
     Ok((status, body))
+}
+
+#[cfg(feature = "tls")]
+pub async fn roundtrip_tls(
+    server_addr: SocketAddr,
+    opcode: u8,
+    payload: &[u8],
+    tls_config: &TlsConfig,
+) -> std::io::Result<(u16, Vec<u8>)> {
+    let root_store = if let Some(ca) = &tls_config.ca_path {
+        let cas = tls_impl::load_certs(ca)?;
+        let mut store = rustls::RootCertStore::empty();
+        for c in cas {
+            let _ = store.add(c);
+        }
+        store
+    } else {
+        // Fallback: empty, will fail for self-signed unless ca provided. For tests provide ca.
+        rustls::RootCertStore::empty()
+    };
+
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+
+    let connector = TlsConnector::from(Arc::new(config));
+    let domain = rustls::pki_types::ServerName::try_from("localhost")
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid dns name"))?
+        .to_owned();
+
+    let tcp = TcpStream::connect(server_addr).await?;
+    let mut tls_stream = connector.connect(domain, tcp).await?;
+
+    let frame = encode_client_frame(opcode, payload);
+    tls_stream.write_all(&frame).await?;
+    tls_stream.flush().await?;
+
+    let resp_len = tls_stream.read_u32_le().await? as usize;
+    if resp_len < 2 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "response frame too short",
+        ));
+    }
+    let status = tls_stream.read_u16_le().await?;
+    let body_len = resp_len - 2;
+    let mut body = vec![0u8; body_len];
+    if body_len > 0 {
+        tls_stream.read_exact(&mut body).await?;
+    }
+    Ok((status, body))
+}
+
+#[cfg(feature = "tls")]
+pub async fn send_envelopes_tls(
+    envelopes: Vec<Envelope>,
+    roster: &NodeRoster,
+    tls_config: &TlsConfig,
+) {
+    if envelopes.is_empty() {
+        return;
+    }
+    let mut by_dest: HashMap<NodeId, Vec<Envelope>> = HashMap::new();
+    for env in envelopes {
+        by_dest.entry(env.to).or_default().push(env);
+    }
+
+    for (node_id, envs) in by_dest {
+        if let Some(addr) = roster.addr(node_id) {
+            let tls_cfg = tls_config.clone();
+            tokio::spawn(async move {
+                let _ = send_to_addr_tls(addr, &envs, &tls_cfg).await;
+            });
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+async fn send_to_addr_tls(
+    addr: SocketAddr,
+    envs: &[Envelope],
+    tls_config: &TlsConfig,
+) -> std::io::Result<()> {
+    let root_store = if let Some(ca) = &tls_config.ca_path {
+        let cas = tls_impl::load_certs(ca)?;
+        let mut store = rustls::RootCertStore::empty();
+        for c in cas {
+            let _ = store.add(c);
+        }
+        store
+    } else {
+        rustls::RootCertStore::empty()
+    };
+
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(config));
+    let domain = rustls::pki_types::ServerName::try_from("localhost")
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad name"))?
+        .to_owned();
+
+    let tcp = TcpStream::connect(addr).await?;
+    let mut tls_stream = connector.connect(domain, tcp).await?;
+
+    for env in envs {
+        let frame = encode_envelope(env);
+        tls_stream.write_all(&frame).await?;
+    }
+    tls_stream.flush().await?;
+    Ok(())
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

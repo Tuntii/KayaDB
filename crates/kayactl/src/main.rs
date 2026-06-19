@@ -35,6 +35,9 @@ fn run() -> Result<()> {
         .or_else(|| env::var("KAYA_OPERATOR_TOKEN").ok())
         .filter(|t| !t.trim().is_empty());
 
+    let _use_tls = remove_flag(&mut args, "--tls");
+    let _tls_ca_cert = remove_value_flag(&mut args, "--tls-ca-cert");
+
     let server_addrs: Vec<SocketAddr> = remove_all_value_flags(&mut args, "--server")
         .into_iter()
         .map(|s| {
@@ -80,7 +83,14 @@ fn run() -> Result<()> {
 
     // ── server mode ───────────────────────────────────────────────────────────
     if !server_addrs.is_empty() {
-        return run_server_mode(args, server_addrs, json, timeout, latency_view, operator_token);
+        return run_server_mode(
+            args,
+            server_addrs,
+            json,
+            timeout,
+            latency_view,
+            operator_token,
+        );
     }
 
     // ── local engine mode (unchanged) ─────────────────────────────────────────
@@ -379,11 +389,9 @@ fn run_server_mode(
     latency_view: bool,
     operator_token: Option<String>,
 ) -> Result<()> {
-    block_on(
-        async move {
-            run_server_mode_async(args, endpoints, json, timeout, latency_view, operator_token).await
-        },
-    )
+    block_on(async move {
+        run_server_mode_async(args, endpoints, json, timeout, latency_view, operator_token).await
+    })
 }
 
 async fn run_server_mode_async(

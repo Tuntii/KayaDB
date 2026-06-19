@@ -94,8 +94,14 @@ fn run() -> Result<(), String> {
         return Err("--join-cluster requires at least one --peer seed address".to_owned());
     }
 
-    let operator_token = take_value(&mut args, "--operator-token")
-        .or_else(|| env::var("KAYA_OPERATOR_TOKEN").ok());
+    let operator_token =
+        take_value(&mut args, "--operator-token").or_else(|| env::var("KAYA_OPERATOR_TOKEN").ok());
+
+    let tls_cert = take_value(&mut args, "--tls-cert").or_else(|| env::var("KAYA_TLS_CERT").ok());
+    let tls_key = take_value(&mut args, "--tls-key").or_else(|| env::var("KAYA_TLS_KEY").ok());
+    let tls_ca = take_value(&mut args, "--tls-ca").or_else(|| env::var("KAYA_TLS_CA").ok());
+
+    let enable_tls = tls_cert.is_some() && tls_key.is_some();
 
     if !args.is_empty() {
         return Err(format!("unexpected arguments: {:?}", args));
@@ -111,6 +117,18 @@ fn run() -> Result<(), String> {
     if let Some(tok) = operator_token {
         if !tok.trim().is_empty() {
             config = config.with_operator_token(tok);
+        }
+    }
+
+    if enable_tls {
+        if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
+            let tls = kaya_net::TlsConfig {
+                cert_path: cert.into(),
+                key_path: key.into(),
+                ca_path: tls_ca.map(Into::into),
+                require_client_cert: true, // mTLS for peers
+            };
+            config = config.with_tls(tls);
         }
     }
     if join_cluster {

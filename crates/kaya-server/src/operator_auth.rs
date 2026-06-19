@@ -6,6 +6,6 @@
 //! This module is intentionally small for Task 1 and will grow with enforcement logic.
 
 pub use kaya_net::{
-    decode_admin_payload, encode_admin_payload, ADMIN_AUTH_PREFIX, ADD_MEMBER_OPCODE,
+    decode_admin_payload, encode_admin_payload, ADD_MEMBER_OPCODE, ADMIN_AUTH_PREFIX,
     REMOVE_MEMBER_OPCODE,
 };

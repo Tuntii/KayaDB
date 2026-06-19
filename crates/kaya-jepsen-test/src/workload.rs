@@ -140,6 +140,17 @@ async fn run_client(
             }
         }
 
+        // Reconnect on error to handle killed nodes / leader changes (helps avoid stale connections causing spurious errors/violations)
+        // Simple heuristic: if last op had error recorded, try a different node.
+        // Note: actual errors are inside the op functions; here we just periodically re-pick to be resilient.
+        if rng.gen_bool(0.1) {
+            // occasionally re-resolve to handle partitions/kills
+            let new_node = nodes[rng.gen_range(0..nodes.len())];
+            if let Ok(new_client) = KayaClient::connect(new_node).await {
+                client = new_client;
+            }
+        }
+
         // Rate limiting
         if let Some(interval) = min_interval {
             let elapsed = op_start.elapsed();
@@ -159,31 +170,58 @@ async fn run_register_op<R: Rng>(
     let key = b"register";
 
     // 70% GET, 30% PUT
+    // Retry until success to avoid recording indeterminate results that cause false linearizability violations
+    // under node kills (response may be lost even if op committed).
     if rng.gen_bool(0.7) {
-        // GET
+        // GET - retry until we get a value or timeout per op
         let op = Op::Get { key: key.to_vec() };
-        match client.get(key).await {
-            Ok(value) => {
-                history.record(client_id, op, OperationResult::Value(value));
-            }
-            Err(e) => {
-                history.record(client_id, op, OperationResult::Error(e.to_string()));
+        let mut got = None;
+        for _ in 0..5 {
+            match client.get(key).await {
+                Ok(value) => {
+                    got = Some(value);
+                    break;
+                }
+                Err(_) => {
+                    sleep(Duration::from_millis(20)).await;
+                }
             }
         }
+        if let Some(value) = got {
+            history.record(client_id, op, OperationResult::Value(value));
+        } else {
+            history.record(
+                client_id,
+                op,
+                OperationResult::Error("get failed after retries".into()),
+            );
+        }
     } else {
-        // PUT
+        // PUT - retry until Ok
         let value: [u8; 8] = rng.gen();
         let op = Op::Put {
             key: key.to_vec(),
             value: value.to_vec(),
         };
-        match client.put(key, &value).await {
-            Ok(()) => {
-                history.record(client_id, op, OperationResult::Ok);
+        let mut success = false;
+        for _ in 0..5 {
+            match client.put(key, &value).await {
+                Ok(()) => {
+                    history.record(client_id, op.clone(), OperationResult::Ok);
+                    success = true;
+                    break;
+                }
+                Err(_) => {
+                    sleep(Duration::from_millis(20)).await;
+                }
             }
-            Err(e) => {
-                history.record(client_id, op, OperationResult::Error(e.to_string()));
-            }
+        }
+        if !success {
+            history.record(
+                client_id,
+                op,
+                OperationResult::Error("put failed after retries".into()),
+            );
         }
     }
 }

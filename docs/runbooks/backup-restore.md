@@ -45,9 +45,12 @@ rsync -a --delete ./data/nodeN/ /backups/kaya/nodeN/
 ## With Operator Token
 Restores themselves do not require the token; membership changes after restore do.
 
+When native TLS or sidecars are in use, the backed-up data (including any persisted TLS-related state if any) can be restored to nodes that are started with the matching TLS configuration.
+
 ## Automation
 See `kayactl recover --dry-run` for inspecting a data directory before reuse.
 
 See also:
 - `docs/runbooks/rolling-restart.md`
-- `docs/security.md` (directory permissions)
+- `docs/security.md` (directory permissions + TLS)
+- `docs/runbooks/mtls-sidecar.md`

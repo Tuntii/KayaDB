@@ -53,9 +53,11 @@ Compare the highest sequence numbers or recent entries.
 ## Prevention
 - Proper firewall / network segmentation.
 - Use `--operator-token` to protect membership changes.
-- Monitor terms and applied indices continuously.
+- When using TLS (native or sidecar), ensure all nodes and clients have correct certs and CAs to prevent connection failures that look like split-brain.
+- Monitor terms and applied indices continuously (e.g. via Prometheus + kayactl status scraping).
 
 See also:
 - `docs/runbooks/add-remove-node.md`
-- `docs/security.md`
+- `docs/security.md` (TLS and operator token sections)
+- `docs/runbooks/mtls-sidecar.md`
 - Chaos tests in `kaya-jepsen-test` (they exercise these scenarios).
