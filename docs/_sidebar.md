@@ -34,11 +34,18 @@
   - [Development Guide](development.md)
 
 - [Design Specifications](specifications.md)
-  - [Spec Index](../spec/docs/00-spec-index.md)
+  - [Spec Index](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/00-spec-index.md)
   - [Key Technical Specs](specifications.md#core-specifications)
 
 - [Project](publishing.md)
   - [Productization north star](productization.md)
-  - [Contributing](../CONTRIBUTING.md)
-  - [Roadmap](../ROADMAP.md)
+  - [Contributing](https://github.com/Tuntii/KayaDB/blob/main/CONTRIBUTING.md)
+  - [Roadmap](https://github.com/Tuntii/KayaDB/blob/main/ROADMAP.md)
   - [Publishing Docs](publishing.md)
+
+- [Runbooks](runbooks/rolling-restart.md)
+  - [Add / Remove Node](runbooks/add-remove-node.md)
+  - [Rolling Restart](runbooks/rolling-restart.md)
+  - [Backup & Restore](runbooks/backup-restore.md)
+  - [Detecting Split-Brain](runbooks/detecting-split-brain.md)
+  - [mTLS Sidecar](runbooks/mtls-sidecar.md)

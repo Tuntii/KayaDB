@@ -30,11 +30,25 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
+      - name: Prepare site artifact (include .nojekyll and dot files for Jekyll bypass)
+        run: |
+          mkdir -p /tmp/site
+          cp -r docs/. /tmp/site/ 2>/dev/null || true
+          # Explicitly copy dot files ( _sidebar.md , .nojekyll etc may be missed by some cp )
+          for f in docs/.*; do
+            [ -e "$f" ] && cp -a "$f" /tmp/site/ || true
+          done
+          touch /tmp/site/.nojekyll
+          # Exclude internal AI plans/specs from public docs site (avoid bloat or parse issues)
+          rm -rf /tmp/site/superpowers || true
+          ls -la /tmp/site/ | head -10
+          echo ".nojekyll and dotfiles ensured; internal dirs cleaned"
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
         with:
           # The folder that contains the Docsify site
-          path: './docs'
+          path: '/tmp/site'
 
       - name: Deploy to GitHub Pages
         id: deployment

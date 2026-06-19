@@ -38,15 +38,15 @@
 
 ## Core Components
 
-* [Write-Ahead Log (WAL)](../spec/docs/wal-spec.md)
-* [LSM Storage (Memtable, SSTable, Manifest)](../spec/docs/lsm-storage-format-spec.md)
-* [Disk Abstraction & SimDisk](../spec/docs/disk-and-io-spec.md)
-* [Crash Recovery & Idempotence](../spec/docs/recovery-spec.md)
+* [Write-Ahead Log (WAL)](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/wal-spec.md)
+* [LSM Storage (Memtable, SSTable, Manifest)](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/lsm-storage-format-spec.md)
+* [Disk Abstraction & SimDisk](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/disk-and-io-spec.md)
+* [Crash Recovery & Idempotence](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/recovery-spec.md)
 
 ## Distributed KayaDB
 
-* [Raft Consensus](../spec/docs/raft-and-distributed-roadmap-spec.md)
-* [Cluster & Server Protocol](../spec/docs/server-and-protocol-spec.md)
+* [Raft Consensus](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/raft-and-distributed-roadmap-spec.md)
+* [Cluster & Server Protocol](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/server-and-protocol-spec.md)
 * [Jepsen-Style Testing & Failure Injection](jepsen-design.md)
 
 ## Correctness & Testing
@@ -63,16 +63,16 @@
 * [Configuration](development.md)
 * [Benchmarks & Performance](https://github.com/Tuntii/KayaDB/blob/main/BENCHMARKS.md)
 * [Design Specifications](specifications.md)
-  * [Spec Index](../spec/docs/00-spec-index.md)
+  * [Spec Index](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/00-spec-index.md)
   * [Key Specs (WAL, LSM, Recovery, Simulation...)](specifications.md#core-specifications)
 
 ## Contributing & Project
 
-* [Contributing Guide](../CONTRIBUTING.md)
+* [Contributing Guide](https://github.com/Tuntii/KayaDB/blob/main/CONTRIBUTING.md)
 * [Development Guide](development.md)
 * [Maintaining the Documentation](publishing.md)
-* [Roadmap](../ROADMAP.md)
-* [License](../README.md#license)
+* [Roadmap](https://github.com/Tuntii/KayaDB/blob/main/ROADMAP.md)
+* [License](https://github.com/Tuntii/KayaDB/blob/main/README.md#license)
 
 ---
 
