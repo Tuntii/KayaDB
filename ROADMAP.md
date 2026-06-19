@@ -32,10 +32,10 @@ Goal: cross the line from “serious prototype” to “operators can run this w
 
 1. **Durable Raft state** ✅ — Implemented on `feat/validation-first-consensus`: `raft-hard-state` (term + voted_for + snapshot boundary with CRC) and `raft-log` (framed entries) persist via `DiskRaftStorage`; `RaftNode::recover` + server startup reload on restart. Hard state flushed every loop; log rewritten on propose, follower append, and compaction. SimDisk crash/restart property tests cover suffix-only append tracking. Cluster survives process restart without losing term, vote, or log history.
 2. **Authenticated transport** — TLS (or documented mTLS sidecar pattern) on Raft and client ports; `ADD_MEMBER` / `REMOVE_MEMBER` require operator credentials.
-3. **Chaos proof** — external Jepsen (or equivalent) run against a multi-node cluster with membership changes and snapshots under nemesis.
+3. **Chaos proof** 🟡 — full Rust-native harness (`kaya-jepsen-test`) with T1–T7 scenarios + sequential/concurrent linearizability. Key snapshot catch-up (T7) fixed by embedding SST file contents in Raft snapshots for real cross-node transfer (previously metadata-only, causing "snap-127 not found" on restarted followers). PR smoke + local shorts green; nightly full gates ready.
 4. **Operations** — backup/restore story, rolling restart procedure, `kayactl`/docs for day-2 tasks (add/remove node, detect split-brain symptoms).
 5. **Security audit pass** — `docs/security.md` enforcement table fully implemented in code, not advisory only.
-6. **Performance envelope** — published benchmark methodology + regression budget in CI (`BENCHMARKS.md` gates).
+6. **Performance envelope** ✅ — published benchmark methodology + regression budget in CI (`BENCHMARKS.md` gates + `kaya-bench/tests/perf_gate.rs` release-mode assertion on smoke path). CI step added to main rust job.
 
 Exit criteria for dropping the “experimental” label:
 

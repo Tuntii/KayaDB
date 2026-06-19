@@ -54,19 +54,21 @@ If any of those assumptions are false in your environment, treat KayaDB as a loc
 
 For local demos, bind to `127.0.0.1`. For multi-host experiments, bind to a private subnet address and enforce firewall rules before starting the node.
 
-### Server enforcement (M11)
+### Server enforcement (M11 + M13 progress)
 
-| Control | Default | Override | Effect |
-|---|---|---|---|
-| Bind address | `127.0.0.1` | `--raft-addr` / `--client-addr` | Loopback-only unless explicitly widened |
-| Public bind guard | rejects `0.0.0.0` / `::` / non-loopback | `--allow-public-bind` | Prints security banner; still no auth/TLS |
-| Raft frame size | 64 MiB max | none (compile-time) | Oversized frames rejected at decode |
-| Client frame size | 64 MiB max | none (compile-time) | Malformed or huge payloads return errors |
-| Roster trust | static at startup | — | Unknown Raft `from` ids are dropped |
+| Control | Default | Override / Location | Effect | Enforced in code? |
+|---|---|---|---|---|
+| Bind address | `127.0.0.1` | `--raft-addr` / `--client-addr` | Loopback-only unless widened | ✅ `security::validate_bind_addr` |
+| Public bind guard | rejects public/wildcard | `--allow-public-bind` | Banner + allow; no built-in auth/TLS | ✅ startup + security.rs |
+| Raft / client frame size | 64 MiB max | compile-time in codec | Oversize → decode error | ✅ |
+| Roster / unknown peer | drop | static at start (RaftNode) | Unknown `from` ids ignored | ✅ |
+| Snapshot file protection (refcounts) | pinned SSTs during active snapshot | engine refcounts + release on new snapshot | Compaction cannot delete live snap data | ✅ kaya-engine (create/install/release) |
+| Durable snapshot on restart | loads `raft-snapshot.bin` + engine state | startup in cluster.rs | Follower/leader restart preserves applied state | ✅ (improved M13 for T7) |
+| Crash safety on snapshot persist | tmp + rename + fsync + dir sync | compaction path | Atomic snapshot file | ✅ |
 
-`kayadb-server` validates bind addresses in `security.rs` before listeners start.
-Treat `--allow-public-bind` as an explicit operator acknowledgement that perimeter
-security (firewall, mTLS proxy, private VPC) is in place.
+`kayadb-server` calls security checks before binding listeners. See `crates/kaya-server/src/security.rs` and `cluster.rs` (snapshot load + compaction).
+
+Treat `--allow-public-bind` as explicit ack that you have perimeter controls (firewall + mTLS sidecar or equivalent).
 
 ---
 

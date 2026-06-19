@@ -88,6 +88,14 @@ Each report row should include:
 CI runs a smoke benchmark step (see `.github/workflows/ci.yml`) to ensure the
 bench crate and report helpers compile and execute.
 
+**Regression gate:** After the smoke bench, CI runs
+`cargo test -p kaya-bench --test perf_gate --release`.
+This executes the same `smoke_put_get` workload under release profile and asserts
+elapsed time stays under a documented budget (tight in release, loose in debug).
+It acts as the coarse performance regression gate for the "performance envelope".
+Severe regressions (order-of-magnitude) will fail the CI rust job. See
+`crates/kaya-bench/tests/perf_gate.rs` and `spec/docs/benchmarking-spec.md`.
+
 ---
 
 ## 5. Comparison to Baselines

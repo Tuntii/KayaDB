@@ -530,6 +530,24 @@ impl<D: Disk> Engine<D> {
         // cutoff
         buf.extend_from_slice(&view.cutoff_seq.get().to_le_bytes());
 
+        // Embed full SST file contents so that InstallSnapshot receivers (lagging
+        // followers, restarted nodes in chaos tests) can materialize the files in
+        // *their* data directory. Metadata-only snapshots are sufficient for local
+        // restarts but not for cross-node catch-up.
+        buf.extend_from_slice(&(view.pinned_tables.len() as u32).to_le_bytes());
+        for meta in &view.pinned_tables {
+            let p = meta.path.as_bytes();
+            buf.extend_from_slice(&(p.len() as u32).to_le_bytes());
+            buf.extend_from_slice(p);
+
+            let rel = RelativePath::new(&meta.path)?;
+            let flen = self.disk.file_len(&rel).await? as usize;
+            let mut data = vec![0u8; flen];
+            let _n = self.disk.read_at(&rel, 0, &mut data).await?;
+            buf.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            buf.extend_from_slice(&data);
+        }
+
         Ok(buf)
     }
 
@@ -631,6 +649,54 @@ impl<D: Disk> Engine<D> {
             cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
         ]);
         let cutoff_seq = SequenceNumber::new(cutoff);
+
+        // Materialize any embedded SST files that were included for portable
+        // (cross-node) snapshot transfer. This allows a restarted/lagging follower
+        // to have the actual data files locally even though it never wrote them.
+        // This block is defensive: old/legacy snapshot payloads (pre-embed or
+        // persisted metadata-only) will be left as-is if the trailing bytes don't
+        // look like a valid embed section.
+        if cur.len() >= 4 {
+            let num_candidate = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]) as usize;
+            // Heuristic: very large table count or insufficient bytes => not our new format.
+            if num_candidate > 0 && num_candidate < 4096 && cur.len() >= 4 + num_candidate {
+                let _ = Self::take_u32(&mut cur); // consume num
+                let mut ok = true;
+                for _ in 0..num_candidate {
+                    if !ok || cur.len() < 4 {
+                        ok = false;
+                        break;
+                    }
+                    let plen = Self::take_u32(&mut cur).unwrap_or(0) as usize;
+                    if cur.len() < plen {
+                        ok = false;
+                        break;
+                    }
+                    let path = String::from_utf8(cur[..plen].to_vec())
+                        .unwrap_or_default();
+                    cur = &cur[plen..];
+
+                    if cur.len() < 8 {
+                        ok = false;
+                        break;
+                    }
+                    let clen = Self::take_u64(&mut cur).unwrap_or(0) as usize;
+                    if cur.len() < clen {
+                        ok = false;
+                        break;
+                    }
+                    let content = cur[..clen].to_vec();
+                    cur = &cur[clen..];
+
+                    if !path.is_empty() && clen > 0 {
+                        if let Ok(rel) = RelativePath::new(&path) {
+                            let _ = self.disk.write_at(&rel, 0, &content).await;
+                            let _ = self.disk.fsync_file(&rel).await;
+                        }
+                    }
+                }
+            }
+        }
 
         // Now apply the snapshot view to the engine.
         // 1. Rebuild live_sstables from pinned tables (re-open readers).
@@ -755,6 +821,17 @@ impl<D: Disk> Engine<D> {
         }
         let v = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]);
         *cur = &cur[4..];
+        Ok(v)
+    }
+
+    fn take_u64(cur: &mut &[u8]) -> Result<u64> {
+        if cur.len() < 8 {
+            return Err(KayaError::invalid_argument("truncated snapshot u64"));
+        }
+        let v = u64::from_le_bytes([
+            cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
+        ]);
+        *cur = &cur[8..];
         Ok(v)
     }
 

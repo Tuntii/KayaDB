@@ -102,13 +102,28 @@ PR CI should not run long benchmarks.
 Allowed in PR CI:
 
 - compile benchmark targets,
-- tiny smoke benchmarks if fast and non-flaky.
+- tiny smoke benchmarks if fast and non-flaky,
+- a coarse performance regression *gate* (see below).
+
+### 6.1 Regression gate
+
+A fast smoke-based regression gate runs in the main `rust` CI job (release profile):
+
+```
+cargo test -p kaya-bench --test perf_gate --release
+```
+
+- Located in `crates/kaya-bench/tests/perf_gate.rs`
+- Exercises the identical `run_smoke_put_get` path used by the criterion smoke bench.
+- Uses a time budget with headroom (500µs release / 10ms debug).
+- Fails CI on gross regressions (>>10x slowdowns) of the core engine hot path.
+- This satisfies the "CI regression gate" requirement for the performance envelope (M13-6 / ROADMAP item 6).
 
 Manual/nightly:
 
 - full benchmark matrix,
-- historical comparison,
-- regression threshold alerts.
+- historical comparison (e.g. via saved criterion baselines or external tooling),
+- finer regression threshold alerts on full workloads.
 
 ---
 
@@ -147,6 +162,7 @@ delete_weight = 5
 | BENCH-002 | Benchmark reports include environment context |
 | BENCH-003 | Performance optimization does not remove required correctness checks |
 | BENCH-004 | CI benchmarks are non-flaky and bounded |
+| BENCH-005 | CI has a performance regression gate for smoke path (M13-6) |
 
 ---
 
