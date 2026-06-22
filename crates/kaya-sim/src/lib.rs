@@ -1,3 +1,4 @@
+mod clock_skew;
 mod cluster;
 pub mod control;
 pub mod linear;
@@ -6,6 +7,7 @@ mod rng;
 mod runner;
 mod trace;
 
+pub use clock_skew::advance_node_clock;
 pub use cluster::{ClusterSim, ClusterSimReport, SimNetwork, SimNetworkConfig};
 pub use control::NodeController;
 pub use kaya_raft::RaftApplyCommand;

@@ -212,35 +212,11 @@ impl ClusterSim {
     pub fn step(&mut self) {
         self.ticks += 1;
 
-        // Phase 1: tick all nodes, collect outgoing messages.
         let ids: Vec<NodeId> = self.all_ids.clone();
         for &id in &ids {
-            let out = self.nodes.get_mut(&id).unwrap().tick();
-            self.network.inject(out);
+            self.tick_node(id);
         }
-
-        // Phase 2: deliver messages (round 1) and collect responses.
-        let round1 = self.network.drain();
-        for env in round1 {
-            if let Some(node) = self.nodes.get_mut(&env.to) {
-                let out = node.handle(env);
-                self.network.inject(out);
-            }
-        }
-
-        // Phase 3: deliver responses (round 2) so request→response completes
-        // in the same tick. Further messages are queued for the next tick.
-        let round2 = self.network.drain();
-        for env in round2 {
-            if let Some(node) = self.nodes.get_mut(&env.to) {
-                let out = node.handle(env);
-                self.network.inject(out);
-            }
-        }
-
-        self.apply_drained_entries();
-        self.check_election_safety();
-        self.check_state_machine_convergence();
+        self.deliver_network_rounds();
     }
 
     /// Run the cluster for `ticks` logical ticks.
@@ -492,6 +468,49 @@ impl ClusterSim {
         &mut self.network
     }
 
+    /// Tick a single node and inject its outgoing messages (used by clock-skew helper).
+    pub(crate) fn tick_node(&mut self, node: NodeId) {
+        let out = self.nodes.get_mut(&node).expect("node").tick();
+        self.network.inject(out);
+    }
+
+    /// Deliver queued network messages (two rounds) and run invariant checks.
+    pub(crate) fn deliver_network_rounds(&mut self) {
+        let round1 = self.network.drain();
+        for env in round1 {
+            if let Some(n) = self.nodes.get_mut(&env.to) {
+                let out = n.handle(env);
+                self.network.inject(out);
+            }
+        }
+
+        let round2 = self.network.drain();
+        for env in round2 {
+            if let Some(n) = self.nodes.get_mut(&env.to) {
+                let out = n.handle(env);
+                self.network.inject(out);
+            }
+        }
+
+        self.apply_drained_entries();
+        self.check_election_safety();
+        self.check_state_machine_convergence();
+    }
+
+    /// Replace a node's engine disk (e.g. inject [`SimDisk::with_faults`] schedules).
+    pub fn replace_node_disk(&mut self, id: NodeId, disk: Arc<SimDisk>) {
+        let engine_cfg = EngineConfig {
+            disable_locking: true,
+            ..EngineConfig::default()
+        };
+        let engine = self
+            .runtime
+            .block_on(Engine::open(engine_cfg, disk.clone()))
+            .unwrap_or_else(|e| panic!("engine open for node {}: {e}", id.0));
+        self._disks.insert(id, disk);
+        self.engines.insert(id, engine);
+    }
+
     /// The highest log index covered by a snapshot on this node (0 if none).
     pub fn last_included(&self, id: NodeId) -> LogIndex {
         self.nodes
@@ -516,7 +535,7 @@ impl ClusterSim {
 
     // ── State machine apply path (mirrors server drain_and_apply) ─────────────
 
-    fn apply_drained_entries(&mut self) {
+    pub(crate) fn apply_drained_entries(&mut self) {
         for &id in &self.all_ids {
             let node = match self.nodes.get_mut(&id) {
                 Some(n) => n,
@@ -605,7 +624,7 @@ impl ClusterSim {
     // ── Invariant checks ──────────────────────────────────────────────────────
 
     /// RAFT-INV-002: caught-up nodes share identical replicated state.
-    fn check_state_machine_convergence(&mut self) {
+    pub(crate) fn check_state_machine_convergence(&mut self) {
         let max_applied = self
             .nodes
             .values()
@@ -652,7 +671,7 @@ impl ClusterSim {
     }
 
     /// RAFT-INV-001: at most one leader per term.
-    fn check_election_safety(&mut self) {
+    pub(crate) fn check_election_safety(&mut self) {
         let mut leaders_per_term: HashMap<Term, Vec<NodeId>> = HashMap::new();
         for node in self.nodes.values() {
             if node.is_leader() {
@@ -801,7 +820,7 @@ mod tests {
 
     /// An isolated minority node does not become an additional leader.
     #[test]
-    fn isolated_minority_cannot_lead() {
+    fn partition_isolated_minority_cannot_lead() {
         let mut sim = ClusterSim::new(3, 55, no_fault_config());
         sim.run_ticks(60);
         let leader = sim.current_leader().expect("no initial leader");
@@ -1072,6 +1091,47 @@ mod tests {
             .scan_prefix(b"eng-");
         assert_eq!(leader_state, follower_state);
         assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+    }
+
+    /// SimDisk DiskFull on a follower engine does not violate election safety.
+    #[test]
+    fn cluster_disk_full_election_stable() {
+        use kaya_io::{FaultKind, FaultRule, FaultSchedule, SimSeed};
+
+        let mut sim = ClusterSim::new(3, 505, no_fault_config());
+        sim.run_ticks(60);
+        let leader = sim.current_leader().expect("leader");
+
+        let follower = (1u64..=3)
+            .map(NodeId)
+            .find(|&id| id != leader)
+            .expect("follower");
+        let schedule = FaultSchedule {
+            seed: SimSeed(505),
+            rules: vec![FaultRule {
+                operation_index: 0,
+                kind: FaultKind::DiskFull,
+            }],
+        };
+        sim.replace_node_disk(follower, Arc::new(SimDisk::with_faults(schedule)));
+
+        sim.propose_put(b"disk-key", b"disk-val");
+        sim.run_ticks(80);
+
+        let election_violations: Vec<_> = sim
+            .violations()
+            .iter()
+            .filter(|v| v.contains("RAFT-INV-001"))
+            .collect();
+        assert!(
+            election_violations.is_empty(),
+            "election safety violated under disk full: {:?}",
+            sim.violations()
+        );
+        assert!(
+            sim.current_leader().is_some(),
+            "cluster should retain a leader after disk-full injection"
+        );
     }
 
     /// Joint consensus expands the voter set from 3 to 4 nodes.
