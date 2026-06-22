@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # Package workspace crates for PR CI when workspace version is not yet on crates.io.
-# Publishes to a temporary local registry in dependency order, then validates packaging.
+# Publishes to a temporary local git registry in dependency order, then validates packaging.
 set -euo pipefail
 
 REGISTRY_DIR="${RUNNER_TEMP:-/tmp}/kaya-local-registry"
-mkdir -p "${REGISTRY_DIR}/index" .cargo
+mkdir -p .cargo "${REGISTRY_DIR}/dl"
+git init --bare "${REGISTRY_DIR}/index" >/dev/null
 
-cat >> .cargo/config.toml <<EOF
-
+cat > .cargo/config.toml <<EOF
 [registries.local]
-index = "sparse+file://${REGISTRY_DIR}/index/"
+index = "file://${REGISTRY_DIR}/index"
 EOF
 
 export CARGO_REGISTRIES_LOCAL_TOKEN="ci-dry-run"
 
-# Dependency order (kaya-net required by kayactl but omitted from crates.io publish list).
+# Dependency order (kaya-net required by kayactl).
 ORDER=(
   kaya-core
   kaya-io
