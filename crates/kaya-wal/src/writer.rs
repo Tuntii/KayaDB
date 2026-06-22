@@ -1,8 +1,11 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use kaya_core::{DurabilityMode, KayaError, Lsn, Result, SequenceNumber, WalConfig};
 use kaya_io::{Disk, RelativePath};
+use tokio::sync::Mutex;
 
+use crate::batch::{BatchAction, WalBatchWriter};
 use crate::{encode_record, WalPayload, WalRecord};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -22,7 +25,7 @@ pub struct AppendResult {
 }
 
 #[derive(Debug)]
-pub struct WalWriter<D: Disk> {
+struct WalWriterInner<D: Disk> {
     disk: Arc<D>,
     config: WalConfig,
     active_segment_id: SegmentId,
@@ -30,6 +33,12 @@ pub struct WalWriter<D: Disk> {
     active_len: u64,
     next_lsn: Lsn,
     next_sequence: SequenceNumber,
+    batch: WalBatchWriter,
+}
+
+#[derive(Debug, Clone)]
+pub struct WalWriter<D: Disk> {
+    inner: Arc<Mutex<WalWriterInner<D>>>,
 }
 
 impl<D: Disk> WalWriter<D> {
@@ -57,77 +66,149 @@ impl<D: Disk> WalWriter<D> {
             Err(KayaError::NotFound) => 0,
             Err(error) => return Err(error),
         };
+        let batch = WalBatchWriter::new(&config.batch);
 
         Ok(Self {
-            disk,
-            config,
-            active_segment_id,
-            active_path,
-            active_len,
-            next_lsn,
-            next_sequence,
+            inner: Arc::new(Mutex::new(WalWriterInner {
+                disk,
+                config,
+                active_segment_id,
+                active_path,
+                active_len,
+                next_lsn,
+                next_sequence,
+                batch,
+            })),
         })
     }
 
     pub async fn append(
-        &mut self,
+        &self,
         payload: WalPayload,
         mode: DurabilityMode,
     ) -> Result<AppendResult> {
-        let record = WalRecord::new(self.next_lsn, self.next_sequence, payload);
+        let mut inner = self.inner.lock().await;
+
+        if inner.batch.enabled() && inner.batch.has_pending() && inner.batch.interval_expired() {
+            inner.flush_strict_batch().await?;
+        }
+
+        let record = WalRecord::new(inner.next_lsn, inner.next_sequence, payload);
         let encoded = encode_record(&record)?;
         let encoded_len = u32::try_from(encoded.len()).map_err(|_| {
             KayaError::invalid_argument("encoded WAL record length does not fit into u32")
         })?;
-        if encoded_len > self.config.max_record_bytes {
+        if encoded_len > inner.config.max_record_bytes {
             return Err(KayaError::invalid_argument(format!(
                 "encoded WAL record exceeds configured max: {encoded_len} > {}",
-                self.config.max_record_bytes
+                inner.config.max_record_bytes
             )));
         }
 
-        if self.active_len > 0
-            && self.active_len + u64::from(encoded_len) > self.config.segment_max_bytes
+        if inner.active_len > 0
+            && inner.active_len + u64::from(encoded_len) > inner.config.segment_max_bytes
         {
-            self.rotate().await?;
+            inner.flush_pending_batch().await?;
+            inner.rotate().await?;
         }
 
-        let offset = self.disk.append(&self.active_path, &encoded).await?;
-        let durable = match mode {
-            DurabilityMode::Strict => {
-                let start = std::time::Instant::now();
-                self.disk.fsync_file(&self.active_path).await?;
-                let us = start.elapsed().as_micros() as u64;
-                self.active_len = offset + u64::from(encoded_len);
-                let result = AppendResult {
-                    lsn: self.next_lsn,
-                    sequence: self.next_sequence,
-                    segment_id: self.active_segment_id,
+        let lsn = inner.next_lsn;
+        let sequence = inner.next_sequence;
+        let segment_id = inner.active_segment_id;
+        let offset = inner.disk.append(&inner.active_path, &encoded).await?;
+
+        match mode {
+            DurabilityMode::Relaxed => {
+                inner.active_len = offset + u64::from(encoded_len);
+                inner.next_lsn = inner.next_lsn.next();
+                inner.next_sequence = inner.next_sequence.next();
+                return Ok(AppendResult {
+                    lsn,
+                    sequence,
+                    segment_id,
                     offset,
                     encoded_len,
-                    durable: true,
-                    fsync_duration_us: Some(us),
-                };
-                self.next_lsn = self.next_lsn.next();
-                self.next_sequence = self.next_sequence.next();
-                return Ok(result);
+                    durable: false,
+                    fsync_duration_us: None,
+                });
             }
-            DurabilityMode::Relaxed => false,
-        };
+            DurabilityMode::Strict => {
+                if !inner.batch.enabled() {
+                    let fsync_duration_us = inner.flush_strict_batch().await?;
+                    inner.active_len = offset + u64::from(encoded_len);
+                    inner.next_lsn = inner.next_lsn.next();
+                    inner.next_sequence = inner.next_sequence.next();
+                    return Ok(AppendResult {
+                        lsn,
+                        sequence,
+                        segment_id,
+                        offset,
+                        encoded_len,
+                        durable: true,
+                        fsync_duration_us: Some(fsync_duration_us),
+                    });
+                }
 
-        self.active_len = offset + u64::from(encoded_len);
-        let result = AppendResult {
-            lsn: self.next_lsn,
-            sequence: self.next_sequence,
-            segment_id: self.active_segment_id,
-            offset,
-            encoded_len,
-            durable,
-            fsync_duration_us: None,
-        };
-        self.next_lsn = self.next_lsn.next();
-        self.next_sequence = self.next_sequence.next();
-        Ok(result)
+                let action = inner.batch.after_record_appended(encoded.len());
+                inner.active_len = offset + u64::from(encoded_len);
+                inner.next_lsn = inner.next_lsn.next();
+                inner.next_sequence = inner.next_sequence.next();
+
+                match action {
+                    BatchAction::FlushNow => {
+                        let fsync_duration_us = inner.flush_strict_batch().await?;
+                        Ok(AppendResult {
+                            lsn,
+                            sequence,
+                            segment_id,
+                            offset,
+                            encoded_len,
+                            durable: true,
+                            fsync_duration_us: Some(fsync_duration_us),
+                        })
+                    }
+                    BatchAction::WaitForFlush(rx) => {
+                        drop(inner);
+                        let fsync_duration_us = rx.await.map_err(|_| {
+                            KayaError::internal("WAL batch waiter dropped before group commit")
+                        })?;
+                        Ok(AppendResult {
+                            lsn,
+                            sequence,
+                            segment_id,
+                            offset,
+                            encoded_len,
+                            durable: true,
+                            fsync_duration_us: Some(fsync_duration_us),
+                        })
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<D: Disk> WalWriterInner<D> {
+    async fn flush_pending_batch(&mut self) -> Result<()> {
+        if self.batch.has_pending() {
+            self.flush_strict_batch().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_strict_batch(&mut self) -> Result<u64> {
+        let start = Instant::now();
+        match self.disk.fsync_file(&self.active_path).await {
+            Ok(()) => {
+                let duration_us = start.elapsed().as_micros() as u64;
+                self.batch.complete_flush(duration_us);
+                Ok(duration_us)
+            }
+            Err(error) => {
+                self.batch.fail_flush();
+                Err(error)
+            }
+        }
     }
 
     async fn rotate(&mut self) -> Result<()> {

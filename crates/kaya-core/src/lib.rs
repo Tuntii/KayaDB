@@ -177,9 +177,30 @@ impl Default for DurabilityConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalBatchConfig {
+    /// Maximum strict records to buffer before a group fsync. `1` disables record-count batching.
+    pub batch_max_records: usize,
+    /// Maximum encoded bytes to buffer before a group fsync. `0` disables byte-limit batching.
+    pub batch_max_bytes: usize,
+    /// Maximum time (microseconds) to hold a partial batch before flushing. `0` disables time-based flush.
+    pub batch_flush_interval_us: u64,
+}
+
+impl Default for WalBatchConfig {
+    fn default() -> Self {
+        Self {
+            batch_max_records: 1,
+            batch_max_bytes: 0,
+            batch_flush_interval_us: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalConfig {
     pub segment_max_bytes: u64,
     pub max_record_bytes: u32,
+    pub batch: WalBatchConfig,
 }
 
 impl Default for WalConfig {
@@ -187,6 +208,7 @@ impl Default for WalConfig {
         Self {
             segment_max_bytes: DEFAULT_SEGMENT_MAX_BYTES,
             max_record_bytes: DEFAULT_MAX_PAYLOAD_LEN,
+            batch: WalBatchConfig::default(),
         }
     }
 }

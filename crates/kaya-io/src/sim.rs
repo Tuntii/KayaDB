@@ -134,6 +134,18 @@ impl SimDisk {
             .clone()
     }
 
+    /// Count successful `fsync_file` operations (optionally filtered by path prefix).
+    pub fn fsync_file_count(&self, path_prefix: Option<&str>) -> u64 {
+        self.events()
+            .iter()
+            .filter(|event| {
+                event.kind == "fsync_file"
+                    && event.result == "ok"
+                    && path_prefix.is_none_or(|prefix| event.path.starts_with(prefix))
+            })
+            .count() as u64
+    }
+
     fn record_event(
         state: &mut SimState,
         kind: impl Into<String>,

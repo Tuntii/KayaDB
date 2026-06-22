@@ -1,3 +1,4 @@
+mod batch;
 mod codec;
 mod inspect;
 mod recovery;
@@ -15,7 +16,7 @@ pub use writer::{AppendResult, SegmentId, WalWriter};
 mod tests {
     use std::sync::Arc;
 
-    use kaya_core::{DurabilityMode, WalConfig};
+    use kaya_core::{DurabilityMode, WalBatchConfig, WalConfig};
     use kaya_io::SimDisk;
 
     use super::*;
@@ -27,6 +28,37 @@ mod tests {
             .block_on(f)
     }
 
+    fn block_on_multi<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    fn batch_config(records: usize) -> WalConfig {
+        WalConfig {
+            batch: WalBatchConfig {
+                batch_max_records: records,
+                ..WalBatchConfig::default()
+            },
+            ..WalConfig::default()
+        }
+    }
+
+    async fn strict_put(writer: &WalWriter<SimDisk>, key: u8) {
+        writer
+            .append(
+                WalPayload::Put {
+                    key: vec![key],
+                    value: vec![key, key],
+                },
+                DurabilityMode::Strict,
+            )
+            .await
+            .unwrap();
+    }
+
     // KD-0206 — durable-prefix invariant:
     // Every record appended with Strict durability before a crash must appear
     // in the recovery report after crash+restart.
@@ -35,7 +67,7 @@ mod tests {
         block_on(async {
             let disk = Arc::new(SimDisk::new());
             let config = WalConfig::default();
-            let mut writer = WalWriter::open(config.clone(), disk.clone()).await.unwrap();
+            let writer = WalWriter::open(config.clone(), disk.clone()).await.unwrap();
 
             let mut strict_lsns = Vec::new();
             for i in 0_u8..5 {
@@ -77,7 +109,7 @@ mod tests {
         block_on(async {
             let disk = Arc::new(SimDisk::new());
             let config = WalConfig::default();
-            let mut writer = WalWriter::open(config.clone(), disk.clone()).await.unwrap();
+            let writer = WalWriter::open(config.clone(), disk.clone()).await.unwrap();
 
             for i in 0_u8..3 {
                 writer
@@ -111,7 +143,7 @@ mod tests {
         block_on(async {
             let disk = Arc::new(SimDisk::new());
             let config = WalConfig::default();
-            let mut writer = WalWriter::open(config.clone(), disk.clone()).await.unwrap();
+            let writer = WalWriter::open(config.clone(), disk.clone()).await.unwrap();
 
             for i in 0_u8..3 {
                 writer
@@ -151,7 +183,7 @@ mod tests {
         block_on(async {
             let disk = Arc::new(SimDisk::new());
             let config = WalConfig::default();
-            let mut writer = WalWriter::open(config.clone(), disk.clone()).await.unwrap();
+            let writer = WalWriter::open(config.clone(), disk.clone()).await.unwrap();
 
             // One strict record → fsynced to stable.
             writer
@@ -202,7 +234,7 @@ mod tests {
                 segment_max_bytes: 64,
                 ..WalConfig::default()
             };
-            let mut writer = WalWriter::open(config.clone(), disk.clone()).await.unwrap();
+            let writer = WalWriter::open(config.clone(), disk.clone()).await.unwrap();
 
             let mut lsns = Vec::new();
             for i in 0_u8..4 {
@@ -226,6 +258,93 @@ mod tests {
             for (expected, recovered) in lsns.iter().zip(report.records.iter()) {
                 assert_eq!(*expected, recovered.record.lsn);
             }
+        });
+    }
+
+    // Batch disabled (default): each strict append performs its own fsync.
+    #[test]
+    fn wal_batch_disabled_one_fsync_per_strict_append() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = WalConfig::default();
+            let writer = WalWriter::open(config.clone(), disk.clone()).await.unwrap();
+
+            for key in 0_u8..4 {
+                strict_put(&writer, key).await;
+            }
+
+            assert_eq!(disk.fsync_file_count(Some("wal")), 4);
+        });
+    }
+
+    // Batch enabled: N strict appends share one group fsync.
+    #[test]
+    fn wal_batch_enabled_group_commit_single_fsync() {
+        block_on_multi(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = batch_config(4);
+            let writer = WalWriter::open(config.clone(), disk.clone()).await.unwrap();
+
+            let mut handles = Vec::new();
+            for key in 0_u8..4 {
+                let writer = writer.clone();
+                handles.push(tokio::spawn(async move {
+                    strict_put(&writer, key).await;
+                }));
+            }
+            for handle in handles {
+                handle.await.unwrap();
+            }
+
+            assert_eq!(disk.fsync_file_count(Some("wal")), 1);
+        });
+    }
+
+    // Crash while a partial batch is still in volatile storage: only the durable prefix survives.
+    #[test]
+    fn wal_batch_crash_mid_batch_keeps_durable_prefix_only() {
+        block_on_multi(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = batch_config(4);
+            let writer = WalWriter::open(config.clone(), disk.clone()).await.unwrap();
+
+            // Complete one full batch (4 records, 1 fsync).
+            let mut flushed = Vec::new();
+            for key in 0_u8..4 {
+                let writer = writer.clone();
+                flushed.push(tokio::spawn(async move {
+                    strict_put(&writer, key).await;
+                }));
+            }
+            for handle in flushed {
+                handle.await.unwrap();
+            }
+
+            // Start a second batch but crash before it is group-committed.
+            let mut pending = Vec::new();
+            for key in 10_u8..13 {
+                let writer = writer.clone();
+                pending.push(tokio::spawn(async move {
+                    strict_put(&writer, key).await;
+                }));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            disk.crash();
+            for handle in pending {
+                handle.abort();
+            }
+
+            let report = recover_wal(config, disk).await.unwrap();
+            assert_eq!(report.records.len(), 4, "only the first batch should survive");
+            let recovered_keys: Vec<u8> = report
+                .records
+                .iter()
+                .filter_map(|r| match &r.record.payload {
+                    WalPayload::Put { key, .. } => key.first().copied(),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(recovered_keys, vec![0, 1, 2, 3]);
         });
     }
 

@@ -25,7 +25,7 @@ fn wal_append_benchmarks(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let disk = Arc::new(SimDisk::new());
-                let mut w = WalWriter::open(WalConfig::default(), disk).await.unwrap();
+                let w = WalWriter::open(WalConfig::default(), disk).await.unwrap();
                 for i in 0u8..200 {
                     w.append(
                         WalPayload::Put {
@@ -46,7 +46,7 @@ fn wal_append_benchmarks(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let disk = Arc::new(SimDisk::new());
-                let mut w = WalWriter::open(WalConfig::default(), disk).await.unwrap();
+                let w = WalWriter::open(WalConfig::default(), disk).await.unwrap();
                 for i in 0u8..200 {
                     w.append(
                         WalPayload::Put {
@@ -69,7 +69,7 @@ fn wal_append_benchmarks(c: &mut Criterion) {
                 let disk = Arc::new(SimDisk::new());
                 let config = WalConfig::default();
                 {
-                    let mut w = WalWriter::open(config.clone(), disk.clone()).await.unwrap();
+                    let w = WalWriter::open(config.clone(), disk.clone()).await.unwrap();
                     for i in 0u8..200 {
                         w.append(
                             WalPayload::Put {
