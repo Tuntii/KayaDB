@@ -1,0 +1,91 @@
+name: Publish Crates
+
+# Publishes workspace crates to https://crates.io in dependency order.
+#
+# Authentication: set repository secret CARGO_REGISTRY_TOKEN
+#   1. Create a token at https://crates.io/settings/tokens
+#   2. Repo → Settings → Secrets and variables → Actions → New repository secret
+#   3. Name: CARGO_REGISTRY_TOKEN (do not commit the token value)
+#
+# Triggers:
+#   - workflow_dispatch: manual publish (any branch)
+#   - workflow_run: after "Release Binaries" succeeds on tag push v*
+#   - pull_request: packaging dry-run for kaya-engine and kayactl
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Release Binaries"]
+    types: [completed]
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+concurrency:
+  group: publish-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CRATES: >-
+    kaya-core
+    kaya-io
+    kaya-wal
+    kaya-lsm
+    kaya-engine
+    kaya-raft
+    kaya-client
+    kayactl
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "kaya-publish"
+
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          for crate in $CRATES; do
+            echo "::group::Publishing ${crate}"
+            cargo publish -p "${crate}" --no-verify
+            echo "Waiting 30s for crates.io index propagation..."
+            sleep 30
+            echo "::endgroup::"
+          done
+
+  dry-run:
+    name: Publish dry-run (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "kaya-publish-dry-run"
+
+      - name: cargo publish --dry-run (kaya-engine, kayactl)
+        run: |
+          set -euo pipefail
+          cargo publish --dry-run --no-verify -p kaya-engine
+          cargo publish --dry-run --no-verify -p kayactl

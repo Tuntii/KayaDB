@@ -38,5 +38,42 @@ jobs:
         # Runs the smoke workload under release profile and fails on severe regression.
         run: cargo test -p kaya-bench --test perf_gate --release -- --nocapture
 
+  publish-dry-run:
+    name: crates.io publish dry-run
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect crate changes
+        id: changes
+        run: |
+          if git diff --name-only "origin/${{ github.base_ref }}"...HEAD \
+            | grep -qE '^(crates/|Cargo\.(toml|lock))'; then
+            echo "crates=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "crates=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip (no crate changes)
+        if: steps.changes.outputs.crates != 'true'
+        run: echo "No crate changes; skipping publish dry-run."
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.changes.outputs.crates == 'true'
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.changes.outputs.crates == 'true'
+        with:
+          shared-key: "kaya-publish-dry-run"
+
+      - name: cargo publish --dry-run (kaya-engine, kayactl)
+        if: steps.changes.outputs.crates == 'true'
+        run: |
+          cargo publish --dry-run --no-verify -p kaya-engine
+          cargo publish --dry-run --no-verify -p kayactl
+
 
 
