@@ -1,5 +1,10 @@
+mod compaction;
 mod manifest;
 mod sstable;
+
+pub use compaction::{
+    CompactionCandidate, CompactionPolicy, L0MergePolicy, LevelStrategy, TierStrategy,
+};
 
 pub use manifest::{
     decode_manifest_edit, encode_manifest_edit, inspect_manifest_path, replay_manifest,
@@ -8,9 +13,9 @@ pub use manifest::{
     MANIFEST_HEADER_LEN, MANIFEST_MAGIC, MANIFEST_VERSION,
 };
 pub use sstable::{
-    decode_footer, fuzz_decode_data_block, fuzz_decode_index_block, inspect_sstable_path, SstEntry,
-    SstFooter, SstInspection, SstableBuilder, SstableReader, SST_FOOTER_LEN, SST_MAGIC,
-    SST_VERSION,
+    decode_footer, footer_stored_crc, fuzz_decode_data_block, fuzz_decode_index_block,
+    inspect_sstable_path, SstEntry, SstFooter, SstInspection, SstableBuilder, SstableReader,
+    SST_FOOTER_LEN, SST_FOOTER_LEN_V2, SST_MAGIC, SST_VERSION, SST_VERSION_V1,
 };
 
 use std::collections::BTreeMap;

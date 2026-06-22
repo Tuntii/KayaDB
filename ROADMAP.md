@@ -1,11 +1,11 @@
 # KayaDB Development Roadmap
 
 **Status:** Living roadmap  
-**Last updated:** 2026-06-18
+**Last updated:** 2026-06-23
 
 > **"Geniş ve yaşayan yol haritası"** — Bu belge hem tarihi başarıları arşivler, hem şu anki odak noktalarını gösterir, hem de uzun vadeli vizyonu (birden fazla paralel track ile) detaylandırır. Tasarım-öncelikli ve correctness-öncelikli felsefe korunur.
 
-**Not (2026-06-16):** M0–M11'in çok detaylı listeleri ve eski "Current snapshot" bölümü bu belgenin okunabilirliğini bozduğu için büyük ölçüde arşivlenmiştir (yukarıdaki "Completed Work — Historical Archive" bölümüne bakın). Bundan sonra roadmap **geniş gelecek vizyonu** + aktif M12/M13 üzerine odaklanacak.  
+**Not (2026-06-16):** M0–M11'in çok detaylı listeleri ve eski "Current snapshot" bölümü bu belgenin okunabilirliğini bozduğu için büyük ölçüde arşivlenmiştir (yukarıdaki "Completed Work — Historical Archive" bölümüne bakın). Bundan sonra roadmap **geniş gelecek vizyonu** + aktif M14 üzerine odaklanacak.  
 
 KayaDB is developed design-first and correctness-first. The roadmap intentionally prioritizes crash consistency, deterministic failure testing and inspectable storage formats before performance or distributed features.
 
@@ -38,6 +38,25 @@ Goal: cross the line from “serious prototype” to “operators can run this w
 6. **Performance envelope** ✅ — published benchmark methodology + regression budget in CI (`BENCHMARKS.md` gates + `kaya-bench/tests/perf_gate.rs` release-mode assertion on smoke path). CI step added to main rust job.
 
 **M13 exit (2026-06-21):** experimental label dropped; remaining deployment hardening documented as accepted risks in `docs/security.md` §7.
+
+### M14 — Correctness + algorithms 🟡
+
+Goal: deepen LSM algorithm choices and distributed correctness proof while keeping formats inspectable and modules maintainable. Shipped in v0.1.43 on `feat/analysis-improvements`.
+
+1. **Compaction policy** ✅ — `CompactionPolicy` trait in `kaya-lsm` (`L0MergePolicy`, `LevelStrategy`, `TierStrategy`); `EngineConfig.compaction.policy` selects strategy at engine open.
+2. **Bloom filter** ✅ — SSTable v2 footer with blocked double-hashing bloom; `SstableConfig.bloom_bits_per_key` (default on); read path skips blocks on negative lookup.
+3. **WAL group-commit batching** ✅ — `WalBatchWriter` in `kaya-wal` with `WalBatchConfig` (`batch_max_records`, `batch_max_bytes`, `batch_flush_interval_us`); strict durability preserved via single group fsync per batch.
+4. **God-file splits** ✅ — `kaya-engine` → `memtable`, `flush`, `snapshot`, `stats`; `kaya-server/cluster` → `client_ops`, `election`, `replication`, `snapshot`, `stats`; `kayactl` → `cli`, `local`, `server`, `inspect`, `stats_cmd`, `ebpf`.
+5. **Chaos matrix CI** ✅ — `.github/workflows/chaos-matrix.yml`: PR smoke + nightly `DiskFull`, `NetworkPartition`, `ClockSkew` matrix cells.
+6. **Jepsen CI** ✅ — `.github/workflows/jepsen.yml`: PR `smoke_scenario` gate; nightly/tag `full_gate` T1–T7 with WGL concurrent verify.
+7. **Publish CI** ✅ — GitHub Pages docs deploy (`docs.yml`), multi-platform release binaries (`release.yml`), crates.io badges + `scripts/smart_publish.ps1` publish helper; `audit.yml` (`cargo audit` + `cargo deny`).
+
+**M14 remaining (planned):**
+
+1. **Jepsen full suite** 🟡 — Harden Rust-native T1–T7 under partition nemesis in CI; richer scenario registry; optional external Clojure Jepsen harness hook (`workflow_dispatch` stub in `jepsen.yml`).
+2. **io_uring backend** ⬜ — Linux `Disk` implementation behind `kaya-io` feature flag per `spec/docs/disk-and-io-spec.md`; completion tracing pairs with Track A eBPF work.
+
+**M14 exit (target):** compaction policy + bloom + WAL batching stable in production-like workloads; Jepsen full gate green on nightly; `io_uring` prototype behind feature flag with SimDisk-equivalent contract tests.
 
 ---
 
@@ -516,7 +535,7 @@ M10 completed the client/protocol hardening pass. The project now has:
 4. **Dynamic cluster membership.** ✅ Joint-consensus with `ClusterMember` addresses, `Arc<RwLock<NodeRoster>>` hot reload, `ADD_MEMBER`/`REMOVE_MEMBER` opcodes (7/8), `kayactl add-node`/`remove-node`, `--join-cluster`, persisted `cluster-roster.json`.
 5. **Production security boundaries.** ✅ `--allow-public-bind` guard, bind validation, 64 MiB frame limits, `docs/security.md` enforcement table.
 
-### M12 — Jepsen prep + Linux observability experiments
+### M12 — Jepsen prep + Linux observability experiments ✅
 
 6. **Jepsen preparation.** ✅
    - Workload and nemesis definitions documented in `docs/jepsen-design.md`.
@@ -527,7 +546,7 @@ M10 completed the client/protocol hardening pass. The project now has:
      - `history` module: thread-safe operation recorder with `LinearizabilityChecker` integration.
      - `runner` module: test orchestrator with workload + nemesis + verification pipeline.
    - Full Jepsen (Clojure) deferred until snapshot and dynamic membership are stable.
-7. **Linux eBPF observability.** 🟡 (initial experiments + userspace complement delivered)
+7. **Linux eBPF observability.** ✅ (initial experiments + userspace complement delivered)
    - ✅ `scripts/ebpf/fsync-latency.bt` and `block-io-latency.bt` (bpftrace)
    - ✅ `kayactl ebpf fsync-latency|block-latency [--pid N]`
    - ✅ `scripts/ebpf/README.md` + docs updates
@@ -546,8 +565,9 @@ Suggested next milestone shape:
 
 ```text
 M11 — Benchmark discipline, concurrent linearizability, Raft snapshots, dynamic membership ✅
-M12 — Jepsen prep + Linux observability experiments
-M13 — Productization (see North star above)
+M12 — Jepsen prep + Linux observability experiments ✅
+M13 — Productization ✅
+M14 — Correctness + algorithms (compaction, bloom, WAL batching, CI gates) 🟡
 ```
 
 ---
@@ -619,15 +639,18 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 
 ### Track B: I/O & Low-level Storage
 
-- Linux `io_uring` Disk implementasyonu (yeni async backend)
-- Gelişmiş compaction stratejileri (leveled + tiered hibrit)
-- Block cache, bloom filter, compression seçenekleri (SSTable v2)
+- Linux `io_uring` Disk implementasyonu (yeni async backend) — **M14 planned**
+- Gelişmiş compaction stratejileri (leveled + tiered hibrit) — ✅ `CompactionPolicy` wired (M14)
+- Block cache, bloom filter, compression seçenekleri (SSTable v2) — ✅ bloom filter (M14); block cache + compression ⬜
+- WAL group-commit batching — ✅ `WalBatchWriter` (M14)
 - Daha iyi fsync_dir semantiği + directory sync optimizasyonları
 
 ### Track C: Distributed Correctness & Chaos
 
-- Tam Clojure Jepsen suite (gerçek cluster + dynamic membership + snapshots altında)
-- Daha zengin nemesis seti + clock skew, disk latency injection
+- Tam Clojure Jepsen suite (gerçek cluster + dynamic membership + snapshots altında) — **M14 planned**
+- Rust-native Jepsen CI (smoke + nightly T1–T7) — ✅ M14
+- Chaos matrix CI (DiskFull, NetworkPartition, ClockSkew) — ✅ M14
+- Daha zengin nemesis seti + clock skew, disk latency injection — 🟡 partial (clock skew in chaos matrix)
 - TLA+ modellerinin genişletilmesi (manifest + compaction + Raft bir arada)
 - Linearizability checker'in production'a yakın versiyonu (WGL + daha iyi raporlama)
 

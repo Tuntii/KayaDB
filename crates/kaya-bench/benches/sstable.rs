@@ -9,7 +9,7 @@ use kaya_lsm::{SstEntry, SstableBuilder, SstableReader};
 const N: usize = 1_000;
 
 fn build_table(n: usize) -> Vec<u8> {
-    let mut builder = SstableBuilder::new(4096);
+    let mut builder = SstableBuilder::new(4096, 10);
     for i in 0..n {
         builder.add(SstEntry {
             key: format!("key:{i:06}").into_bytes(),

@@ -54,3 +54,38 @@ We still maintain:
 - `SUMMARY.md`
 
 You can connect the repo to [gitbook.com](https://www.gitbook.com) at any time and point it at the `docs/` folder if you ever want a hosted GitBook experience in addition to GitHub Pages.
+
+## Publishing crates to crates.io
+
+Workspace crates are published in dependency order via `scripts/smart_publish.ps1` (see crate list inside the script). The helper bumps the `[workspace.package]` version from git commit count unless `-SkipVersionUpdate` is passed.
+
+Manual publish (after version bump in root `Cargo.toml`):
+
+```powershell
+.\scripts\smart_publish.ps1 -SkipVersionUpdate
+```
+
+Dry run:
+
+```powershell
+.\scripts\smart_publish.ps1 -DryRun -SkipVersionUpdate
+```
+
+Release binaries are built automatically on `v*` tags via `.github/workflows/release.yml`.
+
+## GitHub repository topics (set in GitHub UI)
+
+Topics improve discoverability on GitHub and are **not** stored in the repo — maintainers set them under **Repository → About → Topics**. Recommended topics for KayaDB:
+
+- `lsm-tree`
+- `raft`
+- `storage-engine`
+- `correctness`
+- `deterministic-testing`
+- `jepsen`
+- `rust`
+- `database`
+- `distributed-systems`
+- `embedded-database`
+
+Optional extras: `wal`, `consensus`, `chaos-engineering`, `property-testing`.

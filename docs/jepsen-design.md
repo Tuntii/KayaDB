@@ -369,20 +369,15 @@ Script-based partition (`partition-node.sh`) assumes fixed ports from `start-clu
 
 ### Phase 3: CI Integration (done)
 
-Chaos gates live in `.github/workflows/` and are **disabled by default** until the repository variable `CHAOS_CI_ENABLED` is set to `true` in GitHub **Settings → Secrets and variables → Actions → Variables**. This keeps `cargo test --workspace` fast on every PR while allowing operators to opt in once durable Raft + harness criteria are green locally.
+Chaos gates live in `.github/workflows/jepsen.yml`. `cargo test --workspace` in `ci.yml` still excludes `kaya-jepsen-test` integration tests so unit tests stay fast; Jepsen smoke runs in the dedicated workflow.
 
 | Job | Workflow | Trigger | What runs | Budget |
 |-----|----------|---------|-----------|--------|
-| **chaos-smoke** | `ci.yml` | Every PR (after `rust` job) | `cargo test -p kaya-jepsen-test --test smoke` — 30s Register + kill-node, **sequential** verify | ≤ 10 min |
-| **chaos-full** | `chaos-nightly.yml` | Nightly cron (`0 3 * * *`), `workflow_dispatch`, release tags `v*` | `cargo test -p kaya-jepsen-test --test full_gate -- --ignored --nocapture --test-threads=1` — T1–T7 sequentially, **WGL concurrent** verify | ≤ 45 min |
+| **smoke** | `jepsen.yml` | Every PR + push to `main` | `cargo test -p kaya-jepsen-test` lib + `cluster_controller_smoke` + `--test smoke` — 30s Register + kill-node, **sequential** verify | ≤ 5 min |
+| **full-suite** | `jepsen.yml` | Nightly cron (`0 3 * * *`), `workflow_dispatch` (suite=full), release tags `v*` | `cargo test -p kaya-jepsen-test --test full_gate -- --ignored --nocapture --test-threads=1` — T1–T7 sequentially, **WGL concurrent** verify | ≤ 45 min |
+| **clojure-jepsen** | `jepsen.yml` | `workflow_dispatch` with `jepsen=1` only | Documents optional external Clojure Jepsen (`JEPSEN=1`); no harness in repo | — |
 
-**Activation timeline:**
-
-| Stage | `CHAOS_CI_ENABLED` | What runs |
-|-------|-------------------|-----------|
-| Default | unset / not `true` | Unit tests only; chaos jobs skipped |
-| Phase 2 | `true` | PR `chaos-smoke` on every pull request |
-| Phase 3 | `true` + `chaos-nightly.yml` merged | Nightly `chaos-full` + release-tag gate |
+**Manual dispatch:** use **Actions → Jepsen → Run workflow** with `suite=smoke` or `suite=full`. Set `jepsen=1` to run the optional Clojure placeholder step.
 
 **Failure artifacts:** On `chaos-full` failure, JSONL traces under `{tmpdir}/traces/{scenario}-*.jsonl` are uploaded as the `chaos-traces` artifact (14-day retention).
 
@@ -408,6 +403,6 @@ KayaDB's approach: build a lightweight Rust-native test harness instead of using
 - `crates/kaya-jepsen-test/src/cluster_controller.rs` - In-process cluster spawn, dynamic ports, port-aware partition
 - `crates/kaya-jepsen-test/tests/smoke.rs` - PR `chaos-smoke` gate
 - `crates/kaya-jepsen-test/tests/full_gate.rs` - Nightly T1–T7 WGL gate (`#[ignore]` locally)
-- `.github/workflows/ci.yml` - `chaos-smoke` job (gated by `CHAOS_CI_ENABLED`)
-- `.github/workflows/chaos-nightly.yml` - `chaos-full` nightly + release-tag gate
+- `.github/workflows/jepsen.yml` - PR smoke + nightly full-suite + optional Clojure (`JEPSEN=1`) dispatch
+- `.github/workflows/ci.yml` - workspace unit tests (excludes `kaya-jepsen-test` integration)
 - `ROADMAP.md` - M12 harness complete; M13 chaos gates (T6/T7) + durable Raft on `feat/validation-first-consensus`

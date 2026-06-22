@@ -11,6 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.43] — 2026-06-23
+
+M14 correctness + algorithms milestone prep: storage algorithm upgrades, module splits, and expanded CI correctness gates.
+
+### Added
+- `CompactionPolicy` trait in `kaya-lsm` with L0 merge, leveled, and size-tiered strategies; wired through `EngineConfig.compaction`
+- SSTable v2 bloom filter (configurable `bloom_bits_per_key`) with read-path negative lookup pruning
+- WAL group-commit batching via `WalBatchWriter` and `WalBatchConfig` (record count, byte limit, time flush)
+- Chaos matrix CI (`.github/workflows/chaos-matrix.yml`): DiskFull, NetworkPartition, ClockSkew axes
+- Jepsen CI (`.github/workflows/jepsen.yml`): PR smoke scenario + nightly/tag full T1–T7 WGL gate
+- Security audit CI (`audit.yml`: `cargo audit` + `cargo deny`) and `deny.toml`
+- crates.io badges for `kaya-engine` and `kayactl` in README
+
+### Changed
+- Split `kaya-engine` god-file into `memtable`, `flush`, `snapshot`, and `stats` modules
+- Split `kaya-server` cluster god-file into `client_ops`, `election`, `replication`, `snapshot`, and `stats`
+- Split `kayactl` god-file into `cli`, `local`, `server`, `inspect`, `stats_cmd`, and `ebpf` modules
+- ROADMAP and README status badge updated to M14 correctness+algorithm (in progress)
+
+---
+
 ## [M13] — 2026-06-21
 
 M13 productization milestone: operators can run KayaDB with documented security controls and day-2 procedures. Experimental status label removed.

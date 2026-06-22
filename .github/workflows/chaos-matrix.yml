@@ -1,0 +1,75 @@
+# Chaos matrix CI — targeted fault injection per matrix cell.
+#
+# Matrix axes:
+#   DiskFull          — SimDisk FaultKind::DiskFull (kaya-io / kaya-engine / kaya-sim cluster)
+#   NetworkPartition  — kaya-sim SimNetwork isolate/partition tests
+#   ClockSkew         — kaya-sim logical clock skew via advance_node_clock
+#
+# Triggers:
+#   pull_request      — smoke subset (one fast test per fault type)
+#   schedule (03:00)  — full targeted suite per cell
+#   workflow_dispatch — manual full run
+#
+# Each matrix cell has a 10-minute job timeout.
+
+name: Chaos Matrix
+
+on:
+  pull_request:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  chaos-matrix:
+    name: "${{ matrix.fault }} (${{ github.event_name == 'pull_request' && 'smoke' || 'full' }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - fault: DiskFull
+            smoke: >-
+              cargo test -p kaya-io sim_disk_disk_full_fault_on_append -- --nocapture
+              && cargo test -p kaya-engine engine_disk_full_resilience -- --nocapture
+            full: >-
+              cargo test -p kaya-io sim_disk_disk_full -- --nocapture
+              && cargo test -p kaya-engine engine_disk_full -- --nocapture
+              && cargo test -p kaya-sim cluster_disk_full -- --nocapture
+          - fault: NetworkPartition
+            smoke: >-
+              cargo test -p kaya-sim partition_ -- --nocapture
+            full: >-
+              cargo test -p kaya-sim partition -- --nocapture
+              && cargo test -p kaya-sim quorum_commit_requires_majority_in_five_node_cluster -- --nocapture
+              && cargo test -p kaya-sim engine_backed_snapshot_catches_up_follower -- --nocapture
+          - fault: ClockSkew
+            smoke: >-
+              cargo test -p kaya-sim cluster_clock_skew_election_stable -- --nocapture
+            full: >-
+              cargo test -p kaya-sim clock_skew -- --nocapture
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "kaya-chaos-matrix-${{ matrix.fault }}"
+
+      - name: Run chaos matrix cell
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            ${{ matrix.smoke }}
+          else
+            ${{ matrix.full }}
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: chaos-matrix-${{ matrix.fault }}-traces
+          path: "**/traces/*.jsonl"
+          retention-days: 14

@@ -1,0 +1,102 @@
+name: Jepsen
+
+# Rust-native kaya-jepsen-test harness (primary deliverable).
+# - PR / main: smoke scenario only (sequential verify, kill-node nemesis, <5 min)
+# - Nightly / release tags: full scenario registry T1–T7 (WGL concurrent verify)
+#
+# Optional Clojure Jepsen: no harness is checked into this repo. To experiment with
+# external Jepsen, run workflow_dispatch with jepsen=1 (sets JEPSEN=1 on the job).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Suite to run (smoke = PR gate, full = T1–T7 WGL gate)"
+        required: true
+        default: smoke
+        type: choice
+        options:
+          - smoke
+          - full
+      jepsen:
+        description: "Run optional Clojure Jepsen step (JEPSEN=1; requires external harness)"
+        required: false
+        default: "0"
+        type: choice
+        options:
+          - "0"
+          - "1"
+
+jobs:
+  smoke:
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.suite == 'smoke')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "kaya-jepsen-smoke"
+
+      - name: Unit + controller smoke
+        run: |
+          cargo test -p kaya-jepsen-test --lib -- --test-threads=1
+          cargo test -p kaya-jepsen-test --test cluster_controller_smoke -- --test-threads=1
+
+      - name: Chaos smoke (smoke_scenario registry entry)
+        run: cargo test -p kaya-jepsen-test --test smoke -- --nocapture --test-threads=1
+
+  full-suite:
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.suite == 'full')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "kaya-jepsen-full"
+
+      - name: Full WGL gate (T1–T7 scenario registry)
+        run: cargo test -p kaya-jepsen-test --test full_gate -- --ignored --nocapture --test-threads=1
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: jepsen-traces
+          path: "**/traces/*.jsonl"
+          retention-days: 14
+
+  clojure-jepsen:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.jepsen == '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      JEPSEN: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clojure Jepsen (optional, not in repo)
+        run: |
+          echo "JEPSEN=${JEPSEN}: no Clojure Jepsen harness is vendored in KayaDB."
+          echo "Primary correctness gate is the Rust kaya-jepsen-test harness (smoke + full_gate)."
+          echo "To run external Jepsen: provision a Linux cluster, add your harness, and invoke it here."
+          exit 0

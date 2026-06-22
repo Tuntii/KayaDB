@@ -11,6 +11,7 @@ pub const DEFAULT_MAX_PAYLOAD_LEN: u32 = 32 * 1024 * 1024;
 pub const DEFAULT_SEGMENT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_MEMTABLE_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_SSTABLE_BLOCK_TARGET_BYTES: usize = 32 * 1024;
+pub const DEFAULT_SSTABLE_BLOOM_BITS_PER_KEY: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KayaError {
@@ -176,9 +177,30 @@ impl Default for DurabilityConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalBatchConfig {
+    /// Maximum strict records to buffer before a group fsync. `1` disables record-count batching.
+    pub batch_max_records: usize,
+    /// Maximum encoded bytes to buffer before a group fsync. `0` disables byte-limit batching.
+    pub batch_max_bytes: usize,
+    /// Maximum time (microseconds) to hold a partial batch before flushing. `0` disables time-based flush.
+    pub batch_flush_interval_us: u64,
+}
+
+impl Default for WalBatchConfig {
+    fn default() -> Self {
+        Self {
+            batch_max_records: 1,
+            batch_max_bytes: 0,
+            batch_flush_interval_us: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalConfig {
     pub segment_max_bytes: u64,
     pub max_record_bytes: u32,
+    pub batch: WalBatchConfig,
 }
 
 impl Default for WalConfig {
@@ -186,6 +208,7 @@ impl Default for WalConfig {
         Self {
             segment_max_bytes: DEFAULT_SEGMENT_MAX_BYTES,
             max_record_bytes: DEFAULT_MAX_PAYLOAD_LEN,
+            batch: WalBatchConfig::default(),
         }
     }
 }
@@ -206,12 +229,15 @@ impl Default for MemtableConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SstableConfig {
     pub block_target_bytes: usize,
+    /// Bloom filter bits per key; `0` disables the filter.
+    pub bloom_bits_per_key: u32,
 }
 
 impl Default for SstableConfig {
     fn default() -> Self {
         Self {
             block_target_bytes: DEFAULT_SSTABLE_BLOCK_TARGET_BYTES,
+            bloom_bits_per_key: DEFAULT_SSTABLE_BLOOM_BITS_PER_KEY,
         }
     }
 }
@@ -231,6 +257,62 @@ impl Default for LimitsConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CompactionPolicyKind {
+    #[default]
+    L0Merge,
+    Leveled,
+    SizeTiered,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeveledCompactionConfig {
+    pub level_count: u32,
+    pub l0_compaction_trigger: usize,
+}
+
+impl Default for LeveledCompactionConfig {
+    fn default() -> Self {
+        Self {
+            level_count: 7,
+            l0_compaction_trigger: 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SizeTieredCompactionConfig {
+    pub min_tables: usize,
+    /// Size ratio as fixed-point thousandths (1500 = 1.5).
+    pub ratio_x1000: u32,
+}
+
+impl Default for SizeTieredCompactionConfig {
+    fn default() -> Self {
+        Self {
+            min_tables: 4,
+            ratio_x1000: 1500,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionConfig {
+    pub policy: CompactionPolicyKind,
+    pub leveled: LeveledCompactionConfig,
+    pub tiered: SizeTieredCompactionConfig,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            policy: CompactionPolicyKind::L0Merge,
+            leveled: LeveledCompactionConfig::default(),
+            tiered: SizeTieredCompactionConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineConfig {
     pub data_dir: PathBuf,
@@ -239,6 +321,7 @@ pub struct EngineConfig {
     pub memtable: MemtableConfig,
     pub sstable: SstableConfig,
     pub limits: LimitsConfig,
+    pub compaction: CompactionConfig,
     pub disable_locking: bool,
 }
 
@@ -251,6 +334,7 @@ impl Default for EngineConfig {
             memtable: MemtableConfig::default(),
             sstable: SstableConfig::default(),
             limits: LimitsConfig::default(),
+            compaction: CompactionConfig::default(),
             disable_locking: false,
         }
     }
@@ -283,5 +367,15 @@ mod tests {
             EngineConfig::default().durability.mode,
             DurabilityMode::Strict
         );
+    }
+
+    #[test]
+    fn default_compaction_policy_is_l0_merge() {
+        let config = EngineConfig::default();
+        assert_eq!(config.compaction.policy, CompactionPolicyKind::L0Merge);
+        assert_eq!(config.compaction.leveled.level_count, 7);
+        assert_eq!(config.compaction.leveled.l0_compaction_trigger, 4);
+        assert_eq!(config.compaction.tiered.min_tables, 4);
+        assert_eq!(config.compaction.tiered.ratio_x1000, 1500);
     }
 }
