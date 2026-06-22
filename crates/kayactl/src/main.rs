@@ -12,9 +12,7 @@ use std::time::Duration;
 
 use kaya_core::{DurabilityMode, KayaError, Result};
 
-use cli::{
-    remove_all_value_flags, remove_flag, remove_value_flag,
-};
+use cli::{remove_all_value_flags, remove_flag, remove_value_flag};
 
 fn main() {
     if let Err(error) = run() {

@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use kaya_core::{
-    Bytes, DurabilityMode, EngineConfig, KayaError, Lsn, Result, SequenceNumber,
-};
+use kaya_core::{Bytes, DurabilityMode, EngineConfig, KayaError, Lsn, Result, SequenceNumber};
 use kaya_io::{Disk, RelativePath};
 use kaya_lsm::{
     decode_footer, encode_manifest_edit, footer_stored_crc, CompactionPolicy, ManifestEdit,
@@ -21,9 +19,7 @@ mod stats;
 
 pub use recovery::recover;
 pub use snapshot::SnapshotView;
-pub use stats::{
-    CompactionResult, EngineStats, FlushResult, WriteResult,
-};
+pub use stats::{CompactionResult, EngineStats, FlushResult, WriteResult};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WriteOptions {

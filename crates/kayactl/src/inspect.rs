@@ -1,7 +1,5 @@
 use kaya_core::{Result, WalConfig};
-use kaya_lsm::{
-    inspect_manifest_path, inspect_sstable_path, ManifestInspection, SstInspection,
-};
+use kaya_lsm::{inspect_manifest_path, inspect_sstable_path, ManifestInspection, SstInspection};
 use kaya_wal::{inspect_wal_path, WalInspection};
 
 use crate::cli::{json_escape, json_string, option_usize_json};

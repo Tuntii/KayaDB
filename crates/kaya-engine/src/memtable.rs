@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use kaya_core::{Bytes, KeyValue, KayaError, Result};
+use kaya_core::{Bytes, KayaError, KeyValue, Result};
 use kaya_io::Disk;
 use kaya_lsm::ValueRecordRef;
 use kaya_wal::WalPayload;

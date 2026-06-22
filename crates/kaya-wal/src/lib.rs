@@ -335,7 +335,11 @@ mod tests {
             }
 
             let report = recover_wal(config, disk).await.unwrap();
-            assert_eq!(report.records.len(), 4, "only the first batch should survive");
+            assert_eq!(
+                report.records.len(),
+                4,
+                "only the first batch should survive"
+            );
             let recovered_keys: Vec<u8> = report
                 .records
                 .iter()

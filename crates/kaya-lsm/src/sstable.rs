@@ -331,8 +331,10 @@ fn bloom_get_bit(bits: &[u8], index: u32) -> bool {
 
 fn build_bloom_filter(keys: &[Bytes], bits_per_key: u32) -> (Vec<u8>, u32) {
     let hash_count = bloom_hash_count(bits_per_key);
-    let num_bits = bloom_num_bits(keys.len(), bits_per_key);
-    let byte_len = ((num_bits + 7) / 8) as usize;
+    let target_bits = bloom_num_bits(keys.len(), bits_per_key);
+    let byte_len = ((target_bits + 7) / 8) as usize;
+    // Indexing must use the same bit width as `BloomFilter::from_bytes` (byte_len * 8).
+    let num_bits = (byte_len as u32).saturating_mul(8);
     let mut bits = vec![0u8; byte_len];
     for key in keys {
         let (h1, h2) = bloom_hash_pair(key);
@@ -425,13 +427,11 @@ pub fn decode_footer(bytes: &[u8]) -> Result<SstFooter> {
         )));
     }
     let physical_len = if bytes.len() >= SST_FOOTER_LEN_V2 {
-        let v2_footer_len =
-            read_u16_le(&bytes[bytes.len() - SST_FOOTER_LEN_V2..], 38)?;
+        let v2_footer_len = read_u16_le(&bytes[bytes.len() - SST_FOOTER_LEN_V2..], 38)?;
         if v2_footer_len == SST_FOOTER_LEN_V2 as u16 {
             SST_FOOTER_LEN_V2
         } else {
-            let v1_footer_len =
-                read_u16_le(&bytes[bytes.len() - SST_FOOTER_LEN..], 38)?;
+            let v1_footer_len = read_u16_le(&bytes[bytes.len() - SST_FOOTER_LEN..], 38)?;
             if v1_footer_len == SST_FOOTER_LEN as u16 {
                 SST_FOOTER_LEN
             } else {
@@ -757,11 +757,8 @@ impl SstableReader {
             if !ie.separator_key.is_empty() && ie.separator_key.as_slice() < prefix {
                 continue;
             }
-            if let Some(bloom) = &self.bloom {
-                if ie.separator_key.starts_with(prefix) && !bloom.might_contain(&ie.separator_key) {
-                    continue;
-                }
-            }
+            // Bloom is keyed per entry; do not skip whole blocks on separator probes
+            // (false negatives would drop prefix ranges). Point lookups use bloom in get().
             let block = self.read_data_block(ie)?;
             for entry in block {
                 if entry.key.starts_with(prefix) {
@@ -980,6 +977,24 @@ mod tests {
             Some(b"v1".to_vec())
         );
         assert!(reader.get(b"missing-key").unwrap().is_none());
+    }
+
+    #[test]
+    fn bloom_no_false_negatives_for_inserted_keys() {
+        let mut builder = SstableBuilder::new(64, 10);
+        let keys: Vec<Bytes> = (0_u8..64).map(|i| vec![b'k', i]).collect();
+        for (i, key) in keys.iter().enumerate() {
+            builder.add(entry_put(key, &[i as u8], i as u64 + 1));
+        }
+        let bytes = builder.finish().unwrap();
+        let reader = SstableReader::open(bytes).unwrap();
+        for key in &keys {
+            assert!(
+                reader.get(key).unwrap().is_some(),
+                "bloom false negative for key {:?}",
+                key
+            );
+        }
     }
 
     #[test]

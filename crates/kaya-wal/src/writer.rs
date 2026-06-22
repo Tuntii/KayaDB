@@ -82,11 +82,7 @@ impl<D: Disk> WalWriter<D> {
         })
     }
 
-    pub async fn append(
-        &self,
-        payload: WalPayload,
-        mode: DurabilityMode,
-    ) -> Result<AppendResult> {
+    pub async fn append(&self, payload: WalPayload, mode: DurabilityMode) -> Result<AppendResult> {
         let mut inner = self.inner.lock().await;
 
         if inner.batch.enabled() && inner.batch.has_pending() && inner.batch.interval_expired() {

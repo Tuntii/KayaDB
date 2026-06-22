@@ -22,9 +22,7 @@ use crate::operator_auth::{
 };
 
 use super::stats::build_stats_response;
-use super::{
-    SharedEngine, SharedPending, SharedPendingReads, SharedRaft,
-};
+use super::{SharedEngine, SharedPending, SharedPendingReads, SharedRaft};
 
 /// Message sent from a client handler to the Raft loop to propose a write.
 pub struct ProposeReq {
