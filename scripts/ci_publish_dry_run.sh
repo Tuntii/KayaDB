@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REGISTRY_DIR="${RUNNER_TEMP:-/tmp}/kaya-local-registry"
-mkdir -p "${REGISTRY_DIR}/index"
+mkdir -p "${REGISTRY_DIR}/index" .cargo
 
 cat >> .cargo/config.toml <<EOF
 
