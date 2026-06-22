@@ -118,7 +118,7 @@ impl<D: Disk> WalWriter<D> {
                 inner.active_len = offset + u64::from(encoded_len);
                 inner.next_lsn = inner.next_lsn.next();
                 inner.next_sequence = inner.next_sequence.next();
-                return Ok(AppendResult {
+                Ok(AppendResult {
                     lsn,
                     sequence,
                     segment_id,
@@ -126,7 +126,7 @@ impl<D: Disk> WalWriter<D> {
                     encoded_len,
                     durable: false,
                     fsync_duration_us: None,
-                });
+                })
             }
             DurabilityMode::Strict => {
                 if !inner.batch.enabled() {
