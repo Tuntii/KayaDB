@@ -295,7 +295,7 @@ struct BloomFilter {
 
 fn bloom_hash_count(bits_per_key: u32) -> u32 {
     // k ≈ bits_per_key * ln(2)
-    let k = ((f64::from(bits_per_key)) * 0.693_147).ceil() as u32;
+    let k = ((f64::from(bits_per_key)) * std::f64::consts::LN_2).ceil() as u32;
     k.max(1)
 }
 
@@ -332,7 +332,7 @@ fn bloom_get_bit(bits: &[u8], index: u32) -> bool {
 fn build_bloom_filter(keys: &[Bytes], bits_per_key: u32) -> (Vec<u8>, u32) {
     let hash_count = bloom_hash_count(bits_per_key);
     let target_bits = bloom_num_bits(keys.len(), bits_per_key);
-    let byte_len = ((target_bits + 7) / 8) as usize;
+    let byte_len = target_bits.div_ceil(8) as usize;
     // Indexing must use the same bit width as `BloomFilter::from_bytes` (byte_len * 8).
     let num_bits = (byte_len as u32).saturating_mul(8);
     let mut bits = vec![0u8; byte_len];
