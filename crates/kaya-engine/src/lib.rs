@@ -2,32 +2,27 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use kaya_core::{
-    Bytes, DurabilityMode, EngineConfig, KayaError, KeyValue, Lsn, Result, SequenceNumber,
+    Bytes, DurabilityMode, EngineConfig, KayaError, Lsn, Result, SequenceNumber,
 };
 use kaya_io::{Disk, RelativePath};
 use kaya_lsm::{
-    decode_footer, encode_manifest_edit, ManifestEdit, ManifestState, ManifestWarning, Memtable,
-    SstEntry, SstableBuilder, SstableReader, TableMetadata, ValueRecord, ValueRecordRef,
-    CURRENT_FILE_NAME, CURRENT_TMP_FILE_NAME, MANIFEST_FILE_NAME, SST_FOOTER_LEN,
+    decode_footer, encode_manifest_edit, CompactionPolicy, L0MergePolicy, ManifestEdit,
+    ManifestState, ManifestWarning, Memtable, SstEntry, SstableBuilder, SstableReader,
+    TableMetadata, CURRENT_FILE_NAME, CURRENT_TMP_FILE_NAME, MANIFEST_FILE_NAME, SST_FOOTER_LEN,
 };
+use kaya_wal::{recover_wal, WalRecoveryReport, WalWarning, WalWriter};
 
-/// A compact, pinnable snapshot view of the LSM state at a point in time.
-/// Used for efficient Raft snapshots instead of full KV dump.
-///
-/// Contains:
-/// - pinned_tables: the exact live SSTables at snapshot time (with their metadata)
-/// - memtable_data: raw contents of the memtable at that point (key, value or tombstone, seq)
-/// - cutoff_seq: the MVCC sequence number boundary
-#[derive(Debug, Clone)]
-pub struct SnapshotView {
-    pub pinned_tables: Vec<TableMetadata>,
-    pub memtable_data: Vec<(Bytes, Option<Bytes>, SequenceNumber)>,
-    pub cutoff_seq: SequenceNumber,
-}
-use kaya_wal::{recover_wal, WalPayload, WalRecoveryReport, WalWarning, WalWriter};
-
+mod flush;
+mod memtable;
 mod recovery;
+mod snapshot;
+mod stats;
+
 pub use recovery::recover;
+pub use snapshot::SnapshotView;
+pub use stats::{
+    CompactionResult, EngineStats, FlushResult, WriteResult,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WriteOptions {
@@ -49,56 +44,6 @@ pub struct ReadOptions {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ScanOptions {
     pub limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WriteResult {
-    pub sequence: SequenceNumber,
-    pub lsn: Lsn,
-    pub durable: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FlushResult {
-    pub memtable_entries: u64,
-    pub sstable_count: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CompactionResult {
-    pub input_tables: u64,
-    pub output_tables: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct EngineStats {
-    pub put_count: u64,
-    pub get_count: u64,
-    pub delete_count: u64,
-    pub scan_count: u64,
-    pub wal_bytes_written: u64,
-    pub wal_fsync_count: u64,
-    /// Cumulative microseconds spent in WAL fsync_file calls for Strict appends.
-    /// Pairs with eBPF kernel-side histograms from scripts/ebpf/fsync-latency.bt.
-    pub wal_fsync_total_us: u64,
-    /// Maximum single WAL fsync duration observed (us).
-    pub wal_fsync_max_us: u64,
-    pub memtable_entries: u64,
-    pub sstable_count: u64,
-    pub last_sequence: u64,
-    /// Cumulative microseconds spent inside flush() calls (full operation wall time).
-    /// Track A observability addition (pairs with eBPF syscall timelines).
-    pub flush_total_us: u64,
-    /// Maximum single flush() duration observed (us).
-    pub flush_max_us: u64,
-    /// Number of flush() operations performed.
-    pub flush_count: u64,
-    /// Cumulative microseconds spent inside compact() calls (full operation wall time).
-    pub compaction_total_us: u64,
-    /// Maximum single compact() duration observed (us).
-    pub compaction_max_us: u64,
-    /// Number of compact() operations performed.
-    pub compaction_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,12 +110,10 @@ fn acquire_directory_lock(config: &EngineConfig) -> Result<Option<std::fs::File>
         use std::fs::OpenOptions;
         let data_dir = &config.data_dir;
 
-        // If the data_dir path is empty, skip locking
         if data_dir.as_os_str().is_empty() {
             return Ok(None);
         }
 
-        // Ensure the data directory exists
         std::fs::create_dir_all(data_dir)?;
 
         let lock_path = data_dir.join("KAYA_LOCK");
@@ -181,7 +124,6 @@ fn acquire_directory_lock(config: &EngineConfig) -> Result<Option<std::fs::File>
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::fs::OpenOptionsExt;
-            // share_mode(0) opens the file with exclusive access, preventing other processes from opening it
             options.share_mode(0);
         }
 
@@ -212,7 +154,6 @@ fn acquire_directory_lock(config: &EngineConfig) -> Result<Option<std::fs::File>
 impl<D: Disk> Engine<D> {
     pub async fn open(config: EngineConfig, disk: Arc<D>) -> Result<Self> {
         let lock_file = acquire_directory_lock(&config)?;
-        // Clean up leftover temporary files.
         let temp_files = recovery::scan_temp_files(&disk).await?;
         let tmp_files_removed = temp_files.len();
         for path in &temp_files {
@@ -240,7 +181,6 @@ impl<D: Disk> Engine<D> {
         let wal =
             WalWriter::open_at(config.wal.clone(), disk.clone(), next_lsn, next_sequence).await?;
 
-        // Load manifest + live SSTables.
         let (manifest_state, live_sstables, manifest_records_replayed, manifest_warnings) =
             recovery::load_manifest_and_sstables(disk.clone()).await?;
         let next_table_id = manifest_state
@@ -305,685 +245,7 @@ impl<D: Disk> Engine<D> {
         Ok(())
     }
 
-    /// Attempt to load a persisted Raft snapshot from `snap_path`.
-    /// Returns true if a snapshot was loaded and applied to the engine.
-    ///
-    /// After load, the tables referenced by the snapshot are pinned (refcounted)
-    /// so that subsequent compactions respect them (see compact()).
-    pub async fn load_persisted_raft_snapshot(
-        &mut self,
-        snap_path: impl AsRef<std::path::Path>,
-    ) -> Result<bool> {
-        let path = snap_path.as_ref();
-        match std::fs::read(path) {
-            Ok(data) if !data.is_empty() => {
-                self.install_snapshot(&data).await?;
-                // Keep the file for future restarts. A newer snapshot will overwrite it.
-                Ok(true)
-            }
-            Ok(_) => Ok(false),
-            Err(_) => Ok(false),
-        }
-    }
-
-    pub async fn put(
-        &mut self,
-        key: Bytes,
-        value: Bytes,
-        opts: WriteOptions,
-    ) -> Result<WriteResult> {
-        self.validate_key(&key)?;
-        self.validate_value(&value)?;
-        let durability = opts.durability.unwrap_or(self.config.durability.mode);
-        let append = self
-            .wal
-            .append(
-                WalPayload::Put {
-                    key: key.clone(),
-                    value: value.clone(),
-                },
-                durability,
-            )
-            .await?;
-        self.memtable.put(key, value, append.sequence);
-        self.stats.put_count += 1;
-        self.stats.memtable_entries = self.memtable.len() as u64;
-        self.stats.wal_bytes_written += u64::from(append.encoded_len);
-        self.stats.wal_fsync_count += u64::from(append.durable);
-        if let Some(us) = append.fsync_duration_us {
-            self.stats.wal_fsync_total_us += us;
-            if us > self.stats.wal_fsync_max_us {
-                self.stats.wal_fsync_max_us = us;
-            }
-        }
-        self.stats.last_sequence = append.sequence.get();
-        Ok(WriteResult {
-            sequence: append.sequence,
-            lsn: append.lsn,
-            durable: append.durable,
-        })
-    }
-
-    pub async fn delete(&mut self, key: Bytes, opts: WriteOptions) -> Result<WriteResult> {
-        self.validate_key(&key)?;
-        let durability = opts.durability.unwrap_or(self.config.durability.mode);
-        let append = self
-            .wal
-            .append(WalPayload::Delete { key: key.clone() }, durability)
-            .await?;
-        self.memtable.delete(key, append.sequence);
-        self.stats.delete_count += 1;
-        self.stats.memtable_entries = self.memtable.len() as u64;
-        self.stats.wal_bytes_written += u64::from(append.encoded_len);
-        self.stats.wal_fsync_count += u64::from(append.durable);
-        if let Some(us) = append.fsync_duration_us {
-            self.stats.wal_fsync_total_us += us;
-            if us > self.stats.wal_fsync_max_us {
-                self.stats.wal_fsync_max_us = us;
-            }
-        }
-        self.stats.last_sequence = append.sequence.get();
-        Ok(WriteResult {
-            sequence: append.sequence,
-            lsn: append.lsn,
-            durable: append.durable,
-        })
-    }
-
-    pub async fn get(&mut self, key: &[u8], opts: ReadOptions) -> Result<Option<Bytes>> {
-        let _ = opts;
-        self.stats.get_count += 1;
-        // Memtable is always checked first (newest data).
-        match self.memtable.get(key) {
-            Some(ValueRecordRef::Put { value, .. }) => return Ok(Some(value.to_vec())),
-            Some(ValueRecordRef::Delete { .. }) => return Ok(None),
-            None => {}
-        }
-        // Fall back to SSTables, newest-first (highest table_id first).
-        for (_, reader) in &self.live_sstables {
-            if let Some(entry) = reader.get(key)? {
-                return Ok(entry.value);
-            }
-        }
-        Ok(None)
-    }
-
-    pub async fn scan_prefix(&mut self, prefix: &[u8], opts: ScanOptions) -> Result<Vec<KeyValue>> {
-        self.stats.scan_count += 1;
-        // Merge all sources into a BTreeMap.  SSTables oldest-first so that
-        // newer tables overwrite older ones, then memtable always overwrites.
-        let mut merged: BTreeMap<Bytes, (u64, Option<Bytes>)> = BTreeMap::new();
-        for (_, reader) in self.live_sstables.iter().rev() {
-            for entry in reader.scan_prefix(prefix)? {
-                let seq = entry.sequence.get();
-                match merged.get(&entry.key) {
-                    Some((s, _)) if *s >= seq => {}
-                    _ => {
-                        merged.insert(entry.key, (seq, entry.value));
-                    }
-                }
-            }
-        }
-        // Memtable overrides everything including tombstones.
-        for (key, value, seq) in self.memtable.raw_scan_prefix(prefix) {
-            merged.insert(key, (seq.get(), value));
-        }
-        let mut result: Vec<KeyValue> = merged
-            .into_iter()
-            .filter_map(|(key, (_, v))| v.map(|value| KeyValue { key, value }))
-            .collect();
-        if let Some(limit) = opts.limit {
-            result.truncate(limit);
-        }
-        Ok(result)
-    }
-
-    /// Create a **pinned, manifest-anchored MVCC snapshot** (the proper prototype implementation).
-    ///
-    /// Instead of dumping the entire KV dataset, we capture:
-    /// - The exact set of live SSTables (from manifest) — these will be "pinned".
-    /// - The current memtable contents (raw with seqs).
-    /// - The cutoff SequenceNumber.
-    ///
-    /// This is cheap (mostly metadata + one flush) and allows efficient log truncation
-    /// in Raft. The returned bytes are a compact serialized `SnapshotView`.
-    ///
-    /// Files referenced in the snapshot are refcounted so compaction won't delete them
-    /// until the snapshot is released.
-    pub async fn create_snapshot(&mut self) -> Result<Vec<u8>> {
-        // Make sure the current memtable is captured as immutable view.
-        // Use the direct iter() to avoid an extra full owned tuple vec allocation
-        // during snapshot capture (still need to own the data for the serialized view).
-        let memtable_snapshot: Vec<(Bytes, Option<Bytes>, SequenceNumber)> = self
-            .memtable
-            .iter()
-            .map(|(k, rec)| match rec {
-                ValueRecord::Put { value, sequence } => (k.clone(), Some(value.clone()), *sequence),
-                ValueRecord::Delete { sequence } => (k.clone(), None, *sequence),
-            })
-            .collect();
-
-        // Capture the pinned live tables (clone metadata; readers stay shared).
-        let pinned_tables: Vec<TableMetadata> = self.manifest_state.live_tables.clone();
-
-        // Pin them (increment refcounts).
-        for meta in &pinned_tables {
-            *self.sstable_refcounts.entry(meta.table_id).or_insert(0) += 1;
-        }
-
-        let cutoff = self.manifest_state.last_sequence;
-
-        let view = SnapshotView {
-            pinned_tables,
-            memtable_data: memtable_snapshot,
-            cutoff_seq: cutoff,
-        };
-
-        // Serialize the view in a simple format:
-        // [num_tables: u32]
-        //   for each table: full TableMetadata serialization (reuse encode logic or manual)
-        // [num_memtable_entries: u32]
-        //   for each: [key_len u32][key][has_value u8][value?][seq u64]
-        // [cutoff_seq u64]
-        //
-        // For prototype we use a straightforward length-prefixed encoding.
-        let mut buf = Vec::new();
-
-        // pinned tables count + their data
-        buf.extend_from_slice(&(view.pinned_tables.len() as u32).to_le_bytes());
-        for meta in &view.pinned_tables {
-            // Simple manual serialization of TableMetadata (enough for prototype)
-            buf.extend_from_slice(&meta.table_id.to_le_bytes());
-            buf.extend_from_slice(&meta.level.to_le_bytes());
-            let path_bytes = meta.path.as_bytes();
-            buf.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(path_bytes);
-            buf.extend_from_slice(&(meta.smallest_key.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&meta.smallest_key);
-            buf.extend_from_slice(&(meta.largest_key.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&meta.largest_key);
-            buf.extend_from_slice(&meta.min_sequence.get().to_le_bytes());
-            buf.extend_from_slice(&meta.max_sequence.get().to_le_bytes());
-            buf.extend_from_slice(&meta.entry_count.to_le_bytes());
-            buf.extend_from_slice(&meta.file_size.to_le_bytes());
-            buf.extend_from_slice(&meta.footer_checksum.to_le_bytes());
-        }
-
-        // memtable entries
-        buf.extend_from_slice(&(view.memtable_data.len() as u32).to_le_bytes());
-        for (key, value_opt, seq) in &view.memtable_data {
-            buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
-            buf.extend_from_slice(key);
-            match value_opt {
-                Some(v) => {
-                    buf.push(1u8);
-                    buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
-                    buf.extend_from_slice(v);
-                }
-                None => {
-                    buf.push(0u8);
-                }
-            }
-            buf.extend_from_slice(&seq.get().to_le_bytes());
-        }
-
-        // cutoff
-        buf.extend_from_slice(&view.cutoff_seq.get().to_le_bytes());
-
-        // Embed full SST file contents so that InstallSnapshot receivers (lagging
-        // followers, restarted nodes in chaos tests) can materialize the files in
-        // *their* data directory. Metadata-only snapshots are sufficient for local
-        // restarts but not for cross-node catch-up.
-        buf.extend_from_slice(&(view.pinned_tables.len() as u32).to_le_bytes());
-        for meta in &view.pinned_tables {
-            let p = meta.path.as_bytes();
-            buf.extend_from_slice(&(p.len() as u32).to_le_bytes());
-            buf.extend_from_slice(p);
-
-            let rel = RelativePath::new(&meta.path)?;
-            let flen = self.disk.file_len(&rel).await? as usize;
-            let mut data = vec![0u8; flen];
-            let _n = self.disk.read_at(&rel, 0, &mut data).await?;
-            buf.extend_from_slice(&(data.len() as u64).to_le_bytes());
-            buf.extend_from_slice(&data);
-        }
-
-        Ok(buf)
-    }
-
-    /// Install a pinned snapshot view produced by `create_snapshot`.
-    ///
-    /// This replaces the current LSM view with the one described by the snapshot:
-    /// - Loads the pinned SSTables (by path, assuming they are present in the data dir
-    ///   or have been transferred).
-    /// - Replaces the memtable with the one from the snapshot.
-    /// - Sets the last_sequence.
-    ///
-    /// After this call, only Raft log entries *after* the snapshot's applied index
-    /// should be replayed/applied.
-    pub async fn install_snapshot(&mut self, data: &[u8]) -> Result<()> {
-        if data.is_empty() {
-            return Ok(());
-        }
-
-        let mut cur: &[u8] = data;
-
-        // pinned tables
-        let num_tables = Self::take_u32(&mut cur)? as usize;
-        let mut pinned: Vec<TableMetadata> = Vec::with_capacity(num_tables);
-        for _ in 0..num_tables {
-            let table_id = u64::from_le_bytes([
-                cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
-            ]);
-            cur = &cur[8..];
-            let level = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]);
-            cur = &cur[4..];
-            let path_len = Self::take_u32(&mut cur)? as usize;
-            let path = String::from_utf8(cur[..path_len].to_vec())
-                .map_err(|_| KayaError::corruption("bad path in snapshot"))?;
-            cur = &cur[path_len..];
-            let sk_len = Self::take_u32(&mut cur)? as usize;
-            let smallest_key = cur[..sk_len].to_vec();
-            cur = &cur[sk_len..];
-            let lk_len = Self::take_u32(&mut cur)? as usize;
-            let largest_key = cur[..lk_len].to_vec();
-            cur = &cur[lk_len..];
-            let min_seq = u64::from_le_bytes([
-                cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
-            ]);
-            cur = &cur[8..];
-            let max_seq = u64::from_le_bytes([
-                cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
-            ]);
-            cur = &cur[8..];
-            let entry_count = u64::from_le_bytes([
-                cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
-            ]);
-            cur = &cur[8..];
-            let file_size = u64::from_le_bytes([
-                cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
-            ]);
-            cur = &cur[8..];
-            let footer_checksum = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]);
-            cur = &cur[4..];
-
-            pinned.push(TableMetadata {
-                table_id,
-                level,
-                path,
-                smallest_key,
-                largest_key,
-                min_sequence: SequenceNumber::new(min_seq),
-                max_sequence: SequenceNumber::new(max_seq),
-                entry_count,
-                file_size,
-                footer_checksum,
-            });
-        }
-
-        // memtable data
-        let num_mt = Self::take_u32(&mut cur)? as usize;
-        let mut mt_data = Vec::with_capacity(num_mt);
-        for _ in 0..num_mt {
-            let klen = Self::take_u32(&mut cur)? as usize;
-            let key = cur[..klen].to_vec();
-            cur = &cur[klen..];
-            let has_val = cur[0];
-            cur = &cur[1..];
-            let value = if has_val == 1 {
-                let vlen = Self::take_u32(&mut cur)? as usize;
-                let v = cur[..vlen].to_vec();
-                cur = &cur[vlen..];
-                Some(v)
-            } else {
-                None
-            };
-            let seq = u64::from_le_bytes([
-                cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
-            ]);
-            cur = &cur[8..];
-            mt_data.push((key, value, SequenceNumber::new(seq)));
-        }
-
-        let cutoff = u64::from_le_bytes([
-            cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
-        ]);
-        let cutoff_seq = SequenceNumber::new(cutoff);
-
-        // Materialize any embedded SST files that were included for portable
-        // (cross-node) snapshot transfer. This allows a restarted/lagging follower
-        // to have the actual data files locally even though it never wrote them.
-        // This block is defensive: old/legacy snapshot payloads (pre-embed or
-        // persisted metadata-only) will be left as-is if the trailing bytes don't
-        // look like a valid embed section.
-        if cur.len() >= 4 {
-            let num_candidate = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]) as usize;
-            // Heuristic: very large table count or insufficient bytes => not our new format.
-            if num_candidate > 0 && num_candidate < 4096 && cur.len() >= 4 + num_candidate {
-                let _ = Self::take_u32(&mut cur); // consume num
-                for _ in 0..num_candidate {
-                    if cur.len() < 4 {
-                        break;
-                    }
-                    let plen = Self::take_u32(&mut cur).unwrap_or(0) as usize;
-                    if cur.len() < plen {
-                        break;
-                    }
-                    let path = String::from_utf8(cur[..plen].to_vec()).unwrap_or_default();
-                    cur = &cur[plen..];
-
-                    if cur.len() < 8 {
-                        break;
-                    }
-                    let clen = Self::take_u64(&mut cur).unwrap_or(0) as usize;
-                    if cur.len() < clen {
-                        break;
-                    }
-                    let content = cur[..clen].to_vec();
-                    cur = &cur[clen..];
-
-                    if !path.is_empty() && clen > 0 {
-                        if let Ok(rel) = RelativePath::new(&path) {
-                            let _ = self.disk.write_at(&rel, 0, &content).await;
-                            let _ = self.disk.fsync_file(&rel).await;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Now apply the snapshot view to the engine.
-        // 1. Rebuild live_sstables from pinned tables (re-open readers).
-        let mut new_live: Vec<(TableMetadata, SstableReader)> = Vec::new();
-        for meta in &pinned {
-            let sst_rel = RelativePath::new(&meta.path)?;
-            let sst_len = self.disk.file_len(&sst_rel).await?;
-            let mut sst_buf = vec![0u8; sst_len as usize];
-            self.disk.read_at(&sst_rel, 0, &mut sst_buf).await?;
-            let reader = SstableReader::open(sst_buf)?;
-            new_live.push((meta.clone(), reader));
-        }
-        // Sort newest-first
-        new_live.sort_by_key(|b| std::cmp::Reverse(b.0.table_id));
-
-        self.live_sstables = new_live;
-        self.manifest_state.live_tables = pinned.clone();
-
-        // 2. Replace memtable with the snapshot one.
-        let mut new_mem = Memtable::new();
-        for (key, value, seq) in mt_data {
-            match value {
-                Some(v) => new_mem.put(key, v, seq),
-                None => new_mem.delete(key, seq),
-            }
-        }
-        self.memtable = new_mem;
-
-        // 3. Update sequence / manifest last seq.
-        self.manifest_state.last_sequence = cutoff_seq;
-        self.stats.last_sequence = cutoff_seq.get().saturating_sub(1);
-        self.stats.memtable_entries = self.memtable.len() as u64;
-        self.stats.sstable_count = self.live_sstables.len() as u64;
-
-        // Pin the tables belonging to this snapshot view. Installing a snapshot
-        // means this view is now our active durable state (from persisted load
-        // or InstallSnapshot RPC). We must protect these SSTables from compaction
-        // until a newer snapshot supersedes this one (via release_snapshot).
-        for meta in &pinned {
-            *self.sstable_refcounts.entry(meta.table_id).or_insert(0) += 1;
-        }
-
-        Ok(())
-    }
-
-    /// Release the pin counts held by a serialized snapshot view (produced by
-    /// `create_snapshot`). This should be called when a newer Raft snapshot
-    /// supersedes a previous one, so that the SSTables from the old view are
-    /// no longer artificially kept alive on this node.
-    pub async fn release_snapshot(&mut self, data: &[u8]) -> Result<()> {
-        if data.is_empty() {
-            return Ok(());
-        }
-        let mut cur: &[u8] = data;
-
-        let num_tables = Self::take_u32(&mut cur)? as usize;
-        for _ in 0..num_tables {
-            // table_id is the first u64 in each table record
-            if cur.len() < 8 {
-                return Err(KayaError::invalid_argument("truncated snapshot table id"));
-            }
-            let table_id = u64::from_le_bytes([
-                cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
-            ]);
-            cur = &cur[8..];
-
-            // Skip the rest of this table's metadata to reach the next record.
-            // level: u32 (4)
-            if cur.len() < 4 {
-                return Err(KayaError::invalid_argument("truncated level"));
-            }
-            cur = &cur[4..];
-            // path
-            let plen = Self::take_u32(&mut cur)? as usize;
-            if cur.len() < plen {
-                return Err(KayaError::invalid_argument("truncated path"));
-            }
-            cur = &cur[plen..];
-            // smallest_key
-            let sk = Self::take_u32(&mut cur)? as usize;
-            if cur.len() < sk {
-                return Err(KayaError::invalid_argument("truncated smallest"));
-            }
-            cur = &cur[sk..];
-            // largest_key
-            let lk = Self::take_u32(&mut cur)? as usize;
-            if cur.len() < lk {
-                return Err(KayaError::invalid_argument("truncated largest"));
-            }
-            cur = &cur[lk..];
-            // remaining fixed: min_seq(8) + max_seq(8) + entry_count(8) + file_size(8) + checksum(8) = 40
-            if cur.len() < 40 {
-                return Err(KayaError::invalid_argument("truncated table footer"));
-            }
-            cur = &cur[40..];
-
-            if let Some(count) = self.sstable_refcounts.get_mut(&table_id) {
-                if *count > 0 {
-                    *count -= 1;
-                }
-                if *count == 0 {
-                    self.sstable_refcounts.remove(&table_id);
-                }
-            }
-        }
-
-        // Advance past memtable data and cutoff (we don't need them for release)
-        // num_mt_entries
-        if !cur.is_empty() {
-            let _ = Self::take_u32(&mut cur).ok();
-            // We could skip entries but it's not required; just best-effort cleanup.
-        }
-
-        Ok(())
-    }
-
-    // Small private helpers for snapshot (de)serialization.
-    #[allow(dead_code)]
-    fn take_u32(cur: &mut &[u8]) -> Result<u32> {
-        if cur.len() < 4 {
-            return Err(KayaError::invalid_argument("truncated snapshot u32"));
-        }
-        let v = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]);
-        *cur = &cur[4..];
-        Ok(v)
-    }
-
-    fn take_u64(cur: &mut &[u8]) -> Result<u64> {
-        if cur.len() < 8 {
-            return Err(KayaError::invalid_argument("truncated snapshot u64"));
-        }
-        let v = u64::from_le_bytes([
-            cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
-        ]);
-        *cur = &cur[8..];
-        Ok(v)
-    }
-
-    #[allow(dead_code)]
-    fn take_bytes(cur: &mut &[u8]) -> Result<Vec<u8>> {
-        let len = Self::take_u32(cur)? as usize;
-        if cur.len() < len {
-            return Err(KayaError::invalid_argument("truncated snapshot bytes"));
-        }
-        let bytes = cur[..len].to_vec();
-        *cur = &cur[len..];
-        Ok(bytes)
-    }
-
-    pub async fn flush(&mut self) -> Result<FlushResult> {
-        if self.memtable.is_empty() {
-            return Ok(FlushResult {
-                memtable_entries: 0,
-                sstable_count: self.live_sstables.len() as u64,
-            });
-        }
-
-        let flush_start = std::time::Instant::now();
-        let entry_count = self.memtable.len() as u64;
-        let table_id = self.next_table_id;
-        self.next_table_id += 1;
-
-        // Build SSTable from all memtable entries (including tombstones).
-        // Use direct iter() to avoid allocating a full temporary Vec<(Bytes, Option, Seq)>
-        // of the entire memtable on every flush (hot-ish background path + memory savings).
-        let mut builder = SstableBuilder::new(self.config.sstable.block_target_bytes);
-        for (key, record) in self.memtable.iter() {
-            match record {
-                ValueRecord::Put { value, sequence } => {
-                    builder.add(SstEntry {
-                        key: key.clone(),
-                        value: Some(value.clone()),
-                        sequence: *sequence,
-                    });
-                }
-                ValueRecord::Delete { sequence } => {
-                    builder.add(SstEntry {
-                        key: key.clone(),
-                        value: None,
-                        sequence: *sequence,
-                    });
-                }
-            }
-        }
-        let sst_bytes = builder.finish()?;
-        let sst_file_size = sst_bytes.len() as u64;
-        // Derive true min/max from builder before consuming.
-        let (sst_table_min_seq, sst_table_max_seq, smallest_key, largest_key) = {
-            let footer = decode_footer(&sst_bytes)?;
-            let reader_tmp = SstableReader::open(sst_bytes.clone())?;
-            let entries = reader_tmp.all_entries()?;
-            let sk = entries.first().map(|e| e.key.clone()).unwrap_or_default();
-            let lk = entries.last().map(|e| e.key.clone()).unwrap_or_default();
-            (footer.table_min_seq, footer.table_max_seq, sk, lk)
-        };
-
-        // Write tmp → rename → fsync (atomic SSTable publication).
-        let sst_path = format!("sst/{table_id:016x}.sst");
-        let tmp_path = format!("sst/{table_id:016x}.tmp");
-        let sst_rel = RelativePath::new(&sst_path)?;
-        let tmp_rel = RelativePath::new(&tmp_path)?;
-        let sst_dir_rel = RelativePath::new("sst")?;
-        self.disk.write_at(&tmp_rel, 0, &sst_bytes).await?;
-        self.disk.fsync_file(&tmp_rel).await?;
-        self.disk.rename(&tmp_rel, &sst_rel).await?;
-        self.disk.fsync_dir(&sst_dir_rel).await?;
-
-        // Build table metadata for manifest.
-        let footer_crc = {
-            let len = sst_bytes.len();
-            if len >= SST_FOOTER_LEN {
-                let fb = &sst_bytes[len - SST_FOOTER_LEN..];
-                // footer_crc32c is at offset 40 within the footer bytes
-                u32::from_le_bytes(fb[40..44].try_into().unwrap_or([0u8; 4]))
-            } else {
-                0
-            }
-        };
-        let meta = TableMetadata {
-            table_id,
-            level: 0,
-            path: sst_path,
-            smallest_key,
-            largest_key,
-            min_sequence: SequenceNumber::new(sst_table_min_seq),
-            max_sequence: SequenceNumber::new(sst_table_max_seq),
-            entry_count,
-            file_size: sst_file_size,
-            footer_checksum: footer_crc,
-        };
-        let last_seq = SequenceNumber::new(self.stats.last_sequence);
-
-        // Append edits to manifest.
-        let manifest_rel = RelativePath::new(MANIFEST_FILE_NAME)?;
-        let edit_create = encode_manifest_edit(
-            &ManifestEdit::CreateTable(meta.clone()),
-            self.next_manifest_edit_seq,
-        );
-        self.next_manifest_edit_seq += 1;
-        let edit_seq = encode_manifest_edit(
-            &ManifestEdit::SetLastSequence { sequence: last_seq },
-            self.next_manifest_edit_seq,
-        );
-        self.next_manifest_edit_seq += 1;
-        self.disk.append(&manifest_rel, &edit_create).await?;
-        self.disk.append(&manifest_rel, &edit_seq).await?;
-        self.disk.fsync_file(&manifest_rel).await?;
-
-        // Atomically update CURRENT → points to our single manifest.
-        let current_tmp_rel = RelativePath::new(CURRENT_TMP_FILE_NAME)?;
-        let current_rel = RelativePath::new(CURRENT_FILE_NAME)?;
-        let root_rel = RelativePath::root();
-        self.disk
-            .write_at(&current_tmp_rel, 0, MANIFEST_FILE_NAME.as_bytes())
-            .await?;
-        self.disk.fsync_file(&current_tmp_rel).await?;
-        self.disk.rename(&current_tmp_rel, &current_rel).await?;
-        self.disk.fsync_dir(&root_rel).await?;
-
-        // Update in-memory state.
-        let reader = SstableReader::open(sst_bytes)?;
-        self.live_sstables.insert(0, (meta.clone(), reader));
-        self.manifest_state.live_tables.push(meta);
-        self.manifest_state.last_sequence = last_seq;
-        self.memtable = Memtable::new();
-        self.stats.sstable_count = self.live_sstables.len() as u64;
-        self.stats.memtable_entries = 0;
-
-        let flush_us = flush_start.elapsed().as_micros() as u64;
-        self.stats.flush_total_us += flush_us;
-        if flush_us > self.stats.flush_max_us {
-            self.stats.flush_max_us = flush_us;
-        }
-        self.stats.flush_count += 1;
-
-        Ok(FlushResult {
-            memtable_entries: entry_count,
-            sstable_count: self.live_sstables.len() as u64,
-        })
-    }
-
     pub async fn compact(&mut self) -> Result<CompactionResult> {
-        let total_tables = self.live_sstables.len() as u64;
-        if total_tables < 2 {
-            // Nothing to compact — 0 or 1 table.
-            return Ok(CompactionResult {
-                input_tables: 0,
-                output_tables: 0,
-            });
-        }
-
-        // Respect pinned tables from Raft snapshots: never delete tables that
-        // have a positive refcount. Only compact tables with refcount == 0.
         let mut pinned_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
         for (&id, &cnt) in &self.sstable_refcounts {
             if cnt > 0 {
@@ -991,25 +253,25 @@ impl<D: Disk> Engine<D> {
             }
         }
 
-        let eligible_count = self
-            .live_sstables
-            .iter()
-            .filter(|(m, _)| !pinned_ids.contains(&m.table_id))
-            .count();
-
-        if eligible_count < 2 {
-            return Ok(CompactionResult {
-                input_tables: 0,
-                output_tables: 0,
-            });
-        }
+        let policy = L0MergePolicy;
+        let candidate = match policy.pick_compaction(&self.manifest_state.live_tables, &pinned_ids)
+        {
+            Some(c) => c,
+            None => {
+                return Ok(CompactionResult {
+                    input_tables: 0,
+                    output_tables: 0,
+                });
+            }
+        };
+        let input_ids: Vec<u64> = candidate.input_table_ids;
 
         let compact_start = std::time::Instant::now();
 
-        // Merge only non-pinned tables. Iterate in reverse (oldest first among current live).
         let mut merged: BTreeMap<Bytes, (u64, Option<Bytes>)> = BTreeMap::new();
+        let input_set: std::collections::HashSet<u64> = input_ids.iter().copied().collect();
         for (meta, reader) in self.live_sstables.iter().rev() {
-            if pinned_ids.contains(&meta.table_id) {
+            if !input_set.contains(&meta.table_id) {
                 continue;
             }
             for entry in reader.all_entries()? {
@@ -1026,8 +288,6 @@ impl<D: Disk> Engine<D> {
         let new_table_id = self.next_table_id;
         self.next_table_id += 1;
 
-        // Build compacted SSTable.  Tombstones are kept because there is no
-        // lower level to compact against yet.
         let mut builder = SstableBuilder::new(self.config.sstable.block_target_bytes);
         for (key, (seq, value)) in &merged {
             builder.add(SstEntry {
@@ -1048,7 +308,6 @@ impl<D: Disk> Engine<D> {
             (footer.table_min_seq, footer.table_max_seq, sk, lk)
         };
 
-        // Write new SSTable atomically: tmp → rename → fsync dir.
         let sst_path = format!("sst/{new_table_id:016x}.sst");
         let tmp_path = format!("sst/{new_table_id:016x}.tmp");
         let sst_rel = RelativePath::new(&sst_path)?;
@@ -1070,7 +329,7 @@ impl<D: Disk> Engine<D> {
         };
         let new_meta = TableMetadata {
             table_id: new_table_id,
-            level: 0,
+            level: candidate.output_level,
             path: sst_path,
             smallest_key,
             largest_key,
@@ -1081,18 +340,8 @@ impl<D: Disk> Engine<D> {
             footer_checksum: footer_crc,
         };
 
-        // Collect input table IDs (only the non-pinned / eligible ones we are compacting).
-        let input_ids: Vec<u64> = self
-            .live_sstables
-            .iter()
-            .filter(|(m, _)| !pinned_ids.contains(&m.table_id))
-            .map(|(m, _)| m.table_id)
-            .collect();
         let last_seq = SequenceNumber::new(self.stats.last_sequence);
 
-        // Append manifest edits: CreateTable(output) first — safe to have it
-        // live before inputs are removed.  Then DeleteTable for each input.
-        // Then SetLastSequence.  Fsync once after all edits.
         let manifest_rel = RelativePath::new(MANIFEST_FILE_NAME)?;
         let edit_create = encode_manifest_edit(
             &ManifestEdit::CreateTable(new_meta.clone()),
@@ -1118,7 +367,6 @@ impl<D: Disk> Engine<D> {
         self.disk.append(&manifest_rel, &edit_seq).await?;
         self.disk.fsync_file(&manifest_rel).await?;
 
-        // Atomically update CURRENT.
         let current_tmp_rel = RelativePath::new(CURRENT_TMP_FILE_NAME)?;
         let current_rel = RelativePath::new(CURRENT_FILE_NAME)?;
         let root_rel = RelativePath::root();
@@ -1129,16 +377,12 @@ impl<D: Disk> Engine<D> {
         self.disk.rename(&current_tmp_rel, &current_rel).await?;
         self.disk.fsync_dir(&root_rel).await?;
 
-        // Update in-memory state.
-        // Preserve pinned tables (move their readers) and drop the compacted ones' readers.
-        // Add the freshly compacted table.
         let new_reader = SstableReader::open(sst_bytes)?;
         let mut new_live: Vec<(TableMetadata, SstableReader)> = Vec::new();
         for (meta, reader) in self.live_sstables.drain(..) {
-            if pinned_ids.contains(&meta.table_id) {
+            if !input_set.contains(&meta.table_id) {
                 new_live.push((meta, reader));
             }
-            // non-pinned readers are dropped (their SSTables will be deleted via manifest)
         }
         new_live.push((new_meta.clone(), new_reader));
         new_live.sort_by_key(|b| std::cmp::Reverse(b.0.table_id));
@@ -1164,41 +408,6 @@ impl<D: Disk> Engine<D> {
             input_tables: actual_input,
             output_tables: 1,
         })
-    }
-
-    pub fn stats(&self) -> EngineStats {
-        self.stats
-    }
-
-    pub fn last_recovery(&self) -> &RecoveryReport {
-        &self.last_recovery
-    }
-
-    fn validate_key(&self, key: &[u8]) -> Result<()> {
-        if key.is_empty() {
-            return Err(KayaError::invalid_argument(
-                "empty keys are not supported in MVP",
-            ));
-        }
-        if key.len() > self.config.limits.max_key_len {
-            return Err(KayaError::invalid_argument(format!(
-                "key length {} exceeds max {}",
-                key.len(),
-                self.config.limits.max_key_len
-            )));
-        }
-        Ok(())
-    }
-
-    fn validate_value(&self, value: &[u8]) -> Result<()> {
-        if value.len() > self.config.limits.max_value_len {
-            return Err(KayaError::invalid_argument(format!(
-                "value length {} exceeds max {}",
-                value.len(),
-                self.config.limits.max_value_len
-            )));
-        }
-        Ok(())
     }
 }
 
@@ -1232,7 +441,6 @@ mod tests {
         }
     }
 
-    // KD-0303 / engine restart — strictly ACKed puts survive crash+reopen.
     #[test]
     fn engine_restart_recovers_strict_puts() {
         block_on(async {
@@ -1266,7 +474,6 @@ mod tests {
         });
     }
 
-    // Writes made with Relaxed durability (no fsync) are lost after a crash.
     #[test]
     fn engine_crash_discards_relaxed_puts() {
         block_on(async {
@@ -1279,7 +486,6 @@ mod tests {
                     .put(b"key".to_vec(), b"value".to_vec(), relaxed_opts())
                     .await
                     .unwrap();
-                // No explicit flush / fsync — data lives in volatile only.
             }
 
             disk.crash();
@@ -1294,7 +500,6 @@ mod tests {
         });
     }
 
-    // A deleted key must not be visible after restart.
     #[test]
     fn engine_restart_propagates_delete() {
         block_on(async {
@@ -1321,7 +526,6 @@ mod tests {
         });
     }
 
-    // scan_prefix must return consistent results after restart.
     #[test]
     fn engine_restart_scan_prefix_consistent() {
         block_on(async {
@@ -1348,7 +552,6 @@ mod tests {
         });
     }
 
-    // KD-0403: flush writes an SSTable; reopen finds it and serves reads.
     #[test]
     fn engine_flush_writes_sstable_and_reopen_reads_it() {
         block_on(async {
@@ -1368,7 +571,6 @@ mod tests {
                 let result = engine.flush().await.unwrap();
                 assert_eq!(result.memtable_entries, 2);
                 assert_eq!(result.sstable_count, 1);
-                // After flush memtable is empty; reads still work from SSTable.
                 assert_eq!(
                     engine.get(b"sst:a", ReadOptions::default()).await.unwrap(),
                     Some(b"alpha".to_vec()),
@@ -1376,7 +578,6 @@ mod tests {
                 );
             }
 
-            // Reopen (simulating clean shutdown, no crash).
             let mut engine2 = Engine::open(config, disk.clone()).await.unwrap();
             assert_eq!(engine2.stats().sstable_count, 1);
             assert_eq!(
@@ -1390,7 +591,6 @@ mod tests {
         });
     }
 
-    // KD-0403: delete after flush is visible via memtable tombstone.
     #[test]
     fn engine_delete_after_flush_is_visible() {
         block_on(async {
@@ -1411,7 +611,6 @@ mod tests {
         });
     }
 
-    // KD-0501: compaction merges two SSTables and preserves visible state.
     #[test]
     fn compaction_preserves_visible_state() {
         block_on(async {
@@ -1419,7 +618,6 @@ mod tests {
             let config = EngineConfig::default();
             let mut engine = Engine::open(config, disk).await.unwrap();
 
-            // Two flushes produce two L0 SSTables.
             engine
                 .put(b"a".to_vec(), b"1".to_vec(), strict_opts())
                 .await
@@ -1430,7 +628,6 @@ mod tests {
                 .unwrap();
             engine.flush().await.unwrap();
 
-            // Second flush overwrites "b" with a higher sequence.
             engine
                 .put(b"b".to_vec(), b"new".to_vec(), strict_opts())
                 .await
@@ -1448,7 +645,6 @@ mod tests {
             assert_eq!(r.output_tables, 1);
             assert_eq!(engine.stats().sstable_count, 1);
 
-            // All visible state preserved; newest "b" wins.
             assert_eq!(
                 engine.get(b"a", ReadOptions::default()).await.unwrap(),
                 Some(b"1".to_vec())
@@ -1465,7 +661,6 @@ mod tests {
         });
     }
 
-    // Track A: flush and compaction stats are populated (counts + latency accumulators).
     #[test]
     fn flush_and_compaction_stats_are_recorded() {
         block_on(async {
@@ -1481,9 +676,7 @@ mod tests {
 
             let s1 = engine.stats();
             assert!(s1.flush_count >= 1);
-            // On fast SimDisk the us may be 0; we primarily care that the instrumentation path ran.
-            // Still record something observable.
-            let _ = s1.flush_total_us; // access to keep stats used
+            let _ = s1.flush_total_us;
 
             engine
                 .put(b"k2".to_vec(), b"v2".to_vec(), strict_opts())
@@ -1494,7 +687,6 @@ mod tests {
             let s2 = engine.stats();
             assert!(s2.flush_count >= 2);
 
-            // Add one more flush so we have enough tables for a compaction.
             engine
                 .put(b"k3".to_vec(), b"v3".to_vec(), strict_opts())
                 .await
@@ -1508,7 +700,6 @@ mod tests {
         });
     }
 
-    // KD-0502: flush crash recovery is idempotent.
     #[test]
     fn flush_crash_recovery_idempotent() {
         block_on(async {
@@ -1542,7 +733,6 @@ mod tests {
 
             disk.crash();
 
-            // Second recovery from same flushed state — must be identical.
             let mut engine3 = Engine::open(config, disk).await.unwrap();
             assert_eq!(
                 engine3.get(b"k1", ReadOptions::default()).await.unwrap(),
@@ -1555,7 +745,6 @@ mod tests {
         });
     }
 
-    // KD-0502: compaction crash recovery is idempotent.
     #[test]
     fn compaction_crash_recovery_idempotent() {
         block_on(async {
@@ -1598,7 +787,6 @@ mod tests {
 
             disk.crash();
 
-            // Second recovery — idempotent.
             let mut engine3 = Engine::open(config, disk).await.unwrap();
             assert_eq!(
                 engine3.get(b"a", ReadOptions::default()).await.unwrap(),
@@ -1611,7 +799,6 @@ mod tests {
         });
     }
 
-    // KD-0502: manifest tail corruption is recovered gracefully.
     #[test]
     fn manifest_tail_corruption_recovers_gracefully() {
         block_on(async {
@@ -1627,15 +814,12 @@ mod tests {
                 engine.flush().await.unwrap();
             }
 
-            // Simulate a torn write that was partially fsynced by appending
-            // garbage to the manifest and making it stable.
             let manifest_rel = RelativePath::new(MANIFEST_FILE_NAME).unwrap();
             disk.append(&manifest_rel, b"garbage_corruption\x00\xff\x80")
                 .await
                 .unwrap();
             disk.fsync_file(&manifest_rel).await.unwrap();
 
-            // Reopen — corrupt tail must be silently truncated.
             let mut engine2 = Engine::open(config, disk).await.unwrap();
             assert_eq!(
                 engine2.get(b"x", ReadOptions::default()).await.unwrap(),
@@ -1646,14 +830,12 @@ mod tests {
         });
     }
 
-    // KD-0403: scan_prefix merges memtable and SSTable results correctly.
     #[test]
     fn engine_scan_prefix_merges_sstable_and_memtable() {
         block_on(async {
             let disk = Arc::new(SimDisk::new());
             let config = EngineConfig::default();
             let mut engine = Engine::open(config, disk).await.unwrap();
-            // Write two keys and flush.
             engine
                 .put(b"u:1".to_vec(), b"one".to_vec(), strict_opts())
                 .await
@@ -1663,7 +845,6 @@ mod tests {
                 .await
                 .unwrap();
             engine.flush().await.unwrap();
-            // Write one more key to the new memtable.
             engine
                 .put(b"u:3".to_vec(), b"three".to_vec(), strict_opts())
                 .await
@@ -1749,7 +930,6 @@ mod tests {
                 engine.flush().await.unwrap();
             }
 
-            // Let's corrupt both WAL and Manifest.
             let wal_rel = RelativePath::new("wal/0000000000000001.wal").unwrap();
             disk.append(&wal_rel, b"partial_corrupt_wal_bytes")
                 .await
@@ -1760,7 +940,6 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Reopen engine and inspect warning enums.
             let engine = Engine::open(config, disk).await.unwrap();
             let warnings = &engine.last_recovery().warnings;
 
@@ -1792,7 +971,6 @@ mod tests {
         block_on(async {
             use kaya_io::{FaultKind, FaultRule, FaultSchedule, SimSeed};
 
-            // Inject DiskFull fault at operation index 3 (which will be the SSTable write_at during flush)
             let schedule = FaultSchedule {
                 seed: SimSeed(42),
                 rules: vec![FaultRule {
@@ -1810,7 +988,6 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Flush should fail due to simulated DiskFull
             let flush_res = engine.flush().await;
             assert!(
                 matches!(flush_res, Err(KayaError::DiskFull)),
@@ -1818,7 +995,6 @@ mod tests {
                 flush_res
             );
 
-            // Verify that in-memory stats are still intact and key1 is still readable from memtable
             assert_eq!(
                 engine.stats().sstable_count,
                 0,

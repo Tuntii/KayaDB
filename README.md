@@ -7,6 +7,8 @@
 [![CI](https://github.com/Tuntii/KayaDB/actions/workflows/ci.yml/badge.svg)](https://github.com/Tuntii/KayaDB/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](Cargo.toml)
+[![crates.io: kaya-engine](https://img.shields.io/crates/v/kaya-engine.svg?label=kaya-engine)](https://crates.io/crates/kaya-engine)
+[![crates.io: kayactl](https://img.shields.io/crates/v/kayactl.svg?label=kayactl)](https://crates.io/crates/kayactl)
 [![Status](https://img.shields.io/badge/status-M13%20productization%20%7C%20correctness--first-green.svg)](ROADMAP.md)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://tuntii.github.io/KayaDB/)
 

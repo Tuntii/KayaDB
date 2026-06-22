@@ -1,5 +1,10 @@
+mod compaction;
 mod manifest;
 mod sstable;
+
+pub use compaction::{
+    CompactionCandidate, CompactionPolicy, L0MergePolicy, LevelStrategy, TierStrategy,
+};
 
 pub use manifest::{
     decode_manifest_edit, encode_manifest_edit, inspect_manifest_path, replay_manifest,
