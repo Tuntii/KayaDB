@@ -5,7 +5,13 @@ set -euo pipefail
 
 REGISTRY_DIR="${RUNNER_TEMP:-/tmp}/kaya-local-registry"
 mkdir -p .cargo "${REGISTRY_DIR}/dl"
-git init --bare "${REGISTRY_DIR}/index" >/dev/null
+
+pushd "${REGISTRY_DIR}" >/dev/null
+git init index >/dev/null
+printf '{"dl":"file://%s/dl"}\n' "${REGISTRY_DIR}" > index/config.json
+git -C index add config.json
+git -C index -c user.email=ci@kaya.dev -c user.name=ci commit -m "init" >/dev/null
+popd >/dev/null
 
 cat > .cargo/config.toml <<EOF
 [registries.local]
