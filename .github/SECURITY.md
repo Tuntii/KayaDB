@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-KayaDB is currently in an **experimental / prototype** phase. We do not yet provide long-term support promises. Security fixes will be applied to the latest `main` branch and released as patch versions when appropriate.
+KayaDB completed **M13 productization (2026-06-21)**. It is a correctness-first distributed KV engine with documented security controls and accepted deployment risks (see `docs/security.md` §7). Security fixes will be applied to the latest `main` branch and released as patch versions when appropriate.
 
 | Version | Supported          |
 | ------- | ------------------ |

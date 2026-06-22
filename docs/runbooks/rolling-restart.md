@@ -19,14 +19,18 @@ Goal: restart nodes one-by-one with minimal disruption.
 
 3. Wait for the cluster to stabilize (new leader elected if needed).
 
-4. Restart the node with the same `--data-dir`, addresses, and peer list.
+4. Restart the node with the same `--data`, addresses, and peer list.
    ```bash
    ./kayadb-server \
-     --id N \
-     --data-dir ./data/nodeN \
-     --raft-addr ... \
-     --client-addr ...
+     --node-id N \
+     --data ./data/nodeN \
+     --raft-addr 127.0.0.1:748N \
+     --client-addr 127.0.0.1:737N \
+     --peer 1=127.0.0.1:7481,127.0.0.1:7379 \
+     --peer 2=127.0.0.1:7482,127.0.0.1:7380 \
+     --peer 3=127.0.0.1:7483,127.0.0.1:7381
    ```
+   Or use `scripts/restart-node.sh <N>` / `scripts/restart-node.ps1 -NodeId N` for the bundled 3-node demo.
 
 5. Wait until the node reports as follower and its applied index catches up.
    ```bash

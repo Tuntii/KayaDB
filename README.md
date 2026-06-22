@@ -7,7 +7,7 @@
 [![CI](https://github.com/Tuntii/KayaDB/actions/workflows/ci.yml/badge.svg)](https://github.com/Tuntii/KayaDB/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](Cargo.toml)
-[![Status](https://img.shields.io/badge/status-experimental%20%7C%20correctness--first-yellow.svg)](ROADMAP.md)
+[![Status](https://img.shields.io/badge/status-M13%20productization%20%7C%20correctness--first-green.svg)](ROADMAP.md)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://tuntii.github.io/KayaDB/)
 
 **A correctness-first, inspectable, embeddable storage engine built in Rust.**
@@ -70,9 +70,9 @@ This README contains only a high-level overview + quick start.
 | TCP cluster mode | ✅ Prototype | Joint-consensus membership, leader-routed client operations |
 | Async Rust client | ✅ Implemented | `kaya-client` with leader redirection support |
 | Operator CLI | ✅ Implemented | Local mode, server mode, inspect, stats, `add-node`/`remove-node` |
-| Production hardening | 🚧 Planned | TLS/auth, authenticated admin RPCs, Jepsen Clojure suite, eBPF |
+| Production hardening | ✅ M13 | Native TLS (`tls` feature), operator token, mTLS sidecar runbooks, chaos validation |
 
-> KayaDB is experimental. It is a serious systems project, but not yet a production database. See [security and deployment notes](docs/security.md) before exposing anything outside localhost.
+> KayaDB completed M13 productization (2026-06-21). It is a correctness-first distributed KV engine with documented day-2 runbooks — not a fully hardened multi-tenant SaaS database. See [security and deployment notes](docs/security.md) and accepted risks (§7) before any production-like deployment.
 
 ---
 
@@ -270,7 +270,7 @@ Detailed numbers and methodology live in [BENCHMARKS.md](BENCHMARKS.md).
 
 See the **[full status and roadmap](ROADMAP.md)** and the tracked **[productization north star](docs/productization.md)** (M13 exit gates — prototype → deployable product).
 
-KayaDB is experimental today but is **deliberately being evolved into a deployable product** once durability, auth/TLS, chaos validation, and ops runbooks are complete. See `docs/runbooks/` for day-2 procedures. Current gaps include unauthenticated admin RPCs (progress on operator tokens + mTLS sidecars) and full production hardening. Read the [Security guide](docs/security.md) before any deployment.
+M13 productization is complete: durable Raft state, operator-token auth, native TLS, chaos validation, and day-2 runbooks under `docs/runbooks/`. Remaining deployment hardening (data-at-rest, multi-tenant, audit logging) is documented as accepted risk in [security.md §7](docs/security.md#7-accepted-risks-and-future-hardening-m13-exit).
 
 For the complete picture and deeper explanations, use the **[official GitBook documentation](docs/README.md)**.
 

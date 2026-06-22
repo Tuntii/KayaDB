@@ -149,4 +149,4 @@ In this single-machine demo the inter-node raft still uses plain localhost for s
 - `docs/security.md` (full production guidance + operator token)
 - Ghostunnel docs: https://github.com/ghostunnel/ghostunnel
 
-Keep this pattern until native mTLS + auth is implemented inside KayaDB.
+Native in-process TLS (`tls` feature) and operator-token auth are available in M13; keep the sidecar pattern when you need proxy features or builds without the `tls` feature.

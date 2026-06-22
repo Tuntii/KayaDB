@@ -12,11 +12,14 @@ This runbook covers safely adding and removing nodes from a KayaDB cluster using
 ### 1. Start the new node in join mode
 ```bash
 ./kayadb-server \
-  --id 4 \
-  --data-dir ./data/node4 \
+  --join-cluster \
+  --node-id 4 \
+  --data ./data/node4 \
   --raft-addr 127.0.0.1:7484 \
   --client-addr 127.0.0.1:7384 \
-  --join-cluster 127.0.0.1:7481,127.0.0.1:7482,127.0.0.1:7483
+  --peer 1=127.0.0.1:7481,127.0.0.1:7379 \
+  --peer 2=127.0.0.1:7482,127.0.0.1:7380 \
+  --peer 3=127.0.0.1:7483,127.0.0.1:7381
 ```
 
 The node will appear in the cluster as a non-voter until you promote it.

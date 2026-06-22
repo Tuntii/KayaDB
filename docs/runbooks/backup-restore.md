@@ -1,6 +1,6 @@
 # Backup & Restore (Day-2 Operations)
 
-KayaDB stores all durable state under `--data-dir`.
+KayaDB stores all durable state under `--data` (the node data directory).
 
 ## Backup
 
@@ -31,7 +31,7 @@ rsync -a --delete ./data/nodeN/ /backups/kaya/nodeN/
 2. Replace the data directory with the backup.
 3. Start the node.
    ```bash
-   ./kayadb-server --data-dir ./restored-data/nodeN ...
+   ./kayadb-server --data ./restored-data/nodeN --node-id N --raft-addr ... --client-addr ... --peer ...
    ```
 4. The node will recover from WAL + latest snapshot on startup.
 5. Verify with `kayactl status` and sample reads.

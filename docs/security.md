@@ -330,15 +330,19 @@ Never paste inspection output from real datasets into public issue trackers unle
 
 ---
 
-## 7. What KayaDB Does Not Yet Provide (post M13)
+## 7. Accepted risks and future hardening (M13 exit)
 
-- Full built-in authentication/authorization (operator token protects only membership ops).
-- Encrypted storage files (data at rest).
-- Multi-tenant isolation.
-- Automatic client cert enforcement on every connection (opt-in via `require_client_cert` + sidecar).
-- Audit logging suitable for compliance.
-- A hardened remote administration API beyond current `kayactl`.
+M13 delivers operator-token auth for membership ops, native TLS (feature-gated), durable Raft snapshots, and documented day-2 runbooks. The items below are **explicitly accepted risks** for M13 — not correctness bugs. Mitigate them with infrastructure controls documented in sections 2–5.
 
-**Native TLS + operator token** now provide transport encryption and basic admin auth. Infrastructure controls (firewall, mTLS sidecar, operator token) remain mandatory for production.
+| Gap | Status | Mitigation (operator responsibility) | Code / docs reference |
+|---|---|---|---|
+| Full authZ for all client ops (GET/PUT/DELETE/SCAN) | Accepted risk | Firewall client ports; mTLS sidecar or native TLS; app-layer auth in front of KayaDB | Operator token enforces only opcodes 7/8: `crates/kaya-server/src/cluster.rs` (admin opcode handler ~L934) |
+| Data at rest encryption | Accepted risk | LUKS/DM-Crypt, BitLocker, or encrypted block volumes on the data directory | Section 4 above; no engine-level encryption |
+| Multi-tenant isolation | Accepted risk | One cluster per tenant; network segmentation; separate credentials per deployment | No tenant IDs in engine or protocol |
+| Client cert enforcement on every connection | Accepted risk (partial impl.) | Enable native TLS with CA (`require_client_cert: true` when `--tls-ca` set); or ghostunnel `--allow-cn` | `crates/kaya-server/src/main.rs`, `crates/kaya-net/src/transport.rs` |
+| Compliance-grade audit logging | Accepted risk | Ship node logs + `kayactl status --json` to your SIEM; ghostunnel access logs for mTLS | No structured audit trail in engine |
+| Hardened remote admin API | Accepted risk | Restrict `kayactl` to bastion/VPN; require `--operator-token` for membership | `kayactl` over client protocol only |
 
-These remaining items are future hardening areas.
+**No known correctness gaps** are listed as accepted risk. Remaining items are deployment hardening, not storage or consensus defects.
+
+Native TLS + operator token provide transport encryption and basic admin auth. Firewall rules, mTLS (native or sidecar), and operator token remain mandatory for any production-like deployment.

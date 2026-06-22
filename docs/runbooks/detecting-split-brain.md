@@ -10,7 +10,7 @@ done
 ```
 
 Look for:
-- Different `current_term`
+- Different `term`
 - Very different `applied_index` or `commit_index`
 - `peer_count` not matching expected voter count
 - Different leaders reported
@@ -20,21 +20,22 @@ Look for:
 kayactl --server 127.0.0.1:7379 --json status | jq '.'
 ```
 
-Key fields to compare across nodes:
+Key fields to compare across nodes (from `kayactl status --json`):
 - `term`
 - `applied_index`
 - `commit_index`
-- `last_log_index`
 - `role`
 - `peer_count`
 
+`last_log_index` is not exposed in status JSON; use `inspect wal` on each node's data dir for log tail comparison.
+
 ## Using Inspect
 ```bash
-kayactl --data ./data/nodeN inspect manifest
-kayactl --data ./data/nodeN inspect wal --tail 20
+kayactl inspect manifest ./data/nodeN/MANIFEST
+kayactl inspect wal ./data/nodeN/wal-000001.wal
 ```
 
-Compare the highest sequence numbers or recent entries.
+Compare `last_sequence` in manifest output and recent WAL records across nodes.
 
 ## Common Split-Brain Indicators
 - Two different nodes both claim to be leader at the same time.
@@ -44,7 +45,7 @@ Compare the highest sequence numbers or recent entries.
 ## Recovery Steps (high level)
 1. Identify the partition with the highest term + longest log.
 2. Stop the minority/wrong side nodes.
-3. Use `kayactl recover` or manual inspection to understand state.
+3. Use `kayactl --data ./data/nodeN recover --dry-run` or manual inspection to understand state.
 4. Restart the wrong-side nodes so they rejoin the correct partition (they will catch up via Raft).
 5. If necessary, force-remove bad nodes with `remove-node` (requires operator token if configured) and re-add clean nodes.
 
