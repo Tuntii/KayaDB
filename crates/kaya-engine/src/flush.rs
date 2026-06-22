@@ -1,9 +1,9 @@
 use kaya_core::{Result, SequenceNumber};
 use kaya_io::{Disk, RelativePath};
 use kaya_lsm::{
-    decode_footer, encode_manifest_edit, ManifestEdit, Memtable, SstEntry, SstableBuilder,
-    SstableReader, TableMetadata, ValueRecord, CURRENT_FILE_NAME, CURRENT_TMP_FILE_NAME,
-    MANIFEST_FILE_NAME, SST_FOOTER_LEN,
+    decode_footer, encode_manifest_edit, footer_stored_crc, ManifestEdit, Memtable, SstEntry,
+    SstableBuilder, SstableReader, TableMetadata, ValueRecord, CURRENT_FILE_NAME,
+    CURRENT_TMP_FILE_NAME, MANIFEST_FILE_NAME,
 };
 
 use super::{Engine, FlushResult};
@@ -22,7 +22,10 @@ impl<D: Disk> Engine<D> {
         let table_id = self.next_table_id;
         self.next_table_id += 1;
 
-        let mut builder = SstableBuilder::new(self.config.sstable.block_target_bytes);
+        let mut builder = SstableBuilder::new(
+            self.config.sstable.block_target_bytes,
+            self.config.sstable.bloom_bits_per_key,
+        );
         for (key, record) in self.memtable.iter() {
             match record {
                 ValueRecord::Put { value, sequence } => {
@@ -62,15 +65,7 @@ impl<D: Disk> Engine<D> {
         self.disk.rename(&tmp_rel, &sst_rel).await?;
         self.disk.fsync_dir(&sst_dir_rel).await?;
 
-        let footer_crc = {
-            let len = sst_bytes.len();
-            if len >= SST_FOOTER_LEN {
-                let fb = &sst_bytes[len - SST_FOOTER_LEN..];
-                u32::from_le_bytes(fb[40..44].try_into().unwrap_or([0u8; 4]))
-            } else {
-                0
-            }
-        };
+        let footer_crc = footer_stored_crc(&sst_bytes).unwrap_or(0);
         let meta = TableMetadata {
             table_id,
             level: 0,

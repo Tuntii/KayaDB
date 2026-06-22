@@ -4,9 +4,12 @@ use std::path::Path;
 use kaya_core::{crc32c, Bytes, KayaError, Result, SequenceNumber};
 
 pub const SST_MAGIC: u32 = 0x4b535354; // "KSST"
-pub const SST_VERSION: u16 = 1;
-/// Fixed size of the SSTable footer in bytes.
+pub const SST_VERSION: u16 = 2;
+pub const SST_VERSION_V1: u16 = 1;
+/// Fixed size of the v1 SSTable footer in bytes (no bloom metadata).
 pub const SST_FOOTER_LEN: usize = 48;
+/// Fixed size of the v2 SSTable footer in bytes (includes bloom metadata).
+pub const SST_FOOTER_LEN_V2: usize = 64;
 
 const ENTRY_KIND_PUT: u8 = 1;
 const ENTRY_KIND_DELETE: u8 = 2;
@@ -29,6 +32,21 @@ pub struct SstFooter {
     pub table_max_seq: u64,
     pub entry_count: u64,
     pub format_version: u16,
+    /// Byte offset of the bloom filter block; `0` when absent.
+    pub bloom_offset: u64,
+    pub bloom_len: u32,
+    pub bloom_hash_count: u32,
+}
+
+impl SstFooter {
+    /// On-disk footer size for this format version.
+    pub fn physical_len(&self) -> usize {
+        if self.format_version <= SST_VERSION_V1 {
+            SST_FOOTER_LEN
+        } else {
+            SST_FOOTER_LEN_V2
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,9 +282,97 @@ fn decode_index_block(bytes: &[u8]) -> Result<Vec<IndexEntry>> {
     Ok(entries)
 }
 
+// ---- Bloom filter ----
+//
+// Table-level blocked bloom using double hashing with crc32c-derived hashes.
+
+#[derive(Debug, Clone)]
+struct BloomFilter {
+    bits: Vec<u8>,
+    num_bits: u32,
+    hash_count: u32,
+}
+
+fn bloom_hash_count(bits_per_key: u32) -> u32 {
+    // k ≈ bits_per_key * ln(2)
+    let k = ((f64::from(bits_per_key)) * 0.693_147).ceil() as u32;
+    k.max(1)
+}
+
+fn bloom_num_bits(num_keys: usize, bits_per_key: u32) -> u32 {
+    let bits = (num_keys as u64).saturating_mul(u64::from(bits_per_key));
+    (bits.max(64)) as u32
+}
+
+fn bloom_hash_pair(key: &[u8]) -> (u64, u64) {
+    let h1 = u64::from(crc32c(key));
+    let mut seed = Vec::with_capacity(key.len() + 4);
+    seed.extend_from_slice(key);
+    seed.extend_from_slice(&h1.to_le_bytes()[..4]);
+    let h2 = u64::from(crc32c(&seed)) | 1;
+    (h1, h2)
+}
+
+fn bloom_bit_index(h1: u64, h2: u64, i: u32, num_bits: u32) -> u32 {
+    (h1.wrapping_add(u64::from(i).wrapping_mul(h2)) % u64::from(num_bits)) as u32
+}
+
+fn bloom_set_bit(bits: &mut [u8], index: u32) {
+    let byte = (index / 8) as usize;
+    let bit = (index % 8) as u8;
+    bits[byte] |= 1 << bit;
+}
+
+fn bloom_get_bit(bits: &[u8], index: u32) -> bool {
+    let byte = (index / 8) as usize;
+    let bit = (index % 8) as u8;
+    bits[byte] & (1 << bit) != 0
+}
+
+fn build_bloom_filter(keys: &[Bytes], bits_per_key: u32) -> (Vec<u8>, u32) {
+    let hash_count = bloom_hash_count(bits_per_key);
+    let num_bits = bloom_num_bits(keys.len(), bits_per_key);
+    let byte_len = ((num_bits + 7) / 8) as usize;
+    let mut bits = vec![0u8; byte_len];
+    for key in keys {
+        let (h1, h2) = bloom_hash_pair(key);
+        for i in 0..hash_count {
+            bloom_set_bit(&mut bits, bloom_bit_index(h1, h2, i, num_bits));
+        }
+    }
+    (bits, hash_count)
+}
+
+impl BloomFilter {
+    fn from_bytes(bytes: &[u8], hash_count: u32) -> Result<Self> {
+        if hash_count == 0 {
+            return Err(KayaError::corruption("bloom filter hash_count is zero"));
+        }
+        let num_bits = (bytes.len() as u32).saturating_mul(8);
+        if num_bits == 0 {
+            return Err(KayaError::corruption("bloom filter is empty"));
+        }
+        Ok(Self {
+            bits: bytes.to_vec(),
+            num_bits,
+            hash_count,
+        })
+    }
+
+    fn might_contain(&self, key: &[u8]) -> bool {
+        let (h1, h2) = bloom_hash_pair(key);
+        for i in 0..self.hash_count {
+            if !bloom_get_bit(&self.bits, bloom_bit_index(h1, h2, i, self.num_bits)) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 // ---- Footer encode/decode ----
 //
-// Fixed 48-byte layout (little-endian):
+// v1 fixed 48-byte layout (little-endian):
 //   index_block_offset:  u64  offset 0
 //   index_block_len:     u32  offset 8
 //   table_min_seq:       u64  offset 12
@@ -276,47 +382,101 @@ fn decode_index_block(bytes: &[u8]) -> Result<Vec<IndexEntry>> {
 //   footer_len:          u16  offset 38  (always 48)
 //   footer_crc32c:       u32  offset 40  (CRC over bytes 0..40)
 //   magic:               u32  offset 44  (SST_MAGIC)
+//
+// v2 fixed 64-byte layout extends v1 with bloom metadata before CRC:
+//   bloom_offset:        u64  offset 40
+//   bloom_len:           u32  offset 48
+//   bloom_hash_count:    u32  offset 52
+//   footer_crc32c:       u32  offset 56  (CRC over bytes 0..56)
+//   magic:               u32  offset 60
 
 fn encode_footer(footer: &SstFooter) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(SST_FOOTER_LEN);
-    put_u64_le(&mut buf, footer.index_block_offset); // 0
-    put_u32_le(&mut buf, footer.index_block_len); //    8
-    put_u64_le(&mut buf, footer.table_min_seq); //      12
-    put_u64_le(&mut buf, footer.table_max_seq); //      20
-    put_u64_le(&mut buf, footer.entry_count); //        28
-    put_u16_le(&mut buf, footer.format_version); //     36
-    put_u16_le(&mut buf, SST_FOOTER_LEN as u16); //     38
-    let crc = crc32c(&buf); // CRC over first 40 bytes
-    put_u32_le(&mut buf, crc); //                       40
-    put_u32_le(&mut buf, SST_MAGIC); //                 44
-    debug_assert_eq!(buf.len(), SST_FOOTER_LEN);
+    let physical_len = footer.physical_len();
+    let mut buf = Vec::with_capacity(physical_len);
+    put_u64_le(&mut buf, footer.index_block_offset);
+    put_u32_le(&mut buf, footer.index_block_len);
+    put_u64_le(&mut buf, footer.table_min_seq);
+    put_u64_le(&mut buf, footer.table_max_seq);
+    put_u64_le(&mut buf, footer.entry_count);
+    put_u16_le(&mut buf, footer.format_version);
+    put_u16_le(&mut buf, physical_len as u16);
+    if physical_len == SST_FOOTER_LEN_V2 {
+        put_u64_le(&mut buf, footer.bloom_offset);
+        put_u32_le(&mut buf, footer.bloom_len);
+        put_u32_le(&mut buf, footer.bloom_hash_count);
+    }
+    let crc_data_len = physical_len - 8;
+    let crc = crc32c(&buf[..crc_data_len]);
+    put_u32_le(&mut buf, crc);
+    put_u32_le(&mut buf, SST_MAGIC);
+    debug_assert_eq!(buf.len(), physical_len);
     buf
 }
 
-/// Decode and validate the footer from the last `SST_FOOTER_LEN` bytes.
+/// Decode and validate the footer from the trailing fixed-size footer bytes.
 pub fn decode_footer(bytes: &[u8]) -> Result<SstFooter> {
     if bytes.len() < SST_FOOTER_LEN {
         return Err(KayaError::corruption("file too short for SSTable footer"));
     }
-    let footer_start = bytes.len() - SST_FOOTER_LEN;
-    let fb = &bytes[footer_start..];
-    let magic = read_u32_le(fb, 44)?;
+    let magic = read_u32_le(&bytes[bytes.len() - 4..], 0)?;
     if magic != SST_MAGIC {
         return Err(KayaError::corruption(format!(
             "bad SSTable magic: {magic:#010x} (expected {SST_MAGIC:#010x})"
         )));
     }
-    let expected_crc = read_u32_le(fb, 40)?;
-    let actual_crc = crc32c(&fb[..40]);
+    let physical_len = if bytes.len() >= SST_FOOTER_LEN_V2 {
+        let v2_footer_len =
+            read_u16_le(&bytes[bytes.len() - SST_FOOTER_LEN_V2..], 38)?;
+        if v2_footer_len == SST_FOOTER_LEN_V2 as u16 {
+            SST_FOOTER_LEN_V2
+        } else {
+            let v1_footer_len =
+                read_u16_le(&bytes[bytes.len() - SST_FOOTER_LEN..], 38)?;
+            if v1_footer_len == SST_FOOTER_LEN as u16 {
+                SST_FOOTER_LEN
+            } else {
+                return Err(KayaError::corruption(format!(
+                    "invalid SSTable footer_len: {v1_footer_len}"
+                )));
+            }
+        }
+    } else {
+        let v1_footer_len = read_u16_le(&bytes[bytes.len() - SST_FOOTER_LEN..], 38)?;
+        if v1_footer_len == SST_FOOTER_LEN as u16 {
+            SST_FOOTER_LEN
+        } else {
+            return Err(KayaError::corruption(format!(
+                "invalid SSTable footer_len: {v1_footer_len}"
+            )));
+        }
+    };
+    if bytes.len() < physical_len {
+        return Err(KayaError::corruption("file too short for SSTable footer"));
+    }
+    let footer_start = bytes.len() - physical_len;
+    let fb = &bytes[footer_start..];
+    let crc_offset = physical_len - 8;
+    let crc_data_len = physical_len - 8;
+    let expected_crc = read_u32_le(fb, crc_offset)?;
+    let actual_crc = crc32c(&fb[..crc_data_len]);
     if expected_crc != actual_crc {
         return Err(KayaError::corruption("SSTable footer CRC mismatch"));
     }
     let format_version = read_u16_le(fb, 36)?;
-    if format_version != SST_VERSION {
+    if format_version != SST_VERSION_V1 && format_version != SST_VERSION {
         return Err(KayaError::corruption(format!(
             "unsupported SSTable version: {format_version}"
         )));
     }
+    let (bloom_offset, bloom_len, bloom_hash_count) = if physical_len == SST_FOOTER_LEN_V2 {
+        (
+            read_u64_le(fb, 40)?,
+            read_u32_le(fb, 48)?,
+            read_u32_le(fb, 52)?,
+        )
+    } else {
+        (0, 0, 0)
+    };
     Ok(SstFooter {
         index_block_offset: read_u64_le(fb, 0)?,
         index_block_len: read_u32_le(fb, 8)?,
@@ -324,7 +484,18 @@ pub fn decode_footer(bytes: &[u8]) -> Result<SstFooter> {
         table_max_seq: read_u64_le(fb, 20)?,
         entry_count: read_u64_le(fb, 28)?,
         format_version,
+        bloom_offset,
+        bloom_len,
+        bloom_hash_count,
     })
+}
+
+/// Returns the stored footer CRC32C from a complete SSTable byte vector.
+pub fn footer_stored_crc(bytes: &[u8]) -> Result<u32> {
+    let footer = decode_footer(bytes)?;
+    let physical_len = footer.physical_len();
+    let fb = &bytes[bytes.len() - physical_len..];
+    read_u32_le(fb, physical_len - 8)
 }
 
 // ---- SstableBuilder ----
@@ -334,6 +505,7 @@ pub fn decode_footer(bytes: &[u8]) -> Result<SstFooter> {
 #[derive(Debug)]
 pub struct SstableBuilder {
     target_block_bytes: usize,
+    bloom_bits_per_key: u32,
     // current block accumulator
     current_bytes: Vec<u8>,
     current_count: u32,
@@ -343,6 +515,7 @@ pub struct SstableBuilder {
     // finished data blocks
     data_bytes: Vec<u8>,
     index_entries: Vec<IndexEntry>,
+    all_keys: Vec<Bytes>,
     // table-wide stats
     smallest_key: Option<Bytes>,
     largest_key: Option<Bytes>,
@@ -352,9 +525,10 @@ pub struct SstableBuilder {
 }
 
 impl SstableBuilder {
-    pub fn new(target_block_bytes: usize) -> Self {
+    pub fn new(target_block_bytes: usize, bloom_bits_per_key: u32) -> Self {
         Self {
             target_block_bytes: target_block_bytes.max(1),
+            bloom_bits_per_key,
             current_bytes: Vec::new(),
             current_count: 0,
             current_first_seq: None,
@@ -362,6 +536,7 @@ impl SstableBuilder {
             current_last_key: None,
             data_bytes: Vec::new(),
             index_entries: Vec::new(),
+            all_keys: Vec::new(),
             smallest_key: None,
             largest_key: None,
             table_min_seq: None,
@@ -371,6 +546,7 @@ impl SstableBuilder {
     }
 
     pub fn add(&mut self, entry: SstEntry) {
+        self.all_keys.push(entry.key.clone());
         encode_entry(&mut self.current_bytes, &entry);
         self.current_count += 1;
         self.total_entries += 1;
@@ -451,6 +627,18 @@ impl SstableBuilder {
         let index_len = index_bytes.len() as u32;
         out.extend_from_slice(&index_bytes);
 
+        let mut bloom_offset = 0u64;
+        let mut bloom_len = 0u32;
+        let mut bloom_hash_count = 0u32;
+        if self.bloom_bits_per_key > 0 {
+            let (bloom_bytes, hash_count) =
+                build_bloom_filter(&self.all_keys, self.bloom_bits_per_key);
+            bloom_offset = out.len() as u64;
+            bloom_len = bloom_bytes.len() as u32;
+            bloom_hash_count = hash_count;
+            out.extend_from_slice(&bloom_bytes);
+        }
+
         // Footer
         let footer = SstFooter {
             index_block_offset: index_offset,
@@ -459,6 +647,9 @@ impl SstableBuilder {
             table_max_seq: self.table_max_seq.unwrap_or(1),
             entry_count: self.total_entries,
             format_version: SST_VERSION,
+            bloom_offset,
+            bloom_len,
+            bloom_hash_count,
         };
         out.extend_from_slice(&encode_footer(&footer));
         Ok(out)
@@ -473,26 +664,51 @@ pub struct SstableReader {
     bytes: Vec<u8>,
     footer: SstFooter,
     index: Vec<IndexEntry>,
+    bloom: Option<BloomFilter>,
+    #[cfg(test)]
+    blocks_read: std::cell::Cell<u64>,
 }
 
 impl SstableReader {
     /// Validate and load a complete SSTable from its byte vector.
     pub fn open(bytes: Vec<u8>) -> Result<Self> {
         let footer = decode_footer(&bytes)?;
+        let footer_len = footer.physical_len();
         let idx_start = footer.index_block_offset as usize;
         let idx_end = idx_start + footer.index_block_len as usize;
-        let content_end = bytes.len() - SST_FOOTER_LEN;
+        let content_end = bytes.len() - footer_len;
         if idx_end > content_end {
             return Err(KayaError::corruption(
                 "index block range exceeds content area",
             ));
         }
+        let bloom = if footer.bloom_len > 0 {
+            let bloom_start = footer.bloom_offset as usize;
+            let bloom_end = bloom_start + footer.bloom_len as usize;
+            if bloom_start < idx_end || bloom_end > content_end {
+                return Err(KayaError::corruption("bloom filter range invalid"));
+            }
+            Some(BloomFilter::from_bytes(
+                &bytes[bloom_start..bloom_end],
+                footer.bloom_hash_count,
+            )?)
+        } else {
+            None
+        };
         let index = decode_index_block(&bytes[idx_start..idx_end])?;
         Ok(Self {
             bytes,
             footer,
             index,
+            bloom,
+            #[cfg(test)]
+            blocks_read: std::cell::Cell::new(0),
         })
+    }
+
+    #[cfg(test)]
+    fn blocks_read_count(&self) -> u64 {
+        self.blocks_read.get()
     }
 
     pub fn footer(&self) -> &SstFooter {
@@ -502,6 +718,11 @@ impl SstableReader {
     /// Point lookup.  Returns the entry with the highest sequence for `key`
     /// in the block that could contain it, or `None` if absent.
     pub fn get(&self, key: &[u8]) -> Result<Option<SstEntry>> {
+        if let Some(bloom) = &self.bloom {
+            if !bloom.might_contain(key) {
+                return Ok(None);
+            }
+        }
         // The index is sorted by separator key (= last key of each block).
         // The key lives in the first block whose separator_key >= key.
         for ie in &self.index {
@@ -536,6 +757,11 @@ impl SstableReader {
             if !ie.separator_key.is_empty() && ie.separator_key.as_slice() < prefix {
                 continue;
             }
+            if let Some(bloom) = &self.bloom {
+                if ie.separator_key.starts_with(prefix) && !bloom.might_contain(&ie.separator_key) {
+                    continue;
+                }
+            }
             let block = self.read_data_block(ie)?;
             for entry in block {
                 if entry.key.starts_with(prefix) {
@@ -560,9 +786,12 @@ impl SstableReader {
     }
 
     fn read_data_block(&self, ie: &IndexEntry) -> Result<Vec<SstEntry>> {
+        #[cfg(test)]
+        self.blocks_read.set(self.blocks_read.get() + 1);
         let start = ie.block_offset as usize;
         let end = start + ie.block_len as usize;
-        if end > self.bytes.len().saturating_sub(SST_FOOTER_LEN) {
+        let data_end = self.footer.index_block_offset as usize;
+        if end > data_end {
             return Err(KayaError::corruption("data block offset out of bounds"));
         }
         decode_data_block(&self.bytes[start..end])
@@ -595,6 +824,9 @@ pub fn inspect_sstable_path(path: impl AsRef<Path>) -> Result<SstInspection> {
                 table_max_seq: 0,
                 entry_count: 0,
                 format_version: 0,
+                bloom_offset: 0,
+                bloom_len: 0,
+                bloom_hash_count: 0,
             },
             entries: Vec::new(),
             warnings: vec![e.to_string()],
@@ -636,7 +868,7 @@ mod tests {
 
     #[test]
     fn roundtrip_single_block() {
-        let mut builder = SstableBuilder::new(64 * 1024);
+        let mut builder = SstableBuilder::new(64 * 1024, 0);
         builder.add(entry_put(b"aaa", b"v1", 1));
         builder.add(entry_put(b"bbb", b"v2", 2));
         builder.add(entry_del(b"ccc", 3));
@@ -660,7 +892,7 @@ mod tests {
     #[test]
     fn multi_block_roundtrip() {
         // Very small block target forces multiple blocks.
-        let mut builder = SstableBuilder::new(1);
+        let mut builder = SstableBuilder::new(1, 0);
         for i in 0_u8..10 {
             builder.add(entry_put(&[i], &[i * 2], u64::from(i) + 1));
         }
@@ -675,7 +907,7 @@ mod tests {
 
     #[test]
     fn scan_prefix() {
-        let mut builder = SstableBuilder::new(64 * 1024);
+        let mut builder = SstableBuilder::new(64 * 1024, 0);
         // Entries MUST be added in sorted key order for SSTable correctness.
         builder.add(entry_put(b"other:x", b"X", 3));
         builder.add(entry_put(b"user:alice", b"A", 1));
@@ -690,7 +922,7 @@ mod tests {
 
     #[test]
     fn rejects_corrupted_footer_magic() {
-        let mut builder = SstableBuilder::new(64 * 1024);
+        let mut builder = SstableBuilder::new(64 * 1024, 0);
         builder.add(entry_put(b"k", b"v", 1));
         let mut bytes = builder.finish().unwrap();
         // Corrupt the magic bytes (last 4 bytes).
@@ -701,7 +933,7 @@ mod tests {
 
     #[test]
     fn rejects_corrupted_data_block_crc() {
-        let mut builder = SstableBuilder::new(64 * 1024);
+        let mut builder = SstableBuilder::new(64 * 1024, 0);
         builder.add(entry_put(b"k", b"v", 1));
         let mut bytes = builder.finish().unwrap();
         // Flip a byte inside the first data block.
@@ -709,5 +941,86 @@ mod tests {
         let reader = SstableReader::open(bytes).unwrap();
         // The footer and index are fine; the data block CRC should fail.
         assert!(reader.get(b"k").is_err());
+    }
+
+    #[test]
+    fn bloom_disabled_matches_v1_behavior() {
+        let mut builder = SstableBuilder::new(64 * 1024, 0);
+        builder.add(entry_put(b"aaa", b"v1", 1));
+        builder.add(entry_put(b"bbb", b"v2", 2));
+        let bytes = builder.finish().unwrap();
+        let footer = decode_footer(&bytes).unwrap();
+        assert_eq!(footer.format_version, SST_VERSION);
+        assert_eq!(footer.bloom_offset, 0);
+        assert_eq!(footer.bloom_len, 0);
+        assert_eq!(footer.bloom_hash_count, 0);
+
+        let reader = SstableReader::open(bytes).unwrap();
+        assert!(reader.get(b"zzz").unwrap().is_none());
+    }
+
+    #[test]
+    fn bloom_enabled_footer_roundtrip() {
+        let mut builder = SstableBuilder::new(64 * 1024, 10);
+        builder.add(entry_put(b"alpha", b"v1", 1));
+        builder.add(entry_put(b"beta", b"v2", 2));
+        let bytes = builder.finish().unwrap();
+        let footer = decode_footer(&bytes).unwrap();
+        assert_eq!(footer.format_version, SST_VERSION);
+        assert!(footer.bloom_len > 0);
+        assert!(footer.bloom_hash_count > 0);
+        assert_eq!(
+            footer.bloom_offset + footer.bloom_len as u64,
+            bytes.len() as u64 - SST_FOOTER_LEN_V2 as u64
+        );
+
+        let reader = SstableReader::open(bytes).unwrap();
+        assert_eq!(
+            reader.get(b"alpha").unwrap().unwrap().value,
+            Some(b"v1".to_vec())
+        );
+        assert!(reader.get(b"missing-key").unwrap().is_none());
+    }
+
+    #[test]
+    fn bloom_absent_key_skips_block_reads() {
+        let mut builder = SstableBuilder::new(1, 10);
+        for i in 0_u8..8 {
+            builder.add(entry_put(&[i], &[i * 2], u64::from(i) + 1));
+        }
+        let bytes = builder.finish().unwrap();
+        let reader = SstableReader::open(bytes).unwrap();
+        assert!(reader.get(b"absent").unwrap().is_none());
+        assert_eq!(reader.blocks_read_count(), 0);
+    }
+
+    #[test]
+    fn reads_v1_footer_without_bloom() {
+        let mut builder = SstableBuilder::new(64 * 1024, 0);
+        builder.add(entry_put(b"legacy", b"v", 1));
+        let mut bytes = builder.finish().unwrap();
+        let footer = decode_footer(&bytes).unwrap();
+        let v1_footer = SstFooter {
+            index_block_offset: footer.index_block_offset,
+            index_block_len: footer.index_block_len,
+            table_min_seq: footer.table_min_seq,
+            table_max_seq: footer.table_max_seq,
+            entry_count: footer.entry_count,
+            format_version: SST_VERSION_V1,
+            bloom_offset: 0,
+            bloom_len: 0,
+            bloom_hash_count: 0,
+        };
+        let v1_encoded = encode_footer(&v1_footer);
+        let v1_start = bytes.len() - SST_FOOTER_LEN_V2;
+        bytes.truncate(v1_start);
+        bytes.extend_from_slice(&v1_encoded);
+
+        let reader = SstableReader::open(bytes).unwrap();
+        assert_eq!(reader.footer().format_version, SST_VERSION_V1);
+        assert_eq!(
+            reader.get(b"legacy").unwrap().unwrap().value,
+            Some(b"v".to_vec())
+        );
     }
 }

@@ -11,6 +11,7 @@ pub const DEFAULT_MAX_PAYLOAD_LEN: u32 = 32 * 1024 * 1024;
 pub const DEFAULT_SEGMENT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_MEMTABLE_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_SSTABLE_BLOCK_TARGET_BYTES: usize = 32 * 1024;
+pub const DEFAULT_SSTABLE_BLOOM_BITS_PER_KEY: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KayaError {
@@ -206,12 +207,15 @@ impl Default for MemtableConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SstableConfig {
     pub block_target_bytes: usize,
+    /// Bloom filter bits per key; `0` disables the filter.
+    pub bloom_bits_per_key: u32,
 }
 
 impl Default for SstableConfig {
     fn default() -> Self {
         Self {
             block_target_bytes: DEFAULT_SSTABLE_BLOCK_TARGET_BYTES,
+            bloom_bits_per_key: DEFAULT_SSTABLE_BLOOM_BITS_PER_KEY,
         }
     }
 }
