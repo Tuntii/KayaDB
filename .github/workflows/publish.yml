@@ -31,10 +31,11 @@ env:
   CRATES: >-
     kaya-core
     kaya-io
+    kaya-raft
     kaya-wal
     kaya-lsm
     kaya-engine
-    kaya-raft
+    kaya-net
     kaya-client
     kayactl
 
@@ -84,8 +85,5 @@ jobs:
         with:
           shared-key: "kaya-publish-dry-run"
 
-      - name: cargo publish --dry-run (kaya-engine, kayactl)
-        run: |
-          set -euo pipefail
-          cargo publish --dry-run --no-verify -p kaya-engine
-          cargo publish --dry-run --no-verify -p kayactl
+      - name: cargo publish dry-run (local registry)
+        run: bash scripts/ci_publish_dry_run.sh

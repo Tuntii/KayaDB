@@ -69,11 +69,9 @@ jobs:
         with:
           shared-key: "kaya-publish-dry-run"
 
-      - name: cargo publish --dry-run (kaya-engine, kayactl)
+      - name: cargo publish dry-run (local registry)
         if: steps.changes.outputs.crates == 'true'
-        run: |
-          cargo publish --dry-run --no-verify -p kaya-engine
-          cargo publish --dry-run --no-verify -p kayactl
+        run: bash scripts/ci_publish_dry_run.sh
 
 
 
