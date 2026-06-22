@@ -6,12 +6,13 @@ use kaya_core::{
 };
 use kaya_io::{Disk, RelativePath};
 use kaya_lsm::{
-    decode_footer, encode_manifest_edit, CompactionPolicy, L0MergePolicy, ManifestEdit,
-    ManifestState, ManifestWarning, Memtable, SstEntry, SstableBuilder, SstableReader,
-    TableMetadata, CURRENT_FILE_NAME, CURRENT_TMP_FILE_NAME, MANIFEST_FILE_NAME, SST_FOOTER_LEN,
+    decode_footer, encode_manifest_edit, CompactionPolicy, ManifestEdit, ManifestState,
+    ManifestWarning, Memtable, SstEntry, SstableBuilder, SstableReader, TableMetadata,
+    CURRENT_FILE_NAME, CURRENT_TMP_FILE_NAME, MANIFEST_FILE_NAME, SST_FOOTER_LEN,
 };
 use kaya_wal::{recover_wal, WalRecoveryReport, WalWarning, WalWriter};
 
+mod compaction;
 mod flush;
 mod memtable;
 mod recovery;
@@ -253,7 +254,7 @@ impl<D: Disk> Engine<D> {
             }
         }
 
-        let policy = L0MergePolicy;
+        let policy = compaction::compaction_policy_from_config(&self.config.compaction);
         let candidate = match policy.pick_compaction(&self.manifest_state.live_tables, &pinned_ids)
         {
             Some(c) => c,
@@ -415,7 +416,10 @@ impl<D: Disk> Engine<D> {
 mod tests {
     use std::sync::Arc;
 
-    use kaya_core::{DurabilityMode, EngineConfig};
+    use kaya_core::{
+        CompactionConfig, CompactionPolicyKind, DurabilityMode, EngineConfig,
+        LeveledCompactionConfig,
+    };
     use kaya_io::SimDisk;
 
     use super::*;
@@ -658,6 +662,51 @@ mod tests {
                 engine.get(b"c", ReadOptions::default()).await.unwrap(),
                 Some(b"3".to_vec())
             );
+        });
+    }
+
+    #[test]
+    fn leveled_policy_waits_for_l0_trigger() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = EngineConfig {
+                compaction: CompactionConfig {
+                    policy: CompactionPolicyKind::Leveled,
+                    leveled: LeveledCompactionConfig {
+                        level_count: 7,
+                        l0_compaction_trigger: 4,
+                    },
+                    ..CompactionConfig::default()
+                },
+                ..EngineConfig::default()
+            };
+            let mut engine = Engine::open(config, disk).await.unwrap();
+
+            for i in 0..3 {
+                engine
+                    .put(format!("k{i}").into_bytes(), b"v".to_vec(), strict_opts())
+                    .await
+                    .unwrap();
+                engine.flush().await.unwrap();
+            }
+            assert_eq!(engine.stats().sstable_count, 3);
+
+            let below_threshold = engine.compact().await.unwrap();
+            assert_eq!(below_threshold.input_tables, 0);
+            assert_eq!(below_threshold.output_tables, 0);
+            assert_eq!(engine.stats().sstable_count, 3);
+
+            engine
+                .put(b"k3".to_vec(), b"v".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            engine.flush().await.unwrap();
+            assert_eq!(engine.stats().sstable_count, 4);
+
+            let at_threshold = engine.compact().await.unwrap();
+            assert_eq!(at_threshold.input_tables, 4);
+            assert_eq!(at_threshold.output_tables, 1);
+            assert_eq!(engine.stats().sstable_count, 1);
         });
     }
 

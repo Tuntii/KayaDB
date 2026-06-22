@@ -231,6 +231,62 @@ impl Default for LimitsConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CompactionPolicyKind {
+    #[default]
+    L0Merge,
+    Leveled,
+    SizeTiered,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeveledCompactionConfig {
+    pub level_count: u32,
+    pub l0_compaction_trigger: usize,
+}
+
+impl Default for LeveledCompactionConfig {
+    fn default() -> Self {
+        Self {
+            level_count: 7,
+            l0_compaction_trigger: 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SizeTieredCompactionConfig {
+    pub min_tables: usize,
+    /// Size ratio as fixed-point thousandths (1500 = 1.5).
+    pub ratio_x1000: u32,
+}
+
+impl Default for SizeTieredCompactionConfig {
+    fn default() -> Self {
+        Self {
+            min_tables: 4,
+            ratio_x1000: 1500,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionConfig {
+    pub policy: CompactionPolicyKind,
+    pub leveled: LeveledCompactionConfig,
+    pub tiered: SizeTieredCompactionConfig,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            policy: CompactionPolicyKind::L0Merge,
+            leveled: LeveledCompactionConfig::default(),
+            tiered: SizeTieredCompactionConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineConfig {
     pub data_dir: PathBuf,
@@ -239,6 +295,7 @@ pub struct EngineConfig {
     pub memtable: MemtableConfig,
     pub sstable: SstableConfig,
     pub limits: LimitsConfig,
+    pub compaction: CompactionConfig,
     pub disable_locking: bool,
 }
 
@@ -251,6 +308,7 @@ impl Default for EngineConfig {
             memtable: MemtableConfig::default(),
             sstable: SstableConfig::default(),
             limits: LimitsConfig::default(),
+            compaction: CompactionConfig::default(),
             disable_locking: false,
         }
     }
@@ -283,5 +341,15 @@ mod tests {
             EngineConfig::default().durability.mode,
             DurabilityMode::Strict
         );
+    }
+
+    #[test]
+    fn default_compaction_policy_is_l0_merge() {
+        let config = EngineConfig::default();
+        assert_eq!(config.compaction.policy, CompactionPolicyKind::L0Merge);
+        assert_eq!(config.compaction.leveled.level_count, 7);
+        assert_eq!(config.compaction.leveled.l0_compaction_trigger, 4);
+        assert_eq!(config.compaction.tiered.min_tables, 4);
+        assert_eq!(config.compaction.tiered.ratio_x1000, 1500);
     }
 }
