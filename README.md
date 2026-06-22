@@ -9,7 +9,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](Cargo.toml)
 [![crates.io: kaya-engine](https://img.shields.io/crates/v/kaya-engine.svg?label=kaya-engine)](https://crates.io/crates/kaya-engine)
 [![crates.io: kayactl](https://img.shields.io/crates/v/kayactl.svg?label=kayactl)](https://crates.io/crates/kayactl)
-[![Status](https://img.shields.io/badge/status-M13%20productization%20%7C%20correctness--first-green.svg)](ROADMAP.md)
+[![Status](https://img.shields.io/badge/status-M14%20correctness%2Balgorithm-yellow.svg)](ROADMAP.md)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://tuntii.github.io/KayaDB/)
 
 **A correctness-first, inspectable, embeddable storage engine built in Rust.**
@@ -73,8 +73,9 @@ This README contains only a high-level overview + quick start.
 | Async Rust client | ✅ Implemented | `kaya-client` with leader redirection support |
 | Operator CLI | ✅ Implemented | Local mode, server mode, inspect, stats, `add-node`/`remove-node` |
 | Production hardening | ✅ M13 | Native TLS (`tls` feature), operator token, mTLS sidecar runbooks, chaos validation |
+| Storage algorithms | 🟡 M14 | Pluggable compaction policy, SSTable bloom filter, WAL group-commit batching |
 
-> KayaDB completed M13 productization (2026-06-21). It is a correctness-first distributed KV engine with documented day-2 runbooks — not a fully hardened multi-tenant SaaS database. See [security and deployment notes](docs/security.md) and accepted risks (§7) before any production-like deployment.
+> KayaDB completed M13 productization (2026-06-21) and is now in **M14 correctness+algorithm** (v0.1.43): deeper LSM policies, module splits, and expanded Jepsen/chaos CI. It remains a correctness-first distributed KV engine with documented day-2 runbooks — not a fully hardened multi-tenant SaaS database. See [security and deployment notes](docs/security.md) and accepted risks (§7) before any production-like deployment.
 
 ---
 
@@ -272,7 +273,7 @@ Detailed numbers and methodology live in [BENCHMARKS.md](BENCHMARKS.md).
 
 See the **[full status and roadmap](ROADMAP.md)** and the tracked **[productization north star](docs/productization.md)** (M13 exit gates — prototype → deployable product).
 
-M13 productization is complete: durable Raft state, operator-token auth, native TLS, chaos validation, and day-2 runbooks under `docs/runbooks/`. Remaining deployment hardening (data-at-rest, multi-tenant, audit logging) is documented as accepted risk in [security.md §7](docs/security.md#7-accepted-risks-and-future-hardening-m13-exit).
+M13 productization is complete (durable Raft state, TLS, operator token, day-2 runbooks). **M14** (v0.1.43) adds compaction policy selection, SSTable bloom filters, WAL batching, god-file splits, and Jepsen/chaos-matrix CI gates. Remaining deployment hardening (data-at-rest, multi-tenant, audit logging) is documented as accepted risk in [security.md §7](docs/security.md#7-accepted-risks-and-future-hardening-m13-exit). Planned next: Jepsen full suite hardening and Linux `io_uring` backend — see [ROADMAP.md](ROADMAP.md#m14--correctness--algorithms-).
 
 For the complete picture and deeper explanations, use the **[official GitBook documentation](docs/README.md)**.
 
