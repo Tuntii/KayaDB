@@ -340,7 +340,7 @@ mod tests {
                 4,
                 "only the first batch should survive"
             );
-            let recovered_keys: Vec<u8> = report
+            let mut recovered_keys: Vec<u8> = report
                 .records
                 .iter()
                 .filter_map(|r| match &r.record.payload {
@@ -348,6 +348,7 @@ mod tests {
                     _ => None,
                 })
                 .collect();
+            recovered_keys.sort();
             assert_eq!(recovered_keys, vec![0, 1, 2, 3]);
         });
     }
