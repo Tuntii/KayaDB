@@ -9,7 +9,7 @@ mkdir -p "${REGISTRY_DIR}/index" .cargo
 cat >> .cargo/config.toml <<EOF
 
 [registries.local]
-index = "sparse+file://${REGISTRY_DIR}/index"
+index = "sparse+file://${REGISTRY_DIR}/index/"
 EOF
 
 export CARGO_REGISTRIES_LOCAL_TOKEN="ci-dry-run"
