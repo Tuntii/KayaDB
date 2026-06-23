@@ -86,7 +86,7 @@ jobs:
           Compress-Archive -Path release-pkg/* -DestinationPath kayadb-${{ github.ref_name }}-${{ matrix.target }}.zip
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kayadb-${{ matrix.target }}
           path: |
