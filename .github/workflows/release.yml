@@ -22,7 +22,7 @@ jobs:
             bin_name: kayadb-server.exe
             ctl_name: kayactl.exe
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
             bin_name: kayadb-server
             ctl_name: kayactl
           - target: aarch64-apple-darwin
