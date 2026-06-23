@@ -45,7 +45,7 @@ jobs:
           echo ".nojekyll and dotfiles ensured; internal dirs cleaned"
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           # The folder that contains the Docsify site
           path: '/tmp/site'
