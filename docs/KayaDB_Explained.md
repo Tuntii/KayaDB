@@ -1,6 +1,6 @@
 # KayaDB Explained: What It Actually Is and How It Works
 
-**KayaDB** is an **experimental, correctness-first, inspectable key-value storage engine** written in Rust. It is not (yet) a production database. It is a serious systems project whose primary goal is to make storage bugs **reproducible, inspectable, and eventually impossible to introduce silently**.
+**KayaDB** is a **correctness-first, embeddable distributed key-value database** written in Rust. Current release: **v0.1.43** (M14). It is a deployable correctness prototype — not a fully hardened multi-tenant production database — whose primary goal is to make storage bugs **reproducible, inspectable, and eventually impossible to introduce silently**.
 
 This document is the single place that tries to explain **everything** about KayaDB — philosophy, architecture, components, unique features, how data flows, how testing works, current status, and where it is headed.
 
@@ -218,10 +218,11 @@ Once the local engine was solid, a Raft prototype was added.
 
 Client library (`kaya-client`) and `kayactl` automatically follow redirects.
 
-Current limitations (as of mid-2026):
-- Static cluster membership only
-- No Raft snapshots / log compaction yet
+Current limitations (v0.1.43):
+- Dynamic membership via joint consensus (operator token required when configured)
+- Raft snapshots exist; log compaction policies are evolving in M14
 - Reads go through the leader (ReadIndex)
+- Full client authZ, data-at-rest encryption, and compliance audit logging are not built-in — see [security §7](security.md#7-accepted-risks-and-future-hardening-m13-exit)
 
 ---
 
@@ -242,25 +243,23 @@ All persistent formats are documented in `spec/docs/` and the inspectors emit hu
 
 ---
 
-## 8. Current Status (Mid-2026)
+## 8. Current Status (v0.1.43 — M14)
 
-**Implemented and reasonably solid:**
-- Full local storage engine (WAL + LSM + recovery)
-- Deterministic fault injection + seeded simulation + trace replay
-- Raft prototype + real multi-node TCP cluster
-- Client library with tracing + linearizability checking
-- Rich CLI with inspectors
-- Fuzz targets + many property/crash tests
-- Jepsen-style test harness (Rust side)
+**Shipped and solid:**
+- Full LSM engine (WAL + memtable + SSTable + manifest + compaction policies + bloom filters)
+- WAL group-commit batching; inspectable on-disk formats
+- Deterministic fault injection (`SimDisk`) + seeded simulation + trace replay
+- Raft cluster with durable state, snapshots, dynamic membership, leader redirection
+- Native TLS (`tls` feature) + operator token for admin ops; mTLS sidecar runbooks
+- `kayactl` + `kaya-client`; day-2 runbooks under `docs/runbooks/`
+- Jepsen-style harness (T1–T7), chaos-matrix CI, fuzz targets, perf regression gate
 
-**Not yet production-ready (and openly documented as such):**
-- No TLS / authentication
-- Static membership only
-- No Raft log snapshots
-- Limited observability (no eBPF yet)
-- Experimental persistent formats (no long-term compatibility policy)
+**M14 remaining / accepted gaps:**
+- Jepsen full suite hardening under partition nemesis (in progress)
+- Linux `io_uring` disk backend (planned)
+- Full client authZ, data-at-rest encryption, multi-tenant isolation — documented as accepted deployment risks
 
-See `docs/security.md` and `ROADMAP.md` for the honest list.
+See [security](security.md), [releases](releases.md), and [ROADMAP](../ROADMAP.md) for the honest envelope.
 
 ---
 
@@ -328,4 +327,4 @@ Everything else (LSM details, Raft, CLI, etc.) exists to support that vision.
 
 ---
 
-*This file was written as a comprehensive, single-source explanation of KayaDB. It synthesizes the root README, architecture document, PRD, technical spec, roadmap, and actual crate structure as of mid-2026.*
+*This file synthesizes the root README, architecture document, technical specs, roadmap, and crate structure as of v0.1.43 (2026-06-23).*

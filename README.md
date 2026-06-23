@@ -12,9 +12,9 @@
 [![Status](https://img.shields.io/badge/status-M14%20correctness%2Balgorithm-yellow.svg)](ROADMAP.md)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://tuntii.github.io/KayaDB/)
 
-**A correctness-first, inspectable, embeddable storage engine built in Rust.**
+**A correctness-first, embeddable distributed key-value database built in Rust.**
 
-_KayaDB is the database project for people who believe crashes should be test cases, not horror stories._
+_KayaDB is the database for people who believe crashes should be test cases, not horror stories._
 
 </div>
 
@@ -25,22 +25,22 @@ _KayaDB is the database project for people who believe crashes should be test ca
 → **[https://tuntii.github.io/KayaDB/](https://tuntii.github.io/KayaDB/)**
 
 It includes:
-- Getting Started & CLI reference
-- Architecture and internals
-- Detailed specifications (WAL, LSM, recovery, simulation...)
-- Correctness testing (SimDisk, Jepsen, fuzzing)
-- Security, contributing, and roadmap
+- Installation (crates.io, release binaries, build from source)
+- Getting started, CLI reference, and runbooks
+- Architecture, specifications (WAL, LSM, recovery, Raft…)
+- Correctness testing (SimDisk, Jepsen, chaos-matrix CI)
+- Security, releases, contributing, and roadmap
 
-The source lives in the `docs/` folder (using Docsify + we still maintain GitBook-compatible files).
+Sources live in `docs/` (Docsify on GitHub Pages; `SUMMARY.md` kept for GitBook compatibility).
 
 ---
 
 **Quick links in this README:**
+- [Install](#install)
 - [Why KayaDB exists](#why-kayadb-exists)
 - [Quick start](#quick-start)
 - [Feature snapshot](#feature-snapshot)
-- [Roadmap](ROADMAP.md)
-- [Contributing](CONTRIBUTING.md)
+- [Releases](docs/releases.md) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md)
 
 ---
 
@@ -52,9 +52,24 @@ KayaDB is an open-source storage engine and distributed key-value database proto
 
 The project combines an LSM-tree storage engine, a write-ahead log, deterministic disk fault injection (`SimDisk`), a replayable simulator, a Raft prototype, a TCP server, an async Rust client, and an operator CLI — all inside one intentionally small Rust workspace.
 
-**Full documentation, architecture deep-dives, specifications and guides live in the [GitBook documentation](docs/README.md).**
+**Full documentation:** [docs/README.md](docs/README.md) · [Installation](docs/installation.md) · [Getting started](docs/getting-started.md)
 
-This README contains only a high-level overview + quick start.
+This README is a high-level overview. Deep dives live on the docs site.
+
+---
+
+## Install
+
+```bash
+# CLI + embedded mode (no server needed)
+cargo install kayactl
+
+# Server binary
+cargo install kaya-server --bin kayadb-server
+```
+
+Pre-built binaries: [GitHub Releases](https://github.com/Tuntii/KayaDB/releases) (`v0.1.43` and later).  
+Rust library: `kaya-engine = "0.1.43"` — see [installation guide](docs/installation.md).
 
 ---
 
@@ -275,7 +290,7 @@ See the **[full status and roadmap](ROADMAP.md)** and the tracked **[productizat
 
 M13 productization is complete (durable Raft state, TLS, operator token, day-2 runbooks). **M14** (v0.1.43) adds compaction policy selection, SSTable bloom filters, WAL batching, god-file splits, and Jepsen/chaos-matrix CI gates. Remaining deployment hardening (data-at-rest, multi-tenant, audit logging) is documented as accepted risk in [security.md §7](docs/security.md#7-accepted-risks-and-future-hardening-m13-exit). Planned next: Jepsen full suite hardening and Linux `io_uring` backend — see [ROADMAP.md](ROADMAP.md#m14--correctness--algorithms-).
 
-For the complete picture and deeper explanations, use the **[official GitBook documentation](docs/README.md)**.
+For the complete picture, use the **[official documentation](https://tuntii.github.io/KayaDB/)** or [docs/README.md](docs/README.md).
 
 ---
 

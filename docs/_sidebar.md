@@ -1,47 +1,29 @@
-<!-- This file powers the sidebar when using GitHub Pages + Docsify -->
-<!-- For GitBook, we still keep SUMMARY.md -->
+<!-- Sidebar for GitHub Pages + Docsify. SUMMARY.md mirrors this for GitBook. -->
 
 - [Introduction](README.md)
-  - [Welcome to KayaDB](README.md)
-  - [Why KayaDB?](README.md#project-status)
+  - [What is KayaDB?](README.md#what-is-kayadb)
+  - [KayaDB Explained](KayaDB_Explained.md)
+  - [Productization (M13)](productization.md)
 
-- [Getting Started](getting-started.md)
-  - [Quick Start Examples](getting-started.md#run-a-single-node-server)
-  - [Embedded Usage (Rust)](getting-started.md#use-it-as-a-rust-library)
+- [Install & Run](installation.md)
+  - [Installation](installation.md)
+  - [Getting Started](getting-started.md)
+  - [Releases](releases.md)
 
-- [Using KayaDB](cli-reference.md)
-  - [Kullanım Senaryoları](usage.md)
-  - [CLI Reference (kayactl)](cli-reference.md)
-  - [Client Library](getting-started.md#tcp-client)
-  - [Client Protocol Spec](clients/client-protocol-spec.md)
-  - [Wire Protocol](clients/client-wire-protocol.md)
-  - [Go Client Guide](clients/go-client.md)
+- [Using KayaDB](usage.md)
+  - [Usage scenarios (TR)](usage.md)
+  - [CLI Reference](cli-reference.md)
+  - [Client library](getting-started.md#using-the-kaya-client-library)
+  - [Client protocol](clients/client-protocol-spec.md)
+  - [Wire protocol](clients/client-wire-protocol.md)
+  - [Go client](clients/go-client.md)
 
-- [Architecture & Internals](architecture.md)
-  - [Architecture Overview](architecture.md)
-  - [Core Components](specifications.md)
+- [Architecture](architecture.md)
+  - [Overview](architecture.md)
+  - [Specifications index](specifications.md)
 
-- [Distributed Operation](jepsen-design.md)
-  - [Raft & Cluster](jepsen-design.md)
-  - [Jepsen-Style Testing](jepsen-design.md)
-
-- [Correctness & Testing](development.md)
-  - [Deterministic Simulation](development.md#simdisk-fault-injection)
-  - [Fuzzing & Invariants](development.md#fuzzing)
-
-- [Reference](security.md)
-  - [Security & Deployment](security.md)
-  - [Development Guide](development.md)
-
-- [Design Specifications](specifications.md)
-  - [Spec Index](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/00-spec-index.md)
-  - [Key Technical Specs](specifications.md#core-specifications)
-
-- [Project](publishing.md)
-  - [Productization north star](productization.md)
-  - [Contributing](https://github.com/Tuntii/KayaDB/blob/main/CONTRIBUTING.md)
-  - [Roadmap](https://github.com/Tuntii/KayaDB/blob/main/ROADMAP.md)
-  - [Publishing Docs](publishing.md)
+- [Distributed](jepsen-design.md)
+  - [Raft & Jepsen testing](jepsen-design.md)
 
 - [Runbooks](runbooks/rolling-restart.md)
   - [Add / Remove Node](runbooks/add-remove-node.md)
@@ -49,3 +31,16 @@
   - [Backup & Restore](runbooks/backup-restore.md)
   - [Detecting Split-Brain](runbooks/detecting-split-brain.md)
   - [mTLS Sidecar](runbooks/mtls-sidecar.md)
+
+- [Correctness & Dev](development.md)
+  - [Development guide](development.md)
+  - [Benchmarks](../BENCHMARKS.md)
+
+- [Reference](security.md)
+  - [Security & Deployment](security.md)
+  - [Publishing docs](publishing.md)
+
+- [Project](../ROADMAP.md)
+  - [Roadmap](../ROADMAP.md)
+  - [Changelog](../CHANGELOG.md)
+  - [Contributing](../CONTRIBUTING.md)

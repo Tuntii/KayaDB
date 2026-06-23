@@ -6,12 +6,18 @@ This document outlines the security architecture, networking requirements, and b
 
 ## 1. Network Security Architecture
 
-By default, KayaDB's Raft consensus protocol (`kaya-net`) and client communication protocols run over **raw, unencrypted TCP**.
-* **Raft Transport:** Exchanged state machine replicates, heartbeats, and leader election envelopes without payload encryption.
-* **Client Protocol:** Client PUT, GET, DELETE, and SCAN operations are transmitted in plain text.
-* **Authentication:** There is no built-in password, token-based, or TLS certificate authentication in the current version.
+**Default (no flags):** Raft and client traffic use **plain TCP** on localhost. This is intentional for local development and deterministic testing.
 
-Because of these design choices (focused on high performance and zero external dependencies), **security must be enforced at the infrastructure level**.
+**M13+ (optional):** Enable native TLS with the `tls` feature and `--tls-*` flags, or wrap ports with an mTLS sidecar (ghostunnel/stunnel). Membership admin ops (`ADD_MEMBER` / `REMOVE_MEMBER`) accept an **operator token** when configured.
+
+| Layer | Default | Hardened option |
+|---|---|---|
+| Raft transport | Plain TCP | `--features tls` + cert flags, or mTLS sidecar |
+| Client protocol | Plain TCP | Same as Raft |
+| Admin / membership | Open on client port | `--operator-token` / `KAYA_OPERATOR_TOKEN` |
+| Full client authZ | Not built-in | Perimeter + sidecar/TLS; see §7 accepted risks |
+
+When TLS and operator token are **not** enabled, **security must be enforced at the infrastructure level** (private network, firewall, bind to loopback).
 
 ### Current trust model
 

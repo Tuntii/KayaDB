@@ -2,79 +2,84 @@
 
 ## Introduction
 
-* [Welcome to KayaDB](README.md)
-* [KayaDB Explained](KayaDB_Explained.md) — The complete picture (what it does, why it exists, how everything works)
-* [Why KayaDB?](README.md#project-status)
-* [Productization north star](productization.md) — M13: evolving from prototype to deployable product
+* [Documentation home](README.md)
+* [KayaDB Explained](KayaDB_Explained.md) — what it is, why it exists, how every layer works
+* [Productization north star](productization.md) — M13: prototype → deployable product
 
-## Getting Started
+## Install & Run
 
-* [Getting Started](getting-started.md)
-* [Quick Start Examples](getting-started.md#run-a-single-node-server)
-* [Embedded Usage (Rust)](getting-started.md#use-it-as-a-rust-library)
+* [Installation](installation.md) — crates.io, release binaries, build from source
+* [Getting Started](getting-started.md) — first server, first commands, cluster quick-start
+* [Releases & Versioning](releases.md) — tags, v0.1.43, upgrade notes
 
 ## Using KayaDB
 
-* [Kullanım Senaryoları Kılavuzu](usage.md) — Pratik senaryolar: yerel test, küme kurma, kurtarma, client kullanımı, inceleme
+* [Usage scenarios (TR)](usage.md) — yerel test, küme, kurtarma, client, inceleme, otomasyon
 * [CLI Reference (kayactl)](cli-reference.md)
-  * [Global Flags & Modes](cli-reference.md#global-flags)
-  * [Local (Embedded) Commands](cli-reference.md)
-  * [Server / Cluster Mode](cli-reference.md)
-  * [Inspect Commands](cli-reference.md#inspect-commands)
-  * [Recovery & Diagnostics](cli-reference.md#recovery)
-* [Client Library (kaya-client)](getting-started.md#tcp-client)
-* [Client Protocol Specification](clients/client-protocol-spec.md) — Multi-language client behavior (leader redirection, errors, operations)
-* [Client Wire Protocol](clients/client-wire-protocol.md) — Exact TCP framing & payloads (for client implementers)
-* [Go Client Guide](clients/go-client.md) — Bootstrap a correct Go client (reference implementation + code)
+  * [Global flags & modes](cli-reference.md#global-flags)
+  * [Local (embedded) commands](cli-reference.md)
+  * [Server / cluster mode](cli-reference.md)
+  * [Inspect commands](cli-reference.md#inspect-commands)
+  * [Recovery & diagnostics](cli-reference.md#recovery)
+* [Client library (kaya-client)](getting-started.md#using-the-kaya-client-library)
+* [Client protocol specification](clients/client-protocol-spec.md)
+* [Client wire protocol](clients/client-wire-protocol.md)
+* [Go client guide](clients/go-client.md)
 
 ## Architecture & Internals
 
-* [Architecture Overview](architecture.md)
-* [Design Principles](architecture.md#design-principles)
-* [Crate Map & Responsibilities](architecture.md#crate-map)
-* [Data Directory Layout](architecture.md#data-directory-layout)
-* [Write & Read Paths](architecture.md#write-path)
-* [Recovery Model](architecture.md#recovery-architecture)
+* [Architecture overview](architecture.md)
+* [Design principles](architecture.md#design-principles)
+* [Crate map](architecture.md#crate-map)
+* [Data directory layout](architecture.md#data-directory-layout)
+* [Write & read paths](architecture.md#write-path)
+* [Recovery model](architecture.md#recovery-architecture)
 
 ## Core Components
 
 * [Write-Ahead Log (WAL)](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/wal-spec.md)
-* [LSM Storage (Memtable, SSTable, Manifest)](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/lsm-storage-format-spec.md)
-* [Disk Abstraction & SimDisk](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/disk-and-io-spec.md)
-* [Crash Recovery & Idempotence](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/recovery-spec.md)
+* [LSM storage](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/lsm-storage-format-spec.md)
+* [Disk abstraction & SimDisk](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/disk-and-io-spec.md)
+* [Crash recovery](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/recovery-spec.md)
 
 ## Distributed KayaDB
 
-* [Raft Consensus](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/raft-and-distributed-roadmap-spec.md)
-* [Cluster & Server Protocol](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/server-and-protocol-spec.md)
-* [Jepsen-Style Testing & Failure Injection](jepsen-design.md)
+* [Raft & cluster spec](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/raft-and-distributed-roadmap-spec.md)
+* [Server & protocol spec](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/server-and-protocol-spec.md)
+* [Jepsen-style testing](jepsen-design.md)
+
+## Runbooks
+
+* [Add / remove node](runbooks/add-remove-node.md)
+* [Rolling restart](runbooks/rolling-restart.md)
+* [Backup & restore](runbooks/backup-restore.md)
+* [Detecting split-brain](runbooks/detecting-split-brain.md)
+* [mTLS sidecar](runbooks/mtls-sidecar.md)
 
 ## Correctness & Testing
 
-* [Testing Philosophy](development.md#test-strategy)
-* [Deterministic Simulation](development.md#simdisk-fault-injection)
-* [Fuzz Testing](development.md#fuzzing)
-* [Linearizability Checking](jepsen-design.md)
-* [Development Workflow](development.md)
+* [Testing philosophy](development.md#test-strategy)
+* [Deterministic simulation](development.md#simdisk-fault-injection)
+* [Fuzz testing](development.md#fuzzing)
+* [Linearizability](jepsen-design.md)
+* [Development workflow](development.md)
+* [Benchmarks](../BENCHMARKS.md)
 
 ## Reference
 
-* [Security & Safe Deployment](security.md)
-* [Configuration](development.md)
-* [Benchmarks & Performance](https://github.com/Tuntii/KayaDB/blob/main/BENCHMARKS.md)
-* [Design Specifications](specifications.md)
-  * [Spec Index](https://github.com/Tuntii/KayaDB/blob/main/spec/docs/00-spec-index.md)
-  * [Key Specs (WAL, LSM, Recovery, Simulation...)](specifications.md#core-specifications)
+* [Security & deployment](security.md)
+* [Design specifications](specifications.md)
+* [Publishing documentation](publishing.md)
+* [Releases & versioning](releases.md)
 
 ## Contributing & Project
 
-* [Contributing Guide](https://github.com/Tuntii/KayaDB/blob/main/CONTRIBUTING.md)
-* [Development Guide](development.md)
-* [Maintaining the Documentation](publishing.md)
-* [Roadmap](https://github.com/Tuntii/KayaDB/blob/main/ROADMAP.md)
-* [License](https://github.com/Tuntii/KayaDB/blob/main/README.md#license)
+* [Contributing](../CONTRIBUTING.md)
+* [Roadmap](../ROADMAP.md)
+* [Changelog](../CHANGELOG.md)
+* [License](../README.md#license)
 
 ---
 
-* [GitHub Repository](https://github.com/Tuntii/KayaDB)
-* [Report an Issue](https://github.com/Tuntii/KayaDB/issues)
+* [GitHub repository](https://github.com/Tuntii/KayaDB)
+* [Report an issue](https://github.com/Tuntii/KayaDB/issues)

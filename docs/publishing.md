@@ -71,7 +71,16 @@ Dry run:
 .\scripts\smart_publish.ps1 -DryRun -SkipVersionUpdate
 ```
 
-Release binaries are built automatically on `v*` tags via `.github/workflows/release.yml`.
+Release binaries are built automatically on `v*` tags via `.github/workflows/release.yml`. See [Releases & Versioning](releases.md) for the full release story (current: `v0.1.43`).
+
+### Release checklist (maintainers)
+
+1. Update [CHANGELOG.md](../CHANGELOG.md) with a dated version section
+2. Align `Cargo.toml` workspace version with the intended tag
+3. Merge any release-prep fixes from branches like `tag/v0.1.43` (CI publish script, workflow gates)
+4. `git tag -a v0.1.N -m "..." && git push origin v0.1.N`
+5. Verify GitHub Release artifacts and Jepsen tag gate in Actions
+6. Publish crates: `.\scripts\smart_publish.ps1 -SkipVersionUpdate` (or wait for `publish.yml`)
 
 ## GitHub repository topics (set in GitHub UI)
 

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Documentation refresh: database-style landing page, `installation.md`, `releases.md` (v0.1.43), synced sidebar/SUMMARY, updated status in `KayaDB_Explained.md` and `security.md`
+
 ---
 
 ## [0.1.43] — 2026-06-23

@@ -1,6 +1,9 @@
 # Getting Started with KayaDB
 
-This guide walks you through building KayaDB, running the server, and using `kayactl` to interact with it.
+This guide gets you from zero to a running KayaDB node (or embedded data directory) and your first `put` / `get`.
+
+> **Already have binaries?** Skip to [First commands](#first-commands-with-kayactl).  
+> **Need install options?** See [Installation](installation.md) (crates.io, GitHub releases, or build from source).
 
 ---
 
@@ -8,19 +11,26 @@ This guide walks you through building KayaDB, running the server, and using `kay
 
 | Requirement | Version |
 |---|---|
-| Rust toolchain | 1.85 or later (see `rust-toolchain.toml`) |
-| cargo | Ships with Rust |
-| Linux / macOS / Windows | All platforms supported for development |
+| Rust toolchain | 1.85 or later (see `rust-toolchain.toml`) — only if building from source |
+| `kayactl` + `kayadb-server` | [v0.1.43](releases.md) or latest from crates.io |
+| Platform | Linux, macOS, or Windows |
 
-Install Rust via [rustup](https://rustup.rs/):
+Install Rust via [rustup](https://rustup.rs/) if you plan to build from source:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
+Quick install without cloning:
+
+```bash
+cargo install kayactl
+cargo install kaya-server --bin kayadb-server
+```
+
 ---
 
-## Clone and build
+## Clone and build (from source)
 
 ```bash
 git clone https://github.com/Tuntii/KayaDB.git
@@ -292,6 +302,9 @@ Remove-Item -Recurse -Force $env:TEMP\kayadb-data,$env:TEMP\kaya-node1,$env:TEMP
 ## Next steps
 
 - [Documentation index](README.md) — choose the next guide based on your goal
-- [Architecture overview](architecture.md) — understand crate boundaries and data flow
+- [Installation](installation.md) — crates.io, release binaries, TLS feature
+- [Usage scenarios](usage.md) — practical workflows (cluster, recovery, automation)
+- [Architecture overview](architecture.md) — crate boundaries and data flow
 - [CLI reference](cli-reference.md) — full `kayactl` command reference
-- [Development guide](development.md) — writing tests, running simulations, fuzz testing
+- [Runbooks](runbooks/rolling-restart.md) — operate a cluster safely
+- [Development guide](development.md) — tests, simulations, fuzzing

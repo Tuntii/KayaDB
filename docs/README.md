@@ -1,138 +1,142 @@
 # KayaDB Documentation
 
-> **This is the official documentation site for KayaDB**, built with [GitBook](https://www.gitbook.com/).
-
-Welcome to the public KayaDB documentation. This book is written for users, contributors, operators, and curious systems engineers who want to understand how KayaDB behaves.
-
-KayaDB is an **experimental, correctness-first** storage engine. The documentation prioritizes being practical: build it, run it, inspect it, break it safely with deterministic simulation, and understand exactly what happened.
-
----
-
-## How to use this book
-
-This documentation is published on **GitHub Pages** using Docsify (with GitBook files kept for compatibility).
+> **Official documentation** for [KayaDB](https://github.com/Tuntii/KayaDB) — a correctness-first, embeddable **distributed key-value database** built in Rust.
 
 **Live site:** [https://tuntii.github.io/KayaDB/](https://tuntii.github.io/KayaDB/)
 
-You can:
+**Current release:** [v0.1.43](releases.md) (M14 — correctness + algorithms)
 
-- Browse the nice rendered version at the link above
-- Read the Markdown sources directly on GitHub under `/docs`
-- Preview locally (see [Publishing the Documentation](publishing.md))
+---
 
-See the dedicated guide: [Publishing the Documentation](publishing.md) for setup instructions and local preview commands.
+## What is KayaDB?
+
+KayaDB is a small but serious storage system you can use in three ways:
+
+| Mode | How | Comparable to |
+|---|---|---|
+| **Embedded** | Link `kaya-engine` in your Rust app | RocksDB, SQLite (KV subset) |
+| **Server** | Run `kayadb-server` on one host | Redis (persistence + LSM) |
+| **Cluster** | Run 3+ nodes with Raft consensus | etcd, TiKV (prototype scale) |
+
+Core properties:
+
+- **LSM-tree engine** with WAL-backed crash recovery
+- **Inspectable on-disk formats** — every WAL, SSTable, and manifest is readable via `kayactl inspect`
+- **Deterministic fault injection** — `SimDisk` replays crashes and partial writes in tests
+- **Raft cluster** with leader redirection, dynamic membership, and day-2 runbooks
+- **Correctness culture** — simulation, Jepsen-style harness, fuzz targets, chaos-matrix CI
+
+KayaDB completed **M13 productization** (TLS, operator token, runbooks) and is in **M14** (compaction policies, bloom filters, WAL batching). It is a deployable correctness prototype — not a fully hardened multi-tenant SaaS database. Read [security](security.md) before any production-like deployment.
 
 ---
 
 ## Start here
 
-| Document                  | Use it when you want to... |
-|---------------------------|------------------------------|
-| [Getting started](getting-started.md) | Build KayaDB, run a local node or cluster, use `kayactl`, and try the async Rust client |
-| [Kullanım Senaryoları](usage.md)      | Pratik senaryolarla çalış: yerel test, küme, kurtarma, client, inceleme ve otomasyon |
-| [CLI reference](cli-reference.md)     | Look up every `kayactl` command, flag, JSON output, and exit code |
-| [Architecture](architecture.md)       | Understand the storage stack, Raft layer, `SimDisk`, data flow and crate boundaries |
-| [Development guide](development.md)   | Run tests, simulations, fuzz targets, benchmarks, and contribution checks |
-| [Security guide](security.md)         | Learn the deployment limits, network warnings, and safe local defaults |
-
----
-
-## Start here
-
-| Document | Use it when you want to... |
+| I want to… | Read |
 |---|---|
-| [Getting started](getting-started.md) | Build KayaDB, run a local node, use `kayactl`, and try the Rust client |
-| [Kullanım Senaryoları](usage.md) | Farklı kullanım senaryoları: embedded, cluster, kurtarma, client, inspect ve otomasyon |
-| [CLI reference](cli-reference.md) | Look up every `kayactl` mode, flag, output shape, and exit code |
-| [Architecture](architecture.md) | Understand the storage stack, Raft layer, disk abstraction, and data flow |
-| [Development guide](development.md) | Run tests, simulations, fuzz targets, benchmarks, and contribution checks |
-| [Security guide](security.md) | Learn the deployment limits, network warnings, and safe local defaults |
-| [Design Specifications](specifications.md) | Read the detailed internal specs (WAL format, recovery rules, invariants, etc.) |
-| [KayaDB Explained](KayaDB_Explained.md) | **The single comprehensive document** that explains what KayaDB actually is, why it exists, how every layer works, its unique testing approach, and current status. |
+| Install binaries or crates | [Installation](installation.md) |
+| Run my first `put` / `get` | [Getting started](getting-started.md) |
+| See practical workflows (TR) | [Kullanım senaryoları](usage.md) |
+| Look up every `kayactl` flag | [CLI reference](cli-reference.md) |
+| Understand the storage stack | [Architecture](architecture.md) |
+| Operate a cluster safely | [Security](security.md) + [Runbooks](runbooks/rolling-restart.md) |
+| See version history | [Releases](releases.md) + [CHANGELOG](../CHANGELOG.md) |
+| Understand the full picture | [KayaDB Explained](KayaDB_Explained.md) |
+
+---
+
+## Documentation map
+
+### Install & use
+
+- [Installation](installation.md) — crates.io, release binaries, build from source
+- [Getting started](getting-started.md) — first server, first commands, cluster quick-start
+- [Usage scenarios](usage.md) — embedded, cluster, recovery, inspection, automation
+- [CLI reference](cli-reference.md) — `kayactl` commands, flags, JSON output, exit codes
+- [Client library](getting-started.md#using-the-kaya-client-library) — async Rust client with leader redirection
+- [Client protocol](clients/client-protocol-spec.md) · [Wire format](clients/client-wire-protocol.md) · [Go client](clients/go-client.md)
+
+### Architecture & internals
+
+- [Architecture overview](architecture.md) — crate map, write/read paths, recovery model
+- [KayaDB Explained](KayaDB_Explained.md) — single comprehensive deep-dive
+- [Design specifications](specifications.md) — index into `spec/docs/` (WAL, LSM, Raft, simulation…)
+
+### Distributed operation
+
+- [Jepsen-style testing](jepsen-design.md) — failure injection, linearizability, scenario registry
+- [Runbooks](runbooks/rolling-restart.md) — add/remove node, rolling restart, backup/restore, split-brain, mTLS sidecar
+
+### Correctness & development
+
+- [Development guide](development.md) — tests, SimDisk, fuzzing, benchmarks
+- [Benchmarks](../BENCHMARKS.md) — methodology and performance envelope
+
+### Reference & project
+
+- [Security & deployment](security.md) — network model, TLS, operator token, accepted risks
+- [Releases & versioning](releases.md) — tags, crates.io, GitHub releases
+- [Publishing docs](publishing.md) — GitHub Pages, local preview, maintainer publish flow
+- [Productization north star](productization.md) — M13 exit gates
+- [Roadmap](../ROADMAP.md) · [Contributing](../CONTRIBUTING.md)
 
 ---
 
 ## Common paths
 
-### I just want to try it
+### Try it in 60 seconds
 
-1. Follow [Getting started](getting-started.md).
-2. Run local embedded commands with `kayactl --data ./data`.
-3. Start `kayadb-server` and connect with `kayactl --server 127.0.0.1:7379`.
-4. See practical workflows in [Kullanım Senaryoları](usage.md).
-5. Inspect the generated WAL, SSTable, and manifest files.
+```bash
+# Install CLI (or use cargo run — see installation.md)
+cargo install kayactl
 
-### I want to embed it in Rust
+kayactl --data ./demo put hello world
+kayactl --data ./demo get hello
+kayactl --data ./demo inspect wal ./demo/wal-000001.wal
+```
 
-- Read [Getting started](getting-started.md) and [`crates/kaya-engine`](../crates/kaya-engine/README.md).
-- Use `kaya-engine` for in-process storage.
-- Use `kaya-client` when connecting to a separate server process.
+### Run a server + cluster
 
-### I want to understand correctness testing
+1. [Install](installation.md) `kayadb-server` and `kayactl`
+2. Follow [Getting started → single-node server](getting-started.md#run-a-single-node-server)
+3. Scale to three nodes: [Getting started → cluster](getting-started.md#multi-node-cluster-quick-setup)
+4. Operate safely: [Runbooks](runbooks/rolling-restart.md)
 
-- Start with [Architecture](architecture.md#durability-and-recovery-model).
-- Then read [Development](development.md#test-strategy).
-- Run the `kaya-sim` tests and inspect how replayable traces are produced.
+### Embed in Rust
 
-### I want to operate a node safely
+```rust
+use kaya_engine::{Engine, ReadOptions, WriteOptions};
+// See crates/kaya-engine/examples/embedded.rs
+```
 
-- Read [Security](security.md) before binding outside localhost.
-- Keep Raft and client ports private.
-- Use `kayactl status`, `kayactl health`, and `kayactl recover --dry-run` before trusting a data directory.
+Full walkthrough: [Getting started → embedded](getting-started.md#embedded-mode-no-server-needed) and [`kaya-engine` README](../crates/kaya-engine/README.md).
 
----
+### Contribute or debug correctness
 
-## Project status
-
-KayaDB currently provides:
-
-- an embedded LSM-based key-value engine,
-- WAL-backed crash recovery,
-- inspectable persistent files,
-- deterministic fault injection through `SimDisk`,
-- a seeded simulator,
-- a Raft-based cluster prototype,
-- a TCP server and async Rust client,
-- a CLI for local operation, remote operation, inspection, stats, and dry-run recovery.
-
-KayaDB does **not** yet provide production-grade security hardening, built-in authentication, built-in TLS, dynamic cluster membership, or Raft log snapshotting.
+1. [Development guide](development.md)
+2. [Architecture → recovery model](architecture.md#recovery-architecture)
+3. Run `cargo test -p kaya-sim` and inspect replayable traces
 
 ---
 
-## Documentation principles
+## Project links
 
-Public docs should be:
-
-- practical before theoretical,
-- honest about limitations,
-- copy-paste friendly,
-- explicit about safety and recovery behavior,
-- useful to both first-time users and contributors.
-
-If a command in these docs does not work on a clean checkout, that is a documentation bug worth fixing.
-
----
-
-## Full Documentation Structure
-
-This GitBook organizes KayaDB documentation into the following main sections (see [SUMMARY.md](SUMMARY.md) for the complete navigation):
-
-- **Introduction** — Project goals and current status
-- **Getting Started** — Build, run, and first commands
-- **Using KayaDB** — Kullanım senaryoları, `kayactl` referansı ve client kütüphanesi kullanımı
-- **Architecture & Internals** — High-level design and data flows
-- **Core Components** — WAL, LSM, Disk simulation, Recovery (with links to detailed specs)
-- **Distributed KayaDB** — Raft, cluster mode, client redirection, Jepsen testing
-- **Correctness & Testing** — Deterministic simulation, fault injection, fuzzing, linearizability
-- **Reference** — Security, configuration, development workflow
-- **Design Specifications** — The full internal technical spec pack (under `spec/docs/`)
-- **Contributing & Roadmap**
-
-The deep technical specifications (format details, invariants, recovery rules, etc.) live in the `spec/docs/` directory and are linked from the relevant chapters.
-
-## Project Links
-
-- [GitHub Repository](https://github.com/Tuntii/KayaDB)
+- [GitHub repository](https://github.com/Tuntii/KayaDB)
+- [Issue tracker](https://github.com/Tuntii/KayaDB/issues)
+- [crates.io: kaya-engine](https://crates.io/crates/kaya-engine) · [kayactl](https://crates.io/crates/kayactl)
 - [Root README](../README.md)
-- [ROADMAP](../ROADMAP.md)
-- [Contributing](../CONTRIBUTING.md)
+
+---
+
+## About this site
+
+Published on **GitHub Pages** with [Docsify](https://docsify.js.org/). Navigation lives in [`_sidebar.md`](_sidebar.md); [`SUMMARY.md`](SUMMARY.md) is kept for GitBook compatibility.
+
+To preview locally:
+
+```bash
+cd docs && python -m http.server 3000
+# open http://localhost:3000
+```
+
+See [Publishing](publishing.md) for maintainer details.
