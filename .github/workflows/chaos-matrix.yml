@@ -51,7 +51,7 @@ jobs:
               cargo test -p kaya-sim clock_skew -- --nocapture
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -67,7 +67,7 @@ jobs:
             ${{ matrix.full }}
           fi
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: chaos-matrix-${{ matrix.fault }}-traces

@@ -35,7 +35,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -57,7 +57,7 @@ jobs:
 
       - name: Build Binaries
         run: |
-          cargo build --release --workspace --exclude kaya-jepsen-test --target ${{ matrix.target }}
+          cargo build --release --workspace --target ${{ matrix.target }}
 
       - name: Packaging (Unix)
         if: matrix.os != 'windows-latest'
@@ -89,7 +89,7 @@ jobs:
           Compress-Archive -Path release-pkg/* -DestinationPath kayadb-${{ github.ref_name }}-${{ matrix.target }}.zip
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: kayadb-${{ matrix.target }}
           path: |
@@ -102,7 +102,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Download Artifacts
         uses: actions/download-artifact@v4

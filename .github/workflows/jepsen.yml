@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -78,7 +78,7 @@ jobs:
       - name: Full WGL gate (T1–T7 scenario registry)
         run: cargo test -p kaya-jepsen-test --test full_gate -- --ignored --nocapture --test-threads=1
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: jepsen-traces
@@ -92,7 +92,7 @@ jobs:
     env:
       JEPSEN: "1"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - name: Clojure Jepsen (optional, not in repo)
         run: |

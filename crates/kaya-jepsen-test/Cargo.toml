@@ -15,7 +15,7 @@ kaya-net.workspace = true
 kaya-server = { path = "../kaya-server" }
 kaya-sim.workspace = true
 tokio.workspace = true
-rand = "0.10"
+rand = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

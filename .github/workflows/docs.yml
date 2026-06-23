@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
@@ -45,7 +45,7 @@ jobs:
           echo ".nojekyll and dotfiles ensured; internal dirs cleaned"
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@v4
         with:
           # The folder that contains the Docsify site
           path: '/tmp/site'

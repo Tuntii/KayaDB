@@ -4,7 +4,7 @@ use crate::history::{History, OperationResult};
 use kaya_client::KayaClient;
 use kaya_sim::Op;
 use rand::rngs::StdRng;
-use rand::RngExt;
+use rand::{Rng, SeedableRng};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -103,11 +103,11 @@ async fn run_client(
     duration: Duration,
     rate_limit: u32,
 ) {
-    let mut rng: StdRng = rand::make_rng();
+    let mut rng = StdRng::from_entropy();
     let start = std::time::Instant::now();
 
     // Connect to a random node
-    let initial_node = nodes[rng.random_range(0..nodes.len())];
+    let initial_node = nodes[rng.gen_range(0..nodes.len())];
     let mut client = match KayaClient::connect(initial_node).await {
         Ok(c) => c,
         Err(e) => {
@@ -143,9 +143,9 @@ async fn run_client(
         // Reconnect on error to handle killed nodes / leader changes (helps avoid stale connections causing spurious errors/violations)
         // Simple heuristic: if last op had error recorded, try a different node.
         // Note: actual errors are inside the op functions; here we just periodically re-pick to be resilient.
-        if rng.random_bool(0.1) {
+        if rng.gen_bool(0.1) {
             // occasionally re-resolve to handle partitions/kills
-            let new_node = nodes[rng.random_range(0..nodes.len())];
+            let new_node = nodes[rng.gen_range(0..nodes.len())];
             if let Ok(new_client) = KayaClient::connect(new_node).await {
                 client = new_client;
             }
@@ -161,7 +161,7 @@ async fn run_client(
     }
 }
 
-async fn run_register_op<R: RngExt>(
+async fn run_register_op<R: Rng>(
     client: &mut KayaClient,
     client_id: usize,
     history: &Arc<History>,
@@ -172,7 +172,7 @@ async fn run_register_op<R: RngExt>(
     // 70% GET, 30% PUT
     // Retry until success to avoid recording indeterminate results that cause false linearizability violations
     // under node kills (response may be lost even if op committed).
-    if rng.random_bool(0.7) {
+    if rng.gen_bool(0.7) {
         // GET - retry until we get a value or timeout per op
         let op = Op::Get { key: key.to_vec() };
         let mut got = None;
@@ -198,7 +198,7 @@ async fn run_register_op<R: RngExt>(
         }
     } else {
         // PUT - retry until Ok
-        let value: [u8; 8] = rng.random();
+        let value: [u8; 8] = rng.gen();
         let op = Op::Put {
             key: key.to_vec(),
             value: value.to_vec(),
@@ -226,7 +226,7 @@ async fn run_register_op<R: RngExt>(
     }
 }
 
-async fn run_counter_op<R: RngExt>(
+async fn run_counter_op<R: Rng>(
     client: &mut KayaClient,
     client_id: usize,
     history: &Arc<History>,
@@ -235,7 +235,7 @@ async fn run_counter_op<R: RngExt>(
     let key = b"counter";
 
     // 50% GET, 50% increment (read-modify-write)
-    if rng.random_bool(0.5) {
+    if rng.gen_bool(0.5) {
         // GET
         let op = Op::Get { key: key.to_vec() };
         match client.get(key).await {
@@ -279,16 +279,16 @@ async fn run_counter_op<R: RngExt>(
     }
 }
 
-async fn run_set_op<R: RngExt>(
+async fn run_set_op<R: Rng>(
     client: &mut KayaClient,
     client_id: usize,
     history: &Arc<History>,
     rng: &mut R,
 ) {
     // 60% append, 40% scan
-    if rng.random_bool(0.6) {
+    if rng.gen_bool(0.6) {
         // Append: PUT set:<client_id>:<random>
-        let unique_id: u64 = rng.random();
+        let unique_id: u64 = rng.gen();
         let key = format!("set:{}:{}", client_id, unique_id);
         let value = unique_id.to_le_bytes().to_vec();
 
@@ -321,19 +321,19 @@ async fn run_set_op<R: RngExt>(
     }
 }
 
-async fn run_map_op<R: RngExt>(
+async fn run_map_op<R: Rng>(
     client: &mut KayaClient,
     client_id: usize,
     history: &Arc<History>,
     rng: &mut R,
 ) {
     // Simple map: 50% PUT, 50% GET on random keys
-    let key_id: u32 = rng.random_range(0..10);
+    let key_id: u32 = rng.gen_range(0..10);
     let key = format!("map:{}", key_id);
 
-    if rng.random_bool(0.5) {
+    if rng.gen_bool(0.5) {
         // PUT
-        let value: [u8; 8] = rng.random();
+        let value: [u8; 8] = rng.gen();
         let op = Op::Put {
             key: key.as_bytes().to_vec(),
             value: value.to_vec(),
