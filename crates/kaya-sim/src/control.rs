@@ -115,7 +115,7 @@ fn change_process_threads_state(pid: u32, suspend: bool) -> std::io::Result<()> 
         loop {
             if entry.th32OwnerProcessID == pid {
                 let thread_handle = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
-                if thread_handle != 0 {
+                if !thread_handle.is_null() {
                     if suspend {
                         SuspendThread(thread_handle);
                     } else {

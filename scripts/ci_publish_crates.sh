@@ -30,26 +30,40 @@ local_version() {
 
 remote_version() {
   local crate="$1"
-  curl -fsSL "https://crates.io/api/v1/crates/${crate}" \
+  curl -fsSL -A "kaya-ci-publish/1.0 (https://github.com/Tuntii/KayaDB)" \
+    "https://crates.io/api/v1/crates/${crate}" \
     | grep -o '"max_version":"[^"]*"' \
     | head -1 \
     | sed 's/"max_version":"\(.*\)"/\1/' || true
 }
 
-LOCAL_WS_VER="$(workspace_version)"
+publish_crate() {
+  local crate="$1"
+  local output
+  if output="$(cargo publish -p "${crate}" --no-verify --allow-dirty 2>&1)"; then
+    echo "$output"
+    return 0
+  fi
+  echo "$output"
+  if echo "$output" | grep -q 'already exists on crates.io'; then
+    echo "SKIP ${crate}: already published"
+    return 0
+  fi
+  return 1
+}
 
 for crate in "${ORDER[@]}"; do
   local_ver="$(local_version "$crate")"
   remote_ver="$(remote_version "$crate")"
 
-  if [[ "$local_ver" == "$remote_ver" ]]; then
+  if [[ -n "$remote_ver" && "$local_ver" == "$remote_ver" ]]; then
     echo "SKIP ${crate}: already at ${local_ver} on crates.io"
     continue
   fi
 
   echo "::group::Publishing ${crate} (${remote_ver:-none} -> ${local_ver})"
   for attempt in 1 2 3; do
-    if cargo publish -p "${crate}" --no-verify --allow-dirty; then
+    if publish_crate "$crate"; then
       break
     fi
     if [[ $attempt -eq 3 ]]; then
