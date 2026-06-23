@@ -28,7 +28,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CARGO_HTTP_MULTIPLEXING: false
+  CARGO_HTTP_MULTIPLEXING: "false"
   CRATES: >-
     kaya-core
     kaya-io
@@ -46,7 +46,8 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success')
+       github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
