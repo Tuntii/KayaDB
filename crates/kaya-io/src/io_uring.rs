@@ -71,6 +71,23 @@ impl IoUringDisk {
         Ok(res as usize)
     }
 
+    fn uring_write_all(&self, fd: types::Fd, mut offset: u64, buf: &[u8]) -> Result<()> {
+        let mut written = 0usize;
+        while written < buf.len() {
+            let n = self.uring_write(fd, offset, &buf[written..])?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "io_uring write returned 0 bytes",
+                )
+                .into());
+            }
+            written += n;
+            offset += n as u64;
+        }
+        Ok(())
+    }
+
     fn uring_write(&self, fd: types::Fd, offset: u64, buf: &[u8]) -> Result<usize> {
         let mut ring = self.ring.lock().unwrap();
         let write_e = opcode::Write::new(fd, buf.as_ptr(), buf.len() as u32)
@@ -150,7 +167,7 @@ impl Disk for IoUringDisk {
             .open(self.resolve(path))?;
         let offset = file.metadata()?.len();
         let fd = types::Fd(file.as_raw_fd());
-        self.uring_write(fd, offset, buf)?;
+        self.uring_write_all(fd, offset, buf)?;
         Ok(offset)
     }
 

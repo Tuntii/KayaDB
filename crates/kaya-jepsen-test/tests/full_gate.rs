@@ -35,7 +35,7 @@ async fn run_full_gate(scenario: Scenario) {
     let mut scenario = scale_for_fast_verify(scenario);
     // WGL concurrent checker supports at most 14 ops; workload keeps running for chaos.
     scenario.workload.verify_max_ops = Some(14);
-    // Single client keeps recorded history consistent under kill/partition nemesis.
+    // Single client on shared-key Register workloads; record_timed captures real op duration.
     scenario.workload.clients = 1;
     assert_eq!(
         scenario.verify,
@@ -75,6 +75,17 @@ async fn run_full_gate(scenario: Scenario) {
             "{} expected partition nemesis to fire at least once",
             scenario.id
         );
+        #[cfg(target_os = "linux")]
+        assert!(
+            result.partition_applied > 0,
+            "{} expected iptables partition to apply on linux",
+            scenario.id
+        );
+        #[cfg(not(target_os = "linux"))]
+        eprintln!(
+            "[full_gate] {} partition nemesis attempted on non-linux (iptables unavailable; applied={})",
+            scenario.id, result.partition_applied
+        );
         eprintln!(
             "[full_gate] {} partition stats: attempted={} applied={} failed={}",
             scenario.id,
@@ -83,6 +94,11 @@ async fn run_full_gate(scenario: Scenario) {
             result.partition_failed
         );
     }
+
+    eprintln!(
+        "[full_gate] {} PASSED (violations=0, ops recorded for WGL verify)",
+        scenario.id
+    );
 }
 
 fn persist_trace_on_failure(base_dir: &Path, scenario_id: &str, result: &TestResult) {

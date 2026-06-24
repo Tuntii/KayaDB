@@ -7,7 +7,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::{sleep, timeout};
 
 const CLIENT_OP_TIMEOUT: Duration = Duration::from_millis(750);
@@ -41,6 +41,19 @@ impl Default for WorkloadConfig {
 
 fn should_record(history: &History, verify_max_ops: Option<usize>) -> bool {
     verify_max_ops.is_none_or(|max| history.len() < max)
+}
+
+fn record_completed(
+    history: &History,
+    client_id: usize,
+    op: Op,
+    result: OperationResult,
+    op_start: Instant,
+    verify_max_ops: Option<usize>,
+) {
+    if should_record(history, verify_max_ops) {
+        history.record_timed(client_id, op, result, op_start, Instant::now());
+    }
 }
 
 /// Type of workload to generate.
@@ -139,16 +152,48 @@ async fn run_client(
 
         match workload_type {
             WorkloadType::Register => {
-                run_register_op(&mut client, client_id, &history, &mut rng, verify_max_ops).await;
+                run_register_op(
+                    &mut client,
+                    client_id,
+                    &history,
+                    &mut rng,
+                    verify_max_ops,
+                    op_start,
+                )
+                .await;
             }
             WorkloadType::Counter => {
-                run_counter_op(&mut client, client_id, &history, &mut rng, verify_max_ops).await;
+                run_counter_op(
+                    &mut client,
+                    client_id,
+                    &history,
+                    &mut rng,
+                    verify_max_ops,
+                    op_start,
+                )
+                .await;
             }
             WorkloadType::Set => {
-                run_set_op(&mut client, client_id, &history, &mut rng, verify_max_ops).await;
+                run_set_op(
+                    &mut client,
+                    client_id,
+                    &history,
+                    &mut rng,
+                    verify_max_ops,
+                    op_start,
+                )
+                .await;
             }
             WorkloadType::Map => {
-                run_map_op(&mut client, client_id, &history, &mut rng, verify_max_ops).await;
+                run_map_op(
+                    &mut client,
+                    client_id,
+                    &history,
+                    &mut rng,
+                    verify_max_ops,
+                    op_start,
+                )
+                .await;
             }
         }
 
@@ -179,6 +224,7 @@ async fn run_register_op<R: Rng>(
     history: &Arc<History>,
     rng: &mut R,
     verify_max_ops: Option<usize>,
+    op_start: Instant,
 ) {
     let key = b"register";
 
@@ -200,16 +246,24 @@ async fn run_register_op<R: Rng>(
                 }
             }
         }
-        if should_record(history, verify_max_ops) {
-            if let Some(value) = got {
-                history.record(client_id, op, OperationResult::Value(value));
-            } else {
-                history.record(
-                    client_id,
-                    op,
-                    OperationResult::Error("get failed after retries".into()),
-                );
-            }
+        if let Some(value) = got {
+            record_completed(
+                history,
+                client_id,
+                op,
+                OperationResult::Value(value),
+                op_start,
+                verify_max_ops,
+            );
+        } else {
+            record_completed(
+                history,
+                client_id,
+                op,
+                OperationResult::Error("get failed after retries".into()),
+                op_start,
+                verify_max_ops,
+            );
         }
     } else {
         // PUT - retry until Ok
@@ -222,9 +276,14 @@ async fn run_register_op<R: Rng>(
         for _ in 0..5 {
             match timeout(CLIENT_OP_TIMEOUT, client.put(key, &value)).await {
                 Ok(Ok(())) => {
-                    if should_record(history, verify_max_ops) {
-                        history.record(client_id, op.clone(), OperationResult::Ok);
-                    }
+                    record_completed(
+                        history,
+                        client_id,
+                        op.clone(),
+                        OperationResult::Ok,
+                        op_start,
+                        verify_max_ops,
+                    );
                     success = true;
                     break;
                 }
@@ -233,11 +292,14 @@ async fn run_register_op<R: Rng>(
                 }
             }
         }
-        if !success && should_record(history, verify_max_ops) {
-            history.record(
+        if !success {
+            record_completed(
+                history,
                 client_id,
                 op,
                 OperationResult::Error("put failed after retries".into()),
+                op_start,
+                verify_max_ops,
             );
         }
     }
@@ -249,6 +311,7 @@ async fn run_counter_op<R: Rng>(
     history: &Arc<History>,
     rng: &mut R,
     verify_max_ops: Option<usize>,
+    op_start: Instant,
 ) {
     let key = b"counter";
 
@@ -258,14 +321,24 @@ async fn run_counter_op<R: Rng>(
         let op = Op::Get { key: key.to_vec() };
         match timeout(CLIENT_OP_TIMEOUT, client.get(key)).await {
             Ok(Ok(value)) => {
-                if should_record(history, verify_max_ops) {
-                    history.record(client_id, op, OperationResult::Value(value));
-                }
+                record_completed(
+                    history,
+                    client_id,
+                    op,
+                    OperationResult::Value(value),
+                    op_start,
+                    verify_max_ops,
+                );
             }
             Ok(Err(e)) => {
-                if should_record(history, verify_max_ops) {
-                    history.record(client_id, op, OperationResult::Error(e.to_string()));
-                }
+                record_completed(
+                    history,
+                    client_id,
+                    op,
+                    OperationResult::Error(e.to_string()),
+                    op_start,
+                    verify_max_ops,
+                );
             }
             Err(_) => {}
         }
@@ -281,9 +354,14 @@ async fn run_counter_op<R: Rng>(
             Ok(Ok(None)) => 0,
             Ok(Err(e)) => {
                 let op = Op::Get { key: key.to_vec() };
-                if should_record(history, verify_max_ops) {
-                    history.record(client_id, op, OperationResult::Error(e.to_string()));
-                }
+                record_completed(
+                    history,
+                    client_id,
+                    op,
+                    OperationResult::Error(e.to_string()),
+                    op_start,
+                    verify_max_ops,
+                );
                 return;
             }
             Err(_) => return,
@@ -296,14 +374,24 @@ async fn run_counter_op<R: Rng>(
         };
         match timeout(CLIENT_OP_TIMEOUT, client.put(key, &new_value.to_le_bytes())).await {
             Ok(Ok(())) => {
-                if should_record(history, verify_max_ops) {
-                    history.record(client_id, op, OperationResult::Ok);
-                }
+                record_completed(
+                    history,
+                    client_id,
+                    op,
+                    OperationResult::Ok,
+                    op_start,
+                    verify_max_ops,
+                );
             }
             Ok(Err(e)) => {
-                if should_record(history, verify_max_ops) {
-                    history.record(client_id, op, OperationResult::Error(e.to_string()));
-                }
+                record_completed(
+                    history,
+                    client_id,
+                    op,
+                    OperationResult::Error(e.to_string()),
+                    op_start,
+                    verify_max_ops,
+                );
             }
             Err(_) => {}
         }
@@ -316,6 +404,7 @@ async fn run_set_op<R: Rng>(
     history: &Arc<History>,
     rng: &mut R,
     verify_max_ops: Option<usize>,
+    op_start: Instant,
 ) {
     // Under verify cap, only PUT unique keys (SCAN is not key-partition friendly for WGL).
     let do_put = verify_max_ops.is_some() || rng.gen_bool(0.6);
@@ -331,14 +420,24 @@ async fn run_set_op<R: Rng>(
         };
         match timeout(CLIENT_OP_TIMEOUT, client.put(key.as_bytes(), &value)).await {
             Ok(Ok(())) => {
-                if should_record(history, verify_max_ops) {
-                    history.record(client_id, op, OperationResult::Ok);
-                }
+                record_completed(
+                    history,
+                    client_id,
+                    op,
+                    OperationResult::Ok,
+                    op_start,
+                    verify_max_ops,
+                );
             }
             Ok(Err(e)) => {
-                if should_record(history, verify_max_ops) {
-                    history.record(client_id, op, OperationResult::Error(e.to_string()));
-                }
+                record_completed(
+                    history,
+                    client_id,
+                    op,
+                    OperationResult::Error(e.to_string()),
+                    op_start,
+                    verify_max_ops,
+                );
             }
             Err(_) => {}
         }
@@ -350,14 +449,24 @@ async fn run_set_op<R: Rng>(
         };
         match timeout(CLIENT_OP_TIMEOUT, client.scan(prefix)).await {
             Ok(Ok(items)) => {
-                if should_record(history, verify_max_ops) {
-                    history.record(client_id, op, OperationResult::Scan(items));
-                }
+                record_completed(
+                    history,
+                    client_id,
+                    op,
+                    OperationResult::Scan(items),
+                    op_start,
+                    verify_max_ops,
+                );
             }
             Ok(Err(e)) => {
-                if should_record(history, verify_max_ops) {
-                    history.record(client_id, op, OperationResult::Error(e.to_string()));
-                }
+                record_completed(
+                    history,
+                    client_id,
+                    op,
+                    OperationResult::Error(e.to_string()),
+                    op_start,
+                    verify_max_ops,
+                );
             }
             Err(_) => {}
         }
@@ -370,6 +479,7 @@ async fn run_map_op<R: Rng>(
     history: &Arc<History>,
     rng: &mut R,
     verify_max_ops: Option<usize>,
+    op_start: Instant,
 ) {
     // Simple map: 50% PUT, 50% GET on random keys
     let key_id: u32 = rng.gen_range(0..10);
@@ -384,14 +494,24 @@ async fn run_map_op<R: Rng>(
         };
         match timeout(CLIENT_OP_TIMEOUT, client.put(key.as_bytes(), &value)).await {
             Ok(Ok(())) => {
-                if should_record(history, verify_max_ops) {
-                    history.record(client_id, op, OperationResult::Ok);
-                }
+                record_completed(
+                    history,
+                    client_id,
+                    op,
+                    OperationResult::Ok,
+                    op_start,
+                    verify_max_ops,
+                );
             }
             Ok(Err(e)) => {
-                if should_record(history, verify_max_ops) {
-                    history.record(client_id, op, OperationResult::Error(e.to_string()));
-                }
+                record_completed(
+                    history,
+                    client_id,
+                    op,
+                    OperationResult::Error(e.to_string()),
+                    op_start,
+                    verify_max_ops,
+                );
             }
             Err(_) => {}
         }
@@ -402,14 +522,24 @@ async fn run_map_op<R: Rng>(
         };
         match timeout(CLIENT_OP_TIMEOUT, client.get(key.as_bytes())).await {
             Ok(Ok(value)) => {
-                if should_record(history, verify_max_ops) {
-                    history.record(client_id, op, OperationResult::Value(value));
-                }
+                record_completed(
+                    history,
+                    client_id,
+                    op,
+                    OperationResult::Value(value),
+                    op_start,
+                    verify_max_ops,
+                );
             }
             Ok(Err(e)) => {
-                if should_record(history, verify_max_ops) {
-                    history.record(client_id, op, OperationResult::Error(e.to_string()));
-                }
+                record_completed(
+                    history,
+                    client_id,
+                    op,
+                    OperationResult::Error(e.to_string()),
+                    op_start,
+                    verify_max_ops,
+                );
             }
             Err(_) => {}
         }

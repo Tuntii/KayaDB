@@ -18,6 +18,8 @@ io_uring = ["dep:io-uring"]
 
 [dependencies]
 kaya-core.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.6", optional = true }
 
 [dev-dependencies]
