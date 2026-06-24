@@ -1,7 +1,7 @@
 # KayaDB Development Roadmap
 
 **Status:** Living roadmap  
-**Last updated:** 2026-06-23
+**Last updated:** 2026-06-24
 
 > **"Geniş ve yaşayan yol haritası"** — Bu belge hem tarihi başarıları arşivler, hem şu anki odak noktalarını gösterir, hem de uzun vadeli vizyonu (birden fazla paralel track ile) detaylandırır. Tasarım-öncelikli ve correctness-öncelikli felsefe korunur.
 
@@ -39,9 +39,9 @@ Goal: cross the line from “serious prototype” to “operators can run this w
 
 **M13 exit (2026-06-21):** experimental label dropped; remaining deployment hardening documented as accepted risks in `docs/security.md` §7.
 
-### M14 — Correctness + algorithms 🟡
+### M14 — Correctness + algorithms ✅
 
-Goal: deepen LSM algorithm choices and distributed correctness proof while keeping formats inspectable and modules maintainable. Shipped in v0.1.43 on `feat/analysis-improvements`.
+Goal: deepen LSM algorithm choices and distributed correctness proof while keeping formats inspectable and modules maintainable. Completed in v0.1.44 (2026-06-24).
 
 1. **Compaction policy** ✅ — `CompactionPolicy` trait in `kaya-lsm` (`L0MergePolicy`, `LevelStrategy`, `TierStrategy`); `EngineConfig.compaction.policy` selects strategy at engine open.
 2. **Bloom filter** ✅ — SSTable v2 footer with blocked double-hashing bloom; `SstableConfig.bloom_bits_per_key` (default on); read path skips blocks on negative lookup.
@@ -50,13 +50,10 @@ Goal: deepen LSM algorithm choices and distributed correctness proof while keepi
 5. **Chaos matrix CI** ✅ — `.github/workflows/chaos-matrix.yml`: PR smoke + nightly `DiskFull`, `NetworkPartition`, `ClockSkew` matrix cells.
 6. **Jepsen CI** ✅ — `.github/workflows/jepsen.yml`: PR `smoke_scenario` gate; nightly/tag `full_gate` T1–T7 with WGL concurrent verify.
 7. **Publish CI** ✅ — GitHub Pages docs deploy (`docs.yml`), multi-platform release binaries (`release.yml`), crates.io badges + `scripts/smart_publish.ps1` publish helper; `audit.yml` (`cargo audit` + `cargo deny`).
+8. **Jepsen full suite** ✅ — Partition nemesis observability (`PartitionTracker`), scenario registry tests (`scenario_registry.rs`), full gate partition assertions for T2/T5; `KAYA_JEPSEN_FAST=1` for shortened local verification.
+9. **io_uring backend** ✅ — `IoUringDisk` in `kaya-io` behind `io_uring` feature flag (Linux-only); shared `contract` helpers + `tests/disk_contract.rs` for FileDisk/SimDisk/IoUringDisk parity.
 
-**M14 remaining (planned):**
-
-1. **Jepsen full suite** 🟡 — Harden Rust-native T1–T7 under partition nemesis in CI; richer scenario registry; optional external Clojure Jepsen harness hook (`workflow_dispatch` stub in `jepsen.yml`).
-2. **io_uring backend** ⬜ — Linux `Disk` implementation behind `kaya-io` feature flag per `spec/docs/disk-and-io-spec.md`; completion tracing pairs with Track A eBPF work.
-
-**M14 exit (target):** compaction policy + bloom + WAL batching stable in production-like workloads; Jepsen full gate green on nightly; `io_uring` prototype behind feature flag with SimDisk-equivalent contract tests.
+**M14 exit (2026-06-24):** Jepsen full gate T1–T7 pass with WGL concurrent verify; `io_uring` prototype compiles and satisfies Disk contract tests on Linux with `--features io_uring`. Clojure Jepsen harness remains an optional `workflow_dispatch` stub only.
 
 ---
 
@@ -567,7 +564,7 @@ Suggested next milestone shape:
 M11 — Benchmark discipline, concurrent linearizability, Raft snapshots, dynamic membership ✅
 M12 — Jepsen prep + Linux observability experiments ✅
 M13 — Productization ✅
-M14 — Correctness + algorithms (compaction, bloom, WAL batching, CI gates) 🟡
+M14 — Correctness + algorithms (compaction, bloom, WAL batching, CI gates, Jepsen full, io_uring) ✅
 ```
 
 ---
@@ -639,7 +636,7 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 
 ### Track B: I/O & Low-level Storage
 
-- Linux `io_uring` Disk implementasyonu (yeni async backend) — **M14 planned**
+- Linux `io_uring` Disk implementasyonu (yeni async backend) — ✅ M14 (`IoUringDisk`, `io_uring` feature)
 - Gelişmiş compaction stratejileri (leveled + tiered hibrit) — ✅ `CompactionPolicy` wired (M14)
 - Block cache, bloom filter, compression seçenekleri (SSTable v2) — ✅ bloom filter (M14); block cache + compression ⬜
 - WAL group-commit batching — ✅ `WalBatchWriter` (M14)
@@ -647,7 +644,7 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 
 ### Track C: Distributed Correctness & Chaos
 
-- Tam Clojure Jepsen suite (gerçek cluster + dynamic membership + snapshots altında) — **M14 planned**
+- Tam Clojure Jepsen suite (gerçek cluster + dynamic membership + snapshots altında) — optional stub; Rust-native T1–T7 full gate ✅ M14
 - Rust-native Jepsen CI (smoke + nightly T1–T7) — ✅ M14
 - Chaos matrix CI (DiskFull, NetworkPartition, ClockSkew) — ✅ M14
 - Daha zengin nemesis seti + clock skew, disk latency injection — 🟡 partial (clock skew in chaos matrix)

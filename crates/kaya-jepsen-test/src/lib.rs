@@ -42,6 +42,7 @@
 pub mod cluster_controller;
 pub mod history;
 pub mod nemesis;
+pub mod partition;
 pub mod runner;
 pub mod scenario;
 pub mod workload;
@@ -49,7 +50,8 @@ pub mod workload;
 pub use cluster_controller::{ClusterController, LeaderInfo, ManagedNode};
 pub use history::{History, Operation, OperationResult};
 pub use nemesis::{MemberSpec, Nemesis, NemesisConfig, NemesisType};
-pub use runner::{TestConfig, TestResult, TestRunner};
+pub use partition::PartitionTracker;
+pub use runner::{scenario_uses_partition, TestConfig, TestResult, TestRunner};
 pub use scenario::{
     scenario_registry, smoke_scenario, t1_scenario, t2_scenario, t3_scenario, t4_scenario,
     t5_scenario, t6_scenario, t7_scenario, Scenario, Topology, VerifyMode, WorkloadHook,

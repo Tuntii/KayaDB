@@ -9,7 +9,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](Cargo.toml)
 [![crates.io: kaya-engine](https://img.shields.io/crates/v/kaya-engine.svg?label=kaya-engine)](https://crates.io/crates/kaya-engine)
 [![crates.io: kayactl](https://img.shields.io/crates/v/kayactl.svg?label=kayactl)](https://crates.io/crates/kayactl)
-[![Status](https://img.shields.io/badge/status-M14%20correctness%2Balgorithm-yellow.svg)](ROADMAP.md)
+[![Status](https://img.shields.io/badge/status-M14%20complete-brightgreen.svg)](ROADMAP.md)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://tuntii.github.io/KayaDB/)
 
 **A correctness-first, embeddable distributed key-value database built in Rust.**
@@ -88,9 +88,9 @@ Rust library: `kaya-engine = "0.1.43"` — see [installation guide](docs/install
 | Async Rust client | ✅ Implemented | `kaya-client` with leader redirection support |
 | Operator CLI | ✅ Implemented | Local mode, server mode, inspect, stats, `add-node`/`remove-node` |
 | Production hardening | ✅ M13 | Native TLS (`tls` feature), operator token, mTLS sidecar runbooks, chaos validation |
-| Storage algorithms | 🟡 M14 | Pluggable compaction policy, SSTable bloom filter, WAL group-commit batching |
+| Storage algorithms | ✅ M14 | Compaction policy, bloom filter, WAL batching, io_uring prototype |
 
-> KayaDB completed M13 productization (2026-06-21) and is now in **M14 correctness+algorithm** (v0.1.43): deeper LSM policies, module splits, and expanded Jepsen/chaos CI. It remains a correctness-first distributed KV engine with documented day-2 runbooks — not a fully hardened multi-tenant SaaS database. See [security and deployment notes](docs/security.md) and accepted risks (§7) before any production-like deployment.
+> KayaDB completed M13 productization (2026-06-21) and **M14 correctness+algorithm** (v0.1.44, 2026-06-24): LSM policy upgrades, Jepsen full gate T1–T7, and Linux `io_uring` Disk prototype. It remains a correctness-first distributed KV engine with documented day-2 runbooks — not a fully hardened multi-tenant SaaS database. See [security and deployment notes](docs/security.md) and accepted risks (§7) before any production-like deployment.
 
 ---
 
@@ -288,7 +288,7 @@ Detailed numbers and methodology live in [BENCHMARKS.md](BENCHMARKS.md).
 
 See the **[full status and roadmap](ROADMAP.md)** and the tracked **[productization north star](docs/productization.md)** (M13 exit gates — prototype → deployable product).
 
-M13 productization is complete (durable Raft state, TLS, operator token, day-2 runbooks). **M14** (v0.1.43) adds compaction policy selection, SSTable bloom filters, WAL batching, god-file splits, and Jepsen/chaos-matrix CI gates. Remaining deployment hardening (data-at-rest, multi-tenant, audit logging) is documented as accepted risk in [security.md §7](docs/security.md#7-accepted-risks-and-future-hardening-m13-exit). Planned next: Jepsen full suite hardening and Linux `io_uring` backend — see [ROADMAP.md](ROADMAP.md#m14--correctness--algorithms-).
+M13 productization is complete (durable Raft state, TLS, operator token, day-2 runbooks). **M14** (v0.1.44) adds compaction policy, bloom filters, WAL batching, Jepsen full gate T1–T7 with partition observability, and Linux `io_uring` Disk prototype (`kaya-io` `io_uring` feature). Remaining deployment hardening (data-at-rest, multi-tenant, audit logging) is documented as accepted risk in [security.md §7](docs/security.md#7-accepted-risks-and-future-hardening-m13-exit). See [ROADMAP.md](ROADMAP.md) for parallel tracks (observability, client ecosystem, deployment).
 
 For the complete picture, use the **[official documentation](https://tuntii.github.io/KayaDB/)** or [docs/README.md](docs/README.md).
 

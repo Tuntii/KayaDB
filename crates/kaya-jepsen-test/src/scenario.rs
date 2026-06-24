@@ -59,6 +59,7 @@ fn workload(workload_type: WorkloadType, clients: usize, duration_secs: u64) -> 
         clients,
         duration: Duration::from_secs(duration_secs),
         rate_limit: 0,
+        verify_max_ops: None,
     }
 }
 
@@ -231,6 +232,9 @@ pub fn scenario_registry() -> Vec<Scenario> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nemesis::NemesisType;
+    use crate::runner::scenario_uses_partition;
+    use crate::workload::WorkloadType;
 
     #[test]
     fn registry_contains_smoke_and_t1_through_t7() {
@@ -248,5 +252,80 @@ mod tests {
         let t5 = t5_scenario();
         assert!(smoke.duration_secs < t1.duration_secs);
         assert!(t1.duration_secs <= t5.duration_secs);
+    }
+
+    #[test]
+    fn t1_matches_jepsen_design() {
+        let s = t1_scenario();
+        assert_eq!(s.workload.workload_type, WorkloadType::Register);
+        assert_eq!(s.workload.clients, 5);
+        assert_eq!(s.duration_secs, 120);
+        assert_eq!(s.verify, VerifyMode::Concurrent);
+        assert_eq!(s.topology, Topology::ThreeNode);
+        assert!(matches!(
+            s.nemesis.as_ref().map(|n| &n.nemesis_type),
+            Some(NemesisType::KillNode)
+        ));
+    }
+
+    #[test]
+    fn t2_matches_jepsen_design_partition() {
+        let s = t2_scenario();
+        assert_eq!(s.workload.workload_type, WorkloadType::Set);
+        assert_eq!(s.workload.clients, 5);
+        assert_eq!(s.duration_secs, 120);
+        assert!(scenario_uses_partition(s.nemesis.as_ref()));
+        assert!(matches!(
+            s.nemesis.as_ref().map(|n| &n.nemesis_type),
+            Some(NemesisType::PartitionById(3))
+        ));
+    }
+
+    #[test]
+    fn t5_matches_jepsen_design_stress_partition() {
+        let s = t5_scenario();
+        assert_eq!(s.workload.clients, 20);
+        assert_eq!(s.duration_secs, 300);
+        assert!(scenario_uses_partition(s.nemesis.as_ref()));
+    }
+
+    #[test]
+    fn t6_four_node_join_topology() {
+        let s = t6_scenario();
+        assert_eq!(s.topology, Topology::FourNodeJoin);
+        assert_eq!(s.verify, VerifyMode::Concurrent);
+    }
+
+    #[test]
+    fn t7_has_burst_write_hook() {
+        let s = t7_scenario();
+        assert_eq!(s.hooks.len(), 1);
+        assert!(matches!(
+            &s.hooks[0],
+            WorkloadHook::BurstWrites {
+                count: 128,
+                key_prefix: "snap"
+            }
+        ));
+    }
+
+    #[test]
+    fn full_gate_scenarios_use_concurrent_verify() {
+        for scenario in [
+            t1_scenario(),
+            t2_scenario(),
+            t3_scenario(),
+            t4_scenario(),
+            t5_scenario(),
+            t6_scenario(),
+            t7_scenario(),
+        ] {
+            assert_eq!(
+                scenario.verify,
+                VerifyMode::Concurrent,
+                "{} must use WGL concurrent verify",
+                scenario.id
+            );
+        }
     }
 }

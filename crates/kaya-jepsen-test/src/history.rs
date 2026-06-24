@@ -124,7 +124,11 @@ impl History {
             .min()
             .unwrap_or(self.start_time);
 
-        let mut checker = LinearizabilityChecker::new();
+        let mut key_partitions: std::collections::BTreeMap<Vec<u8>, LinearizabilityChecker> =
+            std::collections::BTreeMap::new();
+        let mut scan_checker = LinearizabilityChecker::new();
+        let mut scan_ops = 0usize;
+
         for op in ops.iter() {
             let start_tick = op.start_time.duration_since(base).as_micros() as u64;
             let end_tick = op.end_time.duration_since(base).as_micros() as u64;
@@ -134,16 +138,55 @@ impl History {
                 OperationResult::Scan(items) => OpResult::Scan(items.clone()),
                 OperationResult::Error(e) => OpResult::Error(e.clone()),
             };
-            checker.record_interval(
+            let interval = (
                 start_tick,
                 end_tick.max(start_tick + 1),
                 Some(op.client_id as u32),
                 op.op.clone(),
                 sim_result,
             );
+
+            match &op.op {
+                Op::Put { key, .. } | Op::Get { key } | Op::Delete { key } => {
+                    key_partitions
+                        .entry(key.clone())
+                        .or_default()
+                        .record_interval(
+                            interval.0, interval.1, interval.2, interval.3, interval.4,
+                        );
+                }
+                Op::Scan { .. } => {
+                    scan_ops += 1;
+                    scan_checker.record_interval(
+                        interval.0, interval.1, interval.2, interval.3, interval.4,
+                    );
+                }
+            }
         }
 
-        checker.check_concurrent()
+        let mut violations = Vec::new();
+        for (key, checker) in key_partitions {
+            if let Err(mut v) = checker.check_concurrent() {
+                for item in &mut v {
+                    *item = format!("key {:?}: {item}", String::from_utf8_lossy(&key));
+                }
+                violations.append(&mut v);
+            }
+        }
+        if scan_ops > 0 {
+            if let Err(mut v) = scan_checker.check_concurrent() {
+                for item in &mut v {
+                    *item = format!("scan ops: {item}");
+                }
+                violations.append(&mut v);
+            }
+        }
+
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(violations)
+        }
     }
 
     /// Export history as JSONL trace.

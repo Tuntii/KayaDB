@@ -53,6 +53,12 @@ dependencies = [
 
 [[package]]
 name = "bitflags"
+version = "1.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
+
+[[package]]
+name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
@@ -280,6 +286,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
+name = "io-uring"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "595a0399f411a508feb2ec1e970a4a30c249351e30208960d58298de8660b0e5"
+dependencies = [
+ "bitflags 1.3.2",
+ "libc",
+]
+
+[[package]]
 name = "is-terminal"
 version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -317,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-bench"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "criterion",
  "kaya-core",
@@ -330,7 +346,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-client"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "kaya-core",
  "kaya-net",
@@ -340,14 +356,14 @@ dependencies = [
 
 [[package]]
 name = "kaya-core"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "kaya-engine"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "kaya-core",
  "kaya-io",
@@ -359,15 +375,17 @@ dependencies = [
 
 [[package]]
 name = "kaya-io"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
+ "io-uring",
  "kaya-core",
+ "tempfile",
  "tokio",
 ]
 
 [[package]]
 name = "kaya-jepsen-test"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "kaya-client",
  "kaya-net",
@@ -380,14 +398,14 @@ dependencies = [
 
 [[package]]
 name = "kaya-lsm"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "kaya-core",
 ]
 
 [[package]]
 name = "kaya-net"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "kaya-core",
  "kaya-raft",
@@ -399,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-raft"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "kaya-core",
  "kaya-io",
@@ -407,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-server"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "kaya-client",
  "kaya-core",
@@ -421,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-sim"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "kaya-core",
  "kaya-engine",
@@ -434,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-wal"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "kaya-core",
  "kaya-io",
@@ -443,7 +461,7 @@ dependencies = [
 
 [[package]]
 name = "kayactl"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "kaya-core",
  "kaya-engine",
@@ -634,7 +652,7 @@ version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
 dependencies = [
- "bitflags",
+ "bitflags 2.13.0",
  "errno",
  "libc",
  "linux-raw-sys",

@@ -1,8 +1,9 @@
 //! Test orchestration and verification.
 
-use crate::cluster_controller::ClusterController;
+use crate::cluster_controller::{ClusterController, LeaderInfo};
 use crate::history::History;
-use crate::nemesis::{MemberSpec, Nemesis, NemesisAction, NemesisConfig};
+use crate::nemesis::{MemberSpec, Nemesis, NemesisAction, NemesisConfig, NemesisType};
+use crate::partition::PartitionTracker;
 use crate::scenario::{Scenario, Topology, VerifyMode, WorkloadHook};
 use crate::workload::{Workload, WorkloadConfig};
 use kaya_client::KayaClient;
@@ -68,6 +69,12 @@ pub struct TestResult {
     pub stats: crate::history::HistoryStats,
     /// JSONL trace (if violations detected)
     pub trace: Option<String>,
+    /// Partition nemesis attempts during the scenario
+    pub partition_attempted: u32,
+    /// Partition rules successfully applied (iptables or equivalent)
+    pub partition_applied: u32,
+    /// Partition attempts that failed (non-fatal on dev hosts without sudo)
+    pub partition_failed: u32,
 }
 
 /// Test runner that orchestrates workloads and nemeses.
@@ -117,13 +124,17 @@ impl TestRunner {
 
         tokio::time::sleep(Duration::from_secs(self.config.duration_secs)).await;
         let _ = stop_tx.send(true);
-        let _ = workload_handle.await;
+        let _ = timeout(Duration::from_secs(5), workload_handle).await;
 
         if let Some(handle) = nemesis_handle {
-            let _ = handle.await;
+            let _ = timeout(Duration::from_secs(5), handle).await;
         }
 
-        Self::verify_history(&history, VerifyMode::Sequential)
+        Self::verify_history(
+            &history,
+            VerifyMode::Sequential,
+            &PartitionTracker::default(),
+        )
     }
 
     /// Run a declarative scenario against an in-process [`ClusterController`].
@@ -142,12 +153,20 @@ impl TestRunner {
             scenario.nemesis.as_ref().map(|n| &n.nemesis_type)
         );
 
-        cluster.wait_for_leader(Duration::from_secs(15)).await?;
+        // Let all node tasks bind listeners before the first leader poll.
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        let (leader_timeout, leader_retries) = if scenario.topology == Topology::FourNodeJoin {
+            (Duration::from_secs(30), 5)
+        } else {
+            (Duration::from_secs(25), 4)
+        };
+        wait_for_leader_with_retry(cluster, leader_timeout, leader_retries).await?;
 
         if scenario.topology == Topology::FourNodeJoin {
             let seeds = cluster.seed_peers();
             cluster.spawn_join_node(4, seeds).await?;
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let _ = cluster.wait_for_leader(Duration::from_secs(15)).await?;
             eprintln!("  Join node 4 spawned (awaiting ADD_MEMBER nemesis)");
         }
 
@@ -155,8 +174,8 @@ impl TestRunner {
             let follower_id = cluster.find_follower_id().await?;
             eprintln!("[Runner] T7: stopping follower {follower_id} before burst writes");
             cluster.kill_node(follower_id)?;
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let leader = cluster.wait_for_leader(Duration::from_secs(15)).await?;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let leader = cluster.wait_for_leader(Duration::from_secs(30)).await?;
             Some(leader.client_addr)
         } else {
             None
@@ -173,6 +192,7 @@ impl TestRunner {
         eprintln!("  Endpoints: {:?}", endpoints);
 
         let history = Arc::new(History::new());
+        let partition_tracker = Arc::new(PartitionTracker::default());
         let (stop_tx, stop_rx) = watch::channel(false);
 
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
@@ -202,7 +222,7 @@ impl TestRunner {
             tokio::select! {
                 action = cmd_rx.recv() => {
                     if let Some(action) = action {
-                        apply_nemesis_action(cluster, action).await?;
+                        apply_nemesis_action(cluster, action, &partition_tracker).await?;
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_millis(50)) => {}
@@ -210,10 +230,10 @@ impl TestRunner {
         }
 
         let _ = stop_tx.send(true);
-        let _ = workload_handle.await;
+        let _ = timeout(Duration::from_secs(5), workload_handle).await;
 
         if let Some(handle) = nemesis_handle {
-            let _ = handle.await;
+            let _ = timeout(Duration::from_secs(5), handle).await;
         }
 
         if scenario.id == "t7" {
@@ -222,10 +242,15 @@ impl TestRunner {
             t7_durability_check(cluster).await?;
         }
 
-        Self::verify_history(&history, scenario.verify)
+        eprintln!("[Runner] {}", partition_tracker.summary());
+        Self::verify_history(&history, scenario.verify, &partition_tracker)
     }
 
-    fn verify_history(history: &History, verify: VerifyMode) -> Result<TestResult, String> {
+    fn verify_history(
+        history: &History,
+        verify: VerifyMode,
+        partition_tracker: &PartitionTracker,
+    ) -> Result<TestResult, String> {
         eprintln!("Verifying {:?} linearizability...", verify);
         let stats = history.stats();
         eprintln!("{}", stats);
@@ -235,6 +260,10 @@ impl TestRunner {
             VerifyMode::Concurrent => history.check_concurrent(),
         };
 
+        let partition_attempted = partition_tracker.attempted();
+        let partition_applied = partition_tracker.applied();
+        let partition_failed = partition_tracker.failed();
+
         match verify_result {
             Ok(()) => {
                 eprintln!("✓ Test PASSED: No linearizability violations");
@@ -243,6 +272,9 @@ impl TestRunner {
                     violations: vec![],
                     stats,
                     trace: None,
+                    partition_attempted,
+                    partition_applied,
+                    partition_failed,
                 })
             }
             Err(violations) => {
@@ -265,15 +297,55 @@ impl TestRunner {
                     violations,
                     stats,
                     trace: Some(trace),
+                    partition_attempted,
+                    partition_applied,
+                    partition_failed,
                 })
             }
         }
     }
 }
 
+/// Returns true when the scenario declares a partition nemesis.
+pub fn scenario_uses_partition(nemesis: Option<&NemesisConfig>) -> bool {
+    let Some(config) = nemesis else {
+        return false;
+    };
+    scenario_nemesis_has_partition(&config.nemesis_type)
+}
+
+fn scenario_nemesis_has_partition(nemesis_type: &NemesisType) -> bool {
+    match nemesis_type {
+        NemesisType::Partition | NemesisType::PartitionById(_) => true,
+        NemesisType::Composite(types) => types.iter().any(scenario_nemesis_has_partition),
+        _ => false,
+    }
+}
+
+async fn wait_for_leader_with_retry(
+    cluster: &ClusterController,
+    timeout: Duration,
+    retries: usize,
+) -> Result<LeaderInfo, String> {
+    let mut last_err = "no leader elected".to_string();
+    for attempt in 0..retries {
+        match cluster.wait_for_leader(timeout).await {
+            Ok(info) => return Ok(info),
+            Err(err) => {
+                last_err = err;
+                if attempt + 1 < retries {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
 async fn apply_nemesis_action(
     cluster: &mut ClusterController,
     action: NemesisAction,
+    partition_tracker: &PartitionTracker,
 ) -> Result<(), String> {
     match action {
         NemesisAction::KillNode(id) => {
@@ -285,14 +357,25 @@ async fn apply_nemesis_action(
             cluster.restart_node(id)?;
         }
         NemesisAction::PartitionNode(id) => {
+            partition_tracker.record_attempt();
             eprintln!("[Runner] Partitioning node {id}");
-            if let Err(e) = cluster.partition_node(id).await {
-                eprintln!("[Runner] Partition failed (non-fatal): {e}");
+            match cluster.partition_node(id).await {
+                Ok(()) => {
+                    partition_tracker.record_applied();
+                    eprintln!("[Runner] Partition applied for node {id}");
+                }
+                Err(e) => {
+                    partition_tracker.record_failed();
+                    eprintln!("[Runner] Partition failed (non-fatal): {e}");
+                }
             }
         }
         NemesisAction::HealPartition(id) => {
             eprintln!("[Runner] Healing partition for node {id}");
-            let _ = cluster.heal_partition(id).await;
+            match cluster.heal_partition(id).await {
+                Ok(()) => eprintln!("[Runner] Partition healed for node {id}"),
+                Err(e) => eprintln!("[Runner] Partition heal failed (non-fatal): {e}"),
+            }
         }
         NemesisAction::AddMember(spec) => {
             let resolved = resolve_member_spec(cluster, &spec)?;

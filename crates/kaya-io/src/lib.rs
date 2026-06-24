@@ -1,10 +1,17 @@
 #![allow(async_fn_in_trait)]
 
+mod contract;
 mod file;
 mod path;
 mod sim;
 
+#[cfg(all(target_os = "linux", feature = "io_uring"))]
+mod io_uring;
+
+pub use contract::{test_append_fsync_read, test_list_dir, test_write_truncate_rename_remove};
 pub use file::FileDisk;
+#[cfg(all(target_os = "linux", feature = "io_uring"))]
+pub use io_uring::IoUringDisk;
 use kaya_core::Result;
 pub use path::RelativePath;
 pub use sim::{CrashReport, FaultKind, FaultRule, FaultSchedule, SimDisk, SimDiskEvent, SimSeed};

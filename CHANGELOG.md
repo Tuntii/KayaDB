@@ -9,8 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.1.44] — 2026-06-24
+
+M14 closure: Jepsen full suite hardening and Linux `io_uring` Disk prototype.
+
+### Added
+- `PartitionTracker` in `kaya-jepsen-test` with partition attempted/applied/failed stats on `TestResult`
+- `tests/scenario_registry.rs` — registry integrity checks for smoke + T1–T7
+- `IoUringDisk` in `kaya-io` behind `io_uring` feature flag (Linux-only, `io-uring` crate)
+- Shared Disk contract helpers (`contract` module) and `tests/disk_contract.rs` for FileDisk/SimDisk/IoUringDisk
+- `KAYA_JEPSEN_FAST=1` env for shortened local full-gate verification
+
 ### Changed
-- Documentation refresh: database-style landing page, `installation.md`, `releases.md` (v0.1.43), synced sidebar/SUMMARY, updated status in `KayaDB_Explained.md` and `security.md`
+- Full gate asserts partition nemesis fired for T2/T5 scenarios
+- ROADMAP M14 marked complete; README status updated
 
 ---
 

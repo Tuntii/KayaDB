@@ -12,11 +12,17 @@ rust-version.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+io_uring = ["dep:io-uring"]
+
 [dependencies]
 kaya-core.workspace = true
+io-uring = { version = "0.6", optional = true }
 
 [dev-dependencies]
 tokio.workspace = true
+tempfile = "3"
 
 [lib]
 path = "src/lib.rs"

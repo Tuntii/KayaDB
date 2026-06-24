@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::nemesis::MemberSpec;
-use kaya_net::{encode_member_payload, encode_remove_member_payload, roundtrip, STATUS_OK};
+use kaya_net::{
+    encode_member_payload, encode_remove_member_payload, roundtrip, STATUS_NOT_LEADER, STATUS_OK,
+};
 use kaya_server::{ClusterConfig, ClusterNode};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -139,34 +141,14 @@ impl ClusterController {
             spec.node_id, leader
         );
         let payload = encode_member_payload(spec.node_id, &spec.raft_addr, &spec.client_addr);
-        match timeout(Duration::from_secs(10), roundtrip(leader, 7, &payload)).await {
-            Ok(Ok((status, _body))) if status == STATUS_OK => Ok(()),
-            Ok(Ok((status, body))) => {
-                let msg = String::from_utf8_lossy(&body);
-                if status == kaya_net::STATUS_INVALID_ARGUMENT && msg.contains("already a voter") {
-                    Ok(())
-                } else {
-                    Err(format!("ADD_MEMBER failed status={status}: {msg}"))
-                }
-            }
-            Ok(Err(e)) => Err(format!("ADD_MEMBER roundtrip error: {e}")),
-            Err(_) => Err("ADD_MEMBER roundtrip timed out".into()),
-        }
+        admin_roundtrip(leader, 7, &payload, "ADD_MEMBER").await
     }
 
     /// Propose removing a member via REMOVE_MEMBER (opcode 8) on the leader.
     pub async fn remove_member(&self, leader: SocketAddr, node_id: u64) -> Result<(), String> {
         eprintln!("[ClusterController] REMOVE_MEMBER node {node_id} via {leader}");
         let payload = encode_remove_member_payload(node_id);
-        match timeout(Duration::from_secs(10), roundtrip(leader, 8, &payload)).await {
-            Ok(Ok((status, _body))) if status == STATUS_OK => Ok(()),
-            Ok(Ok((status, body))) => Err(format!(
-                "REMOVE_MEMBER failed status={status}: {:?}",
-                String::from_utf8(body)
-            )),
-            Ok(Err(e)) => Err(format!("REMOVE_MEMBER roundtrip error: {e}")),
-            Err(_) => Err("REMOVE_MEMBER roundtrip timed out".into()),
-        }
+        admin_roundtrip(leader, 8, &payload, "REMOVE_MEMBER").await
     }
 
     /// Return the id of a node that is not the current Raft leader.
@@ -301,8 +283,8 @@ impl ClusterController {
             }
         }
 
-        // Give aborted tasks a moment to release file handles (Windows).
-        sleep(Duration::from_millis(100)).await;
+        // Give aborted tasks time to release sockets (Windows port reuse is slow).
+        sleep(Duration::from_millis(1500)).await;
         let _ = std::fs::remove_dir_all(&self.base_dir);
     }
 
@@ -415,6 +397,70 @@ fn iptables_delete_by_comment(comment: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+const ADMIN_MAX_REDIRECTS: usize = 8;
+
+async fn admin_roundtrip(
+    mut addr: SocketAddr,
+    opcode: u8,
+    payload: &[u8],
+    label: &str,
+) -> Result<(), String> {
+    let mut last_err = String::new();
+    for attempt in 0..=ADMIN_MAX_REDIRECTS {
+        match timeout(Duration::from_secs(10), roundtrip(addr, opcode, payload)).await {
+            Ok(Ok((status, _body))) if status == STATUS_OK => return Ok(()),
+            Ok(Ok((status, body))) => {
+                let msg = String::from_utf8_lossy(&body);
+                if status == kaya_net::STATUS_INVALID_ARGUMENT && msg.contains("already a voter") {
+                    return Ok(());
+                }
+                if status == STATUS_NOT_LEADER {
+                    if let Some(hint) = parse_leader_hint(&body) {
+                        eprintln!(
+                            "[ClusterController] {label} redirect to {hint} (attempt {}/{})",
+                            attempt + 1,
+                            ADMIN_MAX_REDIRECTS
+                        );
+                        addr = hint;
+                        sleep(Duration::from_millis(60)).await;
+                        continue;
+                    }
+                    if attempt < ADMIN_MAX_REDIRECTS {
+                        sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                }
+                last_err = format!("{label} failed status={status}: {msg}");
+                if attempt == ADMIN_MAX_REDIRECTS {
+                    return Err(last_err);
+                }
+            }
+            Ok(Err(e)) => {
+                last_err = format!("{label} roundtrip error: {e}");
+                if attempt == ADMIN_MAX_REDIRECTS {
+                    return Err(last_err);
+                }
+            }
+            Err(_) => {
+                last_err = format!("{label} roundtrip timed out");
+                if attempt == ADMIN_MAX_REDIRECTS {
+                    return Err(last_err);
+                }
+            }
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+    Err(last_err)
+}
+
+fn parse_leader_hint(body: &[u8]) -> Option<SocketAddr> {
+    let hint = std::str::from_utf8(body).ok()?.trim();
+    if hint.is_empty() {
+        return None;
+    }
+    hint.parse().ok()
 }
 
 fn spawn_node(config: ClusterConfig) -> JoinHandle<()> {
