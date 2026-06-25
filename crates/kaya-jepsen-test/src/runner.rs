@@ -5,7 +5,7 @@ use crate::history::History;
 use crate::nemesis::{MemberSpec, Nemesis, NemesisAction, NemesisConfig, NemesisType};
 use crate::partition::PartitionTracker;
 use crate::scenario::{Scenario, Topology, VerifyMode, WorkloadHook};
-use crate::workload::{Workload, WorkloadConfig};
+use crate::workload::{Workload, WorkloadConfig, WorkloadType};
 use kaya_client::KayaClient;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -244,6 +244,27 @@ impl TestRunner {
             let _ = cluster.restart_last_killed();
             tokio::time::sleep(Duration::from_secs(2)).await;
             t7_durability_check(cluster).await?;
+        }
+
+        if scenario.workload.workload_type == WorkloadType::Register
+            && scenario.verify == VerifyMode::Concurrent
+        {
+            if !history.all_kv_ops_on_key(b"register") {
+                return Err("WGL register scenarios must record ops on shared key=register".into());
+            }
+            let overlapping = history.overlapping_interval_pairs();
+            eprintln!(
+                "[Runner] register WGL audit: key=register ops={} overlapping_pairs={} clients={}",
+                history.len(),
+                overlapping,
+                scenario.workload.clients
+            );
+            if scenario.workload.clients > 1 && overlapping == 0 {
+                return Err(
+                    "WGL register scenarios require overlapping multi-client intervals on shared key=register"
+                        .into(),
+                );
+            }
         }
 
         eprintln!("[Runner] {}", partition_tracker.summary());

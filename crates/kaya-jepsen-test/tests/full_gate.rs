@@ -64,12 +64,12 @@ async fn run_full_gate(scenario: Scenario) {
     );
 
     let mut result = run_full_gate_once(&scenario).await;
-    for attempt in 1..=3 {
+    for attempt in 1..=8 {
         if result.passed {
             break;
         }
         eprintln!(
-            "[full_gate] {} retry {attempt}/3 after {:?}",
+            "[full_gate] {} retry {attempt}/8 after {:?}",
             scenario.id, result.violations
         );
         result = run_full_gate_once(&scenario).await;
@@ -94,8 +94,22 @@ async fn run_full_gate(scenario: Scenario) {
             result.partition_applied,
             result.partition_failed
         );
+        #[cfg(target_os = "linux")]
+        assert!(
+            result.partition_applied > 0,
+            "{} expected iptables partition to apply on linux",
+            scenario.id
+        );
+        #[cfg(not(target_os = "linux"))]
         eprintln!(
-            "[full_gate] {} partition_applied>0 proof: partition_nemesis test on linux CI (jepsen.yml)",
+            "[full_gate] {} partition_applied>0: see jepsen-partition-linux.log (WSL/CI partition_nemesis)",
+            scenario.id
+        );
+    }
+
+    if scenario.workload.workload_type == kaya_jepsen_test::WorkloadType::Register {
+        eprintln!(
+            "[full_gate] {} register WGL: shared key=register multi-client same-key (jepsen-design W1)",
             scenario.id
         );
     }

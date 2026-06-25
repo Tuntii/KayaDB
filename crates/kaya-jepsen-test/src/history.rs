@@ -106,6 +106,52 @@ impl History {
         self.operations.lock().unwrap().is_empty()
     }
 
+    /// True when every PUT/GET/DELETE targets `key`.
+    pub fn all_kv_ops_on_key(&self, key: &[u8]) -> bool {
+        self.operations
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|op| match &op.op {
+                Op::Put { key: k, .. } | Op::Get { key: k } | Op::Delete { key: k } => {
+                    k.as_slice() == key
+                }
+                Op::Scan { .. } => true,
+            })
+    }
+
+    /// Count pairs of operations with overlapping wall-clock intervals.
+    pub fn overlapping_interval_pairs(&self) -> usize {
+        let ops = self.operations.lock().unwrap();
+        if ops.len() < 2 {
+            return 0;
+        }
+        let base = ops
+            .iter()
+            .map(|op| op.start_time)
+            .min()
+            .unwrap_or(self.start_time);
+        let intervals: Vec<(u64, u64)> = ops
+            .iter()
+            .map(|op| {
+                let start = op.start_time.duration_since(base).as_nanos() as u64;
+                let end = (op.end_time.duration_since(base).as_nanos() as u64).max(start + 1);
+                (start, end)
+            })
+            .collect();
+        let mut count = 0usize;
+        for i in 0..intervals.len() {
+            for j in (i + 1)..intervals.len() {
+                let (s1, e1) = intervals[i];
+                let (s2, e2) = intervals[j];
+                if s1 < e2 && s2 < e1 {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
     /// Verify linearizability using sequential checker.
     ///
     /// Returns Ok(()) if the history is linearizable, or Err with violations.
@@ -148,8 +194,8 @@ impl History {
         let mut scan_ops = 0usize;
 
         for op in ops.iter() {
-            let start_tick = op.start_time.duration_since(base).as_micros() as u64;
-            let end_tick = op.end_time.duration_since(base).as_micros() as u64;
+            let start_tick = op.start_time.duration_since(base).as_nanos() as u64;
+            let end_tick = op.end_time.duration_since(base).as_nanos() as u64;
             let sim_result = match &op.result {
                 OperationResult::Ok => OpResult::Ok,
                 OperationResult::Value(v) => OpResult::Value(v.clone()),

@@ -74,14 +74,13 @@ fn concurrent_registry_scenarios_declare_wgl_cap_and_design_clients() {
 }
 
 #[test]
-fn wgl_register_uses_per_client_keys_not_shared_register() {
-    for client_id in 0..5 {
-        let key = register_key(client_id, Some(WGL_VERIFY_MAX_OPS));
-        assert_ne!(
-            key, b"register",
-            "WGL cap must partition register by client"
+fn wgl_register_uses_shared_register_key_per_jepsen_design() {
+    for client_id in 0..20 {
+        assert_eq!(
+            register_key(client_id, Some(WGL_VERIFY_MAX_OPS)),
+            b"register",
+            "WGL gate must use jepsen-design W1 shared key"
         );
-        assert_eq!(key, format!("register-{client_id}").into_bytes());
     }
     assert_eq!(register_key(0, None), b"register");
 }

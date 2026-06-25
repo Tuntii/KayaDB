@@ -15,14 +15,9 @@ const CLIENT_OP_TIMEOUT: Duration = Duration::from_millis(750);
 /// WGL concurrent linearizability checker bound (kaya-sim `MAX_OPS`).
 pub const WGL_VERIFY_MAX_OPS: usize = 14;
 
-/// Register key for a client. Under WGL verify cap each client owns `register-{id}` so
-/// `History::check_concurrent` can partition by key; uncapped smoke uses shared `register`.
-pub fn register_key(client_id: usize, verify_max_ops: Option<usize>) -> Vec<u8> {
-    if verify_max_ops.is_some() {
-        format!("register-{client_id}").into_bytes()
-    } else {
-        b"register".to_vec()
-    }
+/// Shared register key (jepsen-design W1). All clients use `register` for PUT/GET.
+pub fn register_key(_client_id: usize, _verify_max_ops: Option<usize>) -> Vec<u8> {
+    b"register".to_vec()
 }
 
 /// Workload configuration.
@@ -58,7 +53,18 @@ fn stats_indicates_leader(stats: &str) -> bool {
     stats.contains("\"role\":\"leader\"") || stats.contains("role: leader")
 }
 
+fn applied_index_from_stats(stats: &str) -> Option<u64> {
+    let needle = "\"applied_index\":";
+    let start = stats.find(needle)? + needle.len();
+    let rest = &stats[start..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
 async fn connect_leader(nodes: &[SocketAddr]) -> Option<KayaClient> {
+    let mut best: Option<(u64, KayaClient)> = None;
     for node in nodes {
         let Ok(Ok(mut client)) =
             timeout(Duration::from_millis(500), KayaClient::connect(*node)).await
@@ -68,11 +74,14 @@ async fn connect_leader(nodes: &[SocketAddr]) -> Option<KayaClient> {
         client.set_max_redirects(REGISTER_MAX_REDIRECTS);
         if let Ok(Ok(stats)) = timeout(CLIENT_OP_TIMEOUT, client.stats()).await {
             if stats_indicates_leader(&stats) {
-                return Some(client);
+                let applied = applied_index_from_stats(&stats).unwrap_or(0);
+                if best.as_ref().is_none_or(|(idx, _)| applied > *idx) {
+                    best = Some((applied, client));
+                }
             }
         }
     }
-    None
+    best.map(|(_, client)| client)
 }
 
 fn record_completed(
@@ -82,15 +91,9 @@ fn record_completed(
     result: OperationResult,
     op_start: Instant,
     verify_max_ops: Option<usize>,
+    op_end: Instant,
 ) -> bool {
-    history.try_record_timed(
-        verify_max_ops,
-        client_id,
-        op,
-        result,
-        op_start,
-        Instant::now(),
-    )
+    history.try_record_timed(verify_max_ops, client_id, op, result, op_start, op_end)
 }
 
 /// Type of workload to generate.
@@ -260,12 +263,25 @@ async fn run_client(
     }
 }
 
-async fn register_get_confirmed(nodes: &[SocketAddr], key: &[u8]) -> Option<Option<Vec<u8>>> {
-    for _ in 0..6 {
+/// Wall-clock interval covering only the confirmed leader round-trips (not leader-election retries).
+struct ConfirmedOp {
+    result: OperationResult,
+    start: Instant,
+    end: Instant,
+}
+
+async fn register_get_confirmed(
+    nodes: &[SocketAddr],
+    key: &[u8],
+    wgl_strict: bool,
+) -> Option<ConfirmedOp> {
+    let attempts = if wgl_strict { 10 } else { 6 };
+    for _ in 0..attempts {
         let Some(mut client) = connect_leader(nodes).await else {
             sleep(Duration::from_millis(25)).await;
             continue;
         };
+        let start = Instant::now();
         let first = match timeout(CLIENT_OP_TIMEOUT, client.get(key)).await {
             Ok(Ok(value)) => value,
             _ => {
@@ -273,29 +289,69 @@ async fn register_get_confirmed(nodes: &[SocketAddr], key: &[u8]) -> Option<Opti
                 continue;
             }
         };
-        match timeout(CLIENT_OP_TIMEOUT, client.get(key)).await {
-            Ok(Ok(second)) if second == first => return Some(first),
-            _ => sleep(Duration::from_millis(25)).await,
+        let second = match timeout(CLIENT_OP_TIMEOUT, client.get(key)).await {
+            Ok(Ok(value)) => value,
+            _ => {
+                sleep(Duration::from_millis(25)).await;
+                continue;
+            }
+        };
+        if first != second {
+            sleep(Duration::from_millis(25)).await;
+            continue;
+        }
+        if wgl_strict {
+            let Some(mut witness) = connect_leader(nodes).await else {
+                sleep(Duration::from_millis(25)).await;
+                continue;
+            };
+            match timeout(CLIENT_OP_TIMEOUT, witness.get(key)).await {
+                Ok(Ok(third)) if third == first => {
+                    return Some(ConfirmedOp {
+                        result: OperationResult::Value(first),
+                        start,
+                        end: Instant::now(),
+                    });
+                }
+                _ => sleep(Duration::from_millis(25)).await,
+            }
+        } else {
+            return Some(ConfirmedOp {
+                result: OperationResult::Value(first),
+                start,
+                end: Instant::now(),
+            });
         }
     }
     None
 }
 
-async fn register_put_confirmed(nodes: &[SocketAddr], key: &[u8], value: &[u8]) -> bool {
+async fn register_put_confirmed(
+    nodes: &[SocketAddr],
+    key: &[u8],
+    value: &[u8],
+) -> Option<ConfirmedOp> {
     for _ in 0..6 {
         let Some(mut client) = connect_leader(nodes).await else {
             sleep(Duration::from_millis(25)).await;
             continue;
         };
+        let start = Instant::now();
         match timeout(CLIENT_OP_TIMEOUT, client.put(key, value)).await {
             Ok(Ok(())) => match timeout(CLIENT_OP_TIMEOUT, client.get(key)).await {
-                Ok(Ok(Some(readback))) if readback == value => return true,
+                Ok(Ok(Some(readback))) if readback == value => {
+                    return Some(ConfirmedOp {
+                        result: OperationResult::Ok,
+                        start,
+                        end: Instant::now(),
+                    });
+                }
                 _ => sleep(Duration::from_millis(25)).await,
             },
             _ => sleep(Duration::from_millis(25)).await,
         }
     }
-    false
+    None
 }
 
 async fn run_register_op<R: Rng>(
@@ -310,97 +366,61 @@ async fn run_register_op<R: Rng>(
     let key = register_key(client_id, verify_max_ops);
     let key_ref = key.as_slice();
 
-    // WGL gate: per-client keys, concurrent clients, real wall-clock intervals.
-    if verify_max_ops.is_some() {
-        if rng.gen_bool(0.7) {
-            let op = Op::Get { key: key.clone() };
-            match timeout(CLIENT_OP_TIMEOUT, client.get(key_ref)).await {
-                Ok(Ok(value)) => {
-                    record_completed(
-                        history,
-                        client_id,
-                        op,
-                        OperationResult::Value(value),
-                        op_start,
-                        verify_max_ops,
-                    );
-                }
-                Ok(Err(e)) => {
-                    record_completed(
-                        history,
-                        client_id,
-                        op,
-                        OperationResult::Error(e.to_string()),
-                        op_start,
-                        verify_max_ops,
-                    );
-                }
-                Err(_) => {}
-            }
-        } else {
-            let value: [u8; 8] = rng.gen();
-            let op = Op::Put {
-                key: key.clone(),
-                value: value.to_vec(),
-            };
-            match timeout(CLIENT_OP_TIMEOUT, client.put(key_ref, &value)).await {
-                Ok(Ok(())) => {
-                    record_completed(
-                        history,
-                        client_id,
-                        op,
-                        OperationResult::Ok,
-                        op_start,
-                        verify_max_ops,
-                    );
-                }
-                Ok(Err(e)) => {
-                    record_completed(
-                        history,
-                        client_id,
-                        op,
-                        OperationResult::Error(e.to_string()),
-                        op_start,
-                        verify_max_ops,
-                    );
-                }
-                Err(_) => {}
-            }
+    // Leader-confirmed observations; WGL uses real wall-clock intervals (concurrent clients).
+    if verify_max_ops.is_none() {
+        if let Some(leader_client) = connect_leader(nodes).await {
+            *client = leader_client;
         }
-        return;
     }
 
-    // Smoke: shared `register` key with leader-confirmed observations.
-    if let Some(leader_client) = connect_leader(nodes).await {
-        *client = leader_client;
+    let wgl = verify_max_ops.is_some();
+    if wgl {
+        sleep(Duration::from_micros(rng.gen_range(0..5_000))).await;
     }
+    let do_get = if wgl {
+        !history.is_empty() && rng.gen_bool(0.35)
+    } else {
+        rng.gen_bool(0.7)
+    };
 
-    if rng.gen_bool(0.7) {
+    if do_get {
         let op = Op::Get { key: key.clone() };
-        if let Some(value) = register_get_confirmed(nodes, key_ref).await {
+        if let Some(confirmed) = register_get_confirmed(nodes, key_ref, wgl).await {
+            let (start, end) = if wgl {
+                (confirmed.start, confirmed.end)
+            } else {
+                (op_start, Instant::now())
+            };
             record_completed(
                 history,
                 client_id,
                 op,
-                OperationResult::Value(value),
-                op_start,
+                confirmed.result,
+                start,
                 verify_max_ops,
+                end,
             );
         }
-    } else {
+    } else if !wgl || history.len() < verify_max_ops.unwrap_or(usize::MAX) {
         let value: [u8; 8] = rng.gen();
         let op = Op::Put {
             key: key.clone(),
             value: value.to_vec(),
         };
-        if register_put_confirmed(nodes, key_ref, &value).await {
+        if let Some(confirmed) = register_put_confirmed(nodes, key_ref, &value).await {
+            let (start, end) = if wgl {
+                (confirmed.start, confirmed.end)
+            } else {
+                (op_start, Instant::now())
+            };
             record_completed(
                 history,
                 client_id,
                 op,
-                OperationResult::Ok,
-                op_start,
+                confirmed.result,
+                start,
                 verify_max_ops,
+                end,
             );
         }
     }
@@ -427,6 +447,7 @@ async fn run_counter_op<R: Rng>(
                     OperationResult::Value(value),
                     op_start,
                     verify_max_ops,
+                    Instant::now(),
                 );
             }
             Ok(Err(e)) => {
@@ -437,6 +458,7 @@ async fn run_counter_op<R: Rng>(
                     OperationResult::Error(e.to_string()),
                     op_start,
                     verify_max_ops,
+                    Instant::now(),
                 );
             }
             Err(_) => {}
@@ -459,6 +481,7 @@ async fn run_counter_op<R: Rng>(
                     OperationResult::Error(e.to_string()),
                     op_start,
                     verify_max_ops,
+                    Instant::now(),
                 );
                 return;
             }
@@ -479,6 +502,7 @@ async fn run_counter_op<R: Rng>(
                     OperationResult::Ok,
                     op_start,
                     verify_max_ops,
+                    Instant::now(),
                 );
             }
             Ok(Err(e)) => {
@@ -489,6 +513,7 @@ async fn run_counter_op<R: Rng>(
                     OperationResult::Error(e.to_string()),
                     op_start,
                     verify_max_ops,
+                    Instant::now(),
                 );
             }
             Err(_) => {}
@@ -523,6 +548,7 @@ async fn run_set_op<R: Rng>(
                     OperationResult::Ok,
                     op_start,
                     verify_max_ops,
+                    Instant::now(),
                 );
             }
             Ok(Err(e)) => {
@@ -533,6 +559,7 @@ async fn run_set_op<R: Rng>(
                     OperationResult::Error(e.to_string()),
                     op_start,
                     verify_max_ops,
+                    Instant::now(),
                 );
             }
             Err(_) => {}
@@ -551,6 +578,7 @@ async fn run_set_op<R: Rng>(
                     OperationResult::Scan(items),
                     op_start,
                     verify_max_ops,
+                    Instant::now(),
                 );
             }
             Ok(Err(e)) => {
@@ -561,6 +589,7 @@ async fn run_set_op<R: Rng>(
                     OperationResult::Error(e.to_string()),
                     op_start,
                     verify_max_ops,
+                    Instant::now(),
                 );
             }
             Err(_) => {}
@@ -594,6 +623,7 @@ async fn run_map_op<R: Rng>(
                     OperationResult::Ok,
                     op_start,
                     verify_max_ops,
+                    Instant::now(),
                 );
             }
             Ok(Err(e)) => {
@@ -604,6 +634,7 @@ async fn run_map_op<R: Rng>(
                     OperationResult::Error(e.to_string()),
                     op_start,
                     verify_max_ops,
+                    Instant::now(),
                 );
             }
             Err(_) => {}
@@ -621,6 +652,7 @@ async fn run_map_op<R: Rng>(
                     OperationResult::Value(value),
                     op_start,
                     verify_max_ops,
+                    Instant::now(),
                 );
             }
             Ok(Err(e)) => {
@@ -631,6 +663,7 @@ async fn run_map_op<R: Rng>(
                     OperationResult::Error(e.to_string()),
                     op_start,
                     verify_max_ops,
+                    Instant::now(),
                 );
             }
             Err(_) => {}
@@ -643,9 +676,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn register_key_partitions_under_wgl_cap() {
-        assert_eq!(register_key(0, Some(WGL_VERIFY_MAX_OPS)), b"register-0");
-        assert_eq!(register_key(3, Some(WGL_VERIFY_MAX_OPS)), b"register-3");
+    fn register_key_is_always_shared_register() {
+        assert_eq!(register_key(0, Some(WGL_VERIFY_MAX_OPS)), b"register");
+        assert_eq!(register_key(3, Some(WGL_VERIFY_MAX_OPS)), b"register");
         assert_eq!(register_key(0, None), b"register");
     }
 }
