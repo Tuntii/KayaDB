@@ -1,7 +1,7 @@
 //! Client protocol: PUT/GET/DELETE/SCAN routing and membership proposals.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use kaya_engine::{ReadOptions, ScanOptions};
@@ -50,8 +50,16 @@ pub(crate) async fn client_accept_loop(
     self_raft: SocketAddr,
     self_client: SocketAddr,
     operator_token: Option<String>,
+    network_partitioned: Option<Arc<AtomicBool>>,
 ) {
     while let Ok((stream, _peer)) = listener.accept().await {
+        if network_partitioned
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::SeqCst))
+        {
+            drop(stream);
+            continue;
+        }
         let r = raft.clone();
         let e = engine.clone();
         let p = pending.clone();

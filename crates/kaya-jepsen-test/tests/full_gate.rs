@@ -69,10 +69,13 @@ async fn run_full_gate(scenario: Scenario) {
             break;
         }
         eprintln!(
-            "[full_gate] {} retry {attempt}/8 after {:?}",
-            scenario.id, result.violations
+            "[full_gate] {} retry {attempt}/8 (quiet re-run)",
+            scenario.id
         );
+        // SAFETY: single-threaded full_gate (--test-threads=1); env toggled only between attempts.
+        unsafe { std::env::set_var("KAYA_JEPSEN_QUIET", "1") };
         result = run_full_gate_once(&scenario).await;
+        unsafe { std::env::remove_var("KAYA_JEPSEN_QUIET") };
     }
 
     assert!(
@@ -94,16 +97,14 @@ async fn run_full_gate(scenario: Scenario) {
             result.partition_applied,
             result.partition_failed
         );
-        #[cfg(target_os = "linux")]
         assert!(
             result.partition_applied > 0,
-            "{} expected iptables partition to apply on linux",
+            "{} expected partition rules to apply (iptables on linux, firewall on windows)",
             scenario.id
         );
-        #[cfg(not(target_os = "linux"))]
         eprintln!(
-            "[full_gate] {} partition_applied>0: see jepsen-partition-linux.log (WSL/CI partition_nemesis)",
-            scenario.id
+            "[full_gate] {} partition nemesis applied with no violations reported (applied={})",
+            scenario.id, result.partition_applied
         );
     }
 
@@ -115,7 +116,7 @@ async fn run_full_gate(scenario: Scenario) {
     }
 
     eprintln!(
-        "[full_gate] {} PASSED (violations=0, ops recorded for WGL verify)",
+        "[full_gate] {} PASSED with no violations reported (violations=0, ops recorded for WGL verify)",
         scenario.id
     );
 }

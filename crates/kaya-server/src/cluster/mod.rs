@@ -21,7 +21,7 @@ mod stats;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use tokio::net::TcpListener;
@@ -72,6 +72,8 @@ pub struct ClusterConfig {
     /// TLS configuration. If Some, both Raft and client listeners (and outbound peer connections)
     /// will use TLS. See kaya_net::TlsConfig.
     pub tls: Option<kaya_net::TlsConfig>,
+    /// When set and true, inbound client/raft connections are dropped (Jepsen partition fallback).
+    pub network_partitioned: Option<Arc<AtomicBool>>,
 }
 
 impl ClusterConfig {
@@ -106,7 +108,14 @@ impl ClusterConfig {
             join_cluster: false,
             operator_token: None,
             tls: None,
+            network_partitioned: None,
         }
+    }
+
+    /// Drop inbound client/raft TCP when the flag is true (in-process partition nemesis).
+    pub fn with_network_partitioned(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.network_partitioned = Some(flag);
+        self
     }
 
     /// Mark this node as a join-cluster participant (seed `--peer` entries required).
@@ -257,9 +266,13 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
             ));
         }
     } else {
-        start_raft_listener(config.raft_addr, incoming_tx)
-            .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::AddrInUse, e))?
+        start_raft_listener(
+            config.raft_addr,
+            incoming_tx,
+            config.network_partitioned.clone(),
+        )
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::AddrInUse, e))?
     };
     eprintln!(
         "[node {}] raft  listening on {raft_bound}",
@@ -311,6 +324,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         self_raft,
         self_client,
         operator_token,
+        config.network_partitioned.clone(),
     );
     // Load persisted Raft snapshot once at startup (before the event loop applies entries).
     snapshot::install_persisted_snapshot_at_startup(

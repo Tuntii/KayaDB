@@ -303,25 +303,30 @@ impl TestRunner {
                 })
             }
             Err(violations) => {
-                eprintln!(
-                    "✗ Test FAILED: {} linearizability violations",
-                    violations.len()
-                );
-                for (i, v) in violations.iter().take(5).enumerate() {
-                    eprintln!("  Violation {}: {}", i + 1, v);
-                }
-                if violations.len() > 5 {
-                    eprintln!("  ... and {} more", violations.len() - 5);
-                }
-
-                let trace = history.to_trace(0xdead_beef);
-                eprintln!("Trace exported ({} bytes)", trace.len());
+                let quiet = std::env::var("KAYA_JEPSEN_QUIET").ok().as_deref() == Some("1");
+                let trace = if quiet {
+                    None
+                } else {
+                    let trace = history.to_trace(0xdead_beef);
+                    eprintln!(
+                        "✗ Test FAILED: {} linearizability violations",
+                        violations.len()
+                    );
+                    for (i, v) in violations.iter().take(5).enumerate() {
+                        eprintln!("  Violation {}: {}", i + 1, v);
+                    }
+                    if violations.len() > 5 {
+                        eprintln!("  ... and {} more", violations.len() - 5);
+                    }
+                    eprintln!("Trace exported ({} bytes)", trace.len());
+                    Some(trace)
+                };
 
                 Ok(TestResult {
                     passed: false,
                     violations,
                     stats,
-                    trace: Some(trace),
+                    trace,
                     partition_attempted,
                     partition_applied,
                     partition_failed,

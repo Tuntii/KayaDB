@@ -5,6 +5,8 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::nemesis::MemberSpec;
@@ -22,6 +24,7 @@ pub struct ManagedNode {
     pub data_dir: PathBuf,
     pub raft_addr: SocketAddr,
     pub client_addr: SocketAddr,
+    network_partitioned: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -68,7 +71,9 @@ impl ClusterController {
                 })
                 .collect();
 
-            let config = ClusterConfig::new(id, &data_dir, raft_addr, client_addr, peers);
+            let network_partitioned = Arc::new(AtomicBool::new(false));
+            let config = ClusterConfig::new(id, &data_dir, raft_addr, client_addr, peers)
+                .with_network_partitioned(network_partitioned.clone());
             let handle = spawn_node(config);
 
             nodes.push(ManagedNode {
@@ -76,6 +81,7 @@ impl ClusterController {
                 data_dir,
                 raft_addr,
                 client_addr,
+                network_partitioned,
                 handle: Some(handle),
             });
         }
@@ -102,8 +108,10 @@ impl ClusterController {
         let data_dir = self.base_dir.join(format!("node{id}"));
         std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
 
-        let config =
-            ClusterConfig::new(id, &data_dir, raft_addr, client_addr, seeds).with_join_cluster();
+        let network_partitioned = Arc::new(AtomicBool::new(false));
+        let config = ClusterConfig::new(id, &data_dir, raft_addr, client_addr, seeds)
+            .with_join_cluster()
+            .with_network_partitioned(network_partitioned.clone());
         let handle = spawn_node(config);
 
         self.nodes.push(ManagedNode {
@@ -111,6 +119,7 @@ impl ClusterController {
             data_dir,
             raft_addr,
             client_addr,
+            network_partitioned,
             handle: Some(handle),
         });
         Ok(())
@@ -215,47 +224,52 @@ impl ClusterController {
             handle.abort();
         }
 
+        node.network_partitioned.store(false, Ordering::SeqCst);
         let config =
-            ClusterConfig::new(id, &node.data_dir, node.raft_addr, node.client_addr, peers);
+            ClusterConfig::new(id, &node.data_dir, node.raft_addr, node.client_addr, peers)
+                .with_network_partitioned(node.network_partitioned.clone());
         node.handle = Some(spawn_node(config));
         Ok(())
     }
 
-    /// Block loopback TCP traffic to a node's client and raft ports (Linux iptables).
+    /// Partition a node: in-process inbound drop (always) plus best-effort OS rules.
     pub async fn partition_node(&self, id: u64) -> Result<(), String> {
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = id;
-            Err("partition requires linux".into())
-        }
+        let node = self.node(id)?;
+        node.network_partitioned.store(true, Ordering::SeqCst);
+        let client_port = node.client_addr.port();
+        let raft_port = node.raft_addr.port();
         #[cfg(target_os = "linux")]
         {
-            let node = self.node(id)?;
             let comment = iptables_comment(id);
-            for port in [node.client_addr.port(), node.raft_addr.port()] {
-                iptables_insert_drop(port, &comment)?;
+            for port in [client_port, raft_port] {
+                let _ = iptables_insert_drop(port, &comment);
             }
-            Ok(())
         }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = windows_firewall_block(id, client_port, raft_port);
+        }
+        Ok(())
     }
 
-    /// Remove iptables DROP rules previously added by [`Self::partition_node`].
+    /// Heal partition: clear in-process flag and best-effort OS cleanup.
     pub async fn heal_partition(&self, id: u64) -> Result<(), String> {
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = id;
-            Err("partition requires linux".into())
-        }
+        let node = self.node(id)?;
+        node.network_partitioned.store(false, Ordering::SeqCst);
         #[cfg(target_os = "linux")]
         {
-            let node = self.node(id)?;
+            let (client_port, raft_port) = (node.client_addr.port(), node.raft_addr.port());
             let comment = iptables_comment(id);
-            for port in [node.client_addr.port(), node.raft_addr.port()] {
-                iptables_delete_drop(port, &comment)?;
+            for port in [client_port, raft_port] {
+                let _ = iptables_delete_drop(port, &comment);
             }
-            iptables_delete_by_comment(&comment)?;
-            Ok(())
+            let _ = iptables_delete_by_comment(&comment);
         }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = windows_firewall_unblock(id);
+        }
+        Ok(())
     }
 
     /// Return all live client listener addresses.
@@ -288,7 +302,6 @@ impl ClusterController {
         let _ = std::fs::remove_dir_all(&self.base_dir);
     }
 
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn node(&self, id: u64) -> Result<&ManagedNode, String> {
         self.nodes
             .iter()
@@ -302,6 +315,60 @@ impl ClusterController {
             .find(|n| n.id == id)
             .ok_or_else(|| format!("node {id} not found"))
     }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_rule_name(id: u64) -> String {
+    format!("KayaDB-Partition-Node{id}")
+}
+
+#[cfg(target_os = "windows")]
+fn windows_firewall_block(id: u64, client_port: u16, raft_port: u16) -> Result<(), String> {
+    let rule = windows_rule_name(id);
+    let ports = format!("{client_port},{raft_port}");
+    let script = format!(
+        "$ErrorActionPreference='Stop'; \
+         New-NetFirewallRule -DisplayName '{rule}' -Direction Outbound -Protocol TCP \
+         -RemoteAddress 127.0.0.1 -RemotePort {ports} -Action Block | Out-Null; \
+         New-NetFirewallRule -DisplayName '{rule}-In' -Direction Inbound -Protocol TCP \
+         -LocalAddress 127.0.0.1 -LocalPort {ports} -Action Block -ErrorAction SilentlyContinue | Out-Null"
+    );
+    let status = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "windows firewall partition failed for node {id} (ports {ports}); run as Administrator?"
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_firewall_unblock(id: u64) -> Result<(), String> {
+    let rule = windows_rule_name(id);
+    let script = format!(
+        "Remove-NetFirewallRule -DisplayName '{rule}' -ErrorAction SilentlyContinue; \
+         Remove-NetFirewallRule -DisplayName '{rule}-In' -ErrorAction SilentlyContinue"
+    );
+    let _ = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .status();
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

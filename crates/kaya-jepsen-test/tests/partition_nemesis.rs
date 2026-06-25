@@ -1,13 +1,10 @@
-//! Linux partition proof: iptables partition nemesis applies at least once.
+//! Partition proof: nemesis applies at least once (iptables on Linux, firewall on Windows).
 //!
-//! Run on Linux CI / nightly: `cargo test -p kaya-jepsen-test --test partition_nemesis -- --ignored --nocapture`
+//! Run: `cargo test -p kaya-jepsen-test --test partition_nemesis partition_nemesis_applies -- --ignored --nocapture`
 
-#[cfg(target_os = "linux")]
 use kaya_jepsen_test::{t2_scenario, ClusterController, TestConfig, TestRunner};
-#[cfg(target_os = "linux")]
 use std::time::Duration;
 
-#[cfg(target_os = "linux")]
 async fn run_partition_proof_once() -> kaya_jepsen_test::TestResult {
     let mut scenario = t2_scenario();
     scenario.duration_secs = 12;
@@ -32,9 +29,8 @@ async fn run_partition_proof_once() -> kaya_jepsen_test::TestResult {
     result
 }
 
-#[cfg(target_os = "linux")]
 #[tokio::test]
-#[ignore = "linux partition proof — nightly with sudo/iptables"]
+#[ignore = "partition proof — nightly with sudo/iptables or Administrator firewall"]
 async fn partition_nemesis_applies() {
     eprintln!("[partition_nemesis] T2-style scenario: assert partition_applied > 0");
     let result = run_partition_proof_once().await;
@@ -49,25 +45,17 @@ async fn partition_nemesis_applies() {
     );
     assert!(
         result.partition_applied > 0,
-        "iptables partition should apply on linux (attempted={}, failed={})",
+        "partition rules should apply (attempted={}, failed={})",
         result.partition_attempted,
         result.partition_failed
     );
     assert!(
         result.passed,
-        "linearizability should hold under partition: {:?}",
+        "linearizability should hold under partition with no violations reported: {:?}",
         result.violations
     );
     eprintln!(
-        "[partition_nemesis] PASSED partition_applied={}",
+        "[partition_nemesis] PASSED partition_applied={} with no violations reported",
         result.partition_applied
-    );
-}
-
-#[cfg(not(target_os = "linux"))]
-#[tokio::test]
-async fn partition_nemesis_linux_only_gate() {
-    eprintln!(
-        "[partition_nemesis] SKIP: partition_applied>0 proof requires linux CI (see jepsen.yml full-suite)"
     );
 }

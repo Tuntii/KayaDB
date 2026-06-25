@@ -178,11 +178,12 @@ async fn send_to_addr(addr: SocketAddr, envs: &[Envelope]) -> std::io::Result<()
 pub async fn start_raft_listener(
     addr: SocketAddr,
     tx: mpsc::Sender<Envelope>,
+    network_partitioned: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> std::io::Result<SocketAddr> {
     let listener = TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     tokio::spawn(async move {
-        accept_raft_loop(listener, tx).await;
+        accept_raft_loop(listener, tx, network_partitioned).await;
     });
     Ok(bound)
 }
@@ -235,7 +236,11 @@ async fn accept_raft_loop_tls(
     }
 }
 
-async fn accept_raft_loop(listener: TcpListener, tx: mpsc::Sender<Envelope>) {
+async fn accept_raft_loop(
+    listener: TcpListener,
+    tx: mpsc::Sender<Envelope>,
+    network_partitioned: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) {
     loop {
         tokio::select! {
             _ = tx.closed() => {
@@ -244,6 +249,13 @@ async fn accept_raft_loop(listener: TcpListener, tx: mpsc::Sender<Envelope>) {
             incoming = listener.accept() => {
                 match incoming {
                     Ok((mut stream, _peer_addr)) => {
+                        if network_partitioned
+                            .as_ref()
+                            .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+                        {
+                            drop(stream);
+                            continue;
+                        }
                         let tx = tx.clone();
                         tokio::spawn(async move {
                             while let Ok(env) = read_raft_envelope(&mut stream).await {
