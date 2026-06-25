@@ -193,13 +193,14 @@ pub async fn start_raft_listener_tls(
     addr: SocketAddr,
     tx: mpsc::Sender<Envelope>,
     tls_config: &TlsConfig,
+    network_partitioned: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> std::io::Result<SocketAddr> {
     let server_config = tls_impl::build_server_config(tls_config).await?;
     let acceptor = TlsAcceptor::from(server_config);
     let listener = TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     tokio::spawn(async move {
-        accept_raft_loop_tls(listener, tx, acceptor).await;
+        accept_raft_loop_tls(listener, tx, acceptor, network_partitioned).await;
     });
     Ok(bound)
 }
@@ -209,6 +210,7 @@ async fn accept_raft_loop_tls(
     listener: TcpListener,
     tx: mpsc::Sender<Envelope>,
     acceptor: TlsAcceptor,
+    network_partitioned: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) {
     loop {
         tokio::select! {
@@ -216,6 +218,13 @@ async fn accept_raft_loop_tls(
             incoming = listener.accept() => {
                 match incoming {
                     Ok((stream, _peer)) => {
+                        if network_partitioned
+                            .as_ref()
+                            .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+                        {
+                            drop(stream);
+                            continue;
+                        }
                         let tx = tx.clone();
                         let acceptor = acceptor.clone();
                         tokio::spawn(async move {
@@ -503,6 +512,20 @@ async fn send_to_addr_tls(
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn raft_listener_partition_flag_parameter_parity() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        type PartitionFlag = Option<Arc<AtomicBool>>;
+        let _plain: fn(SocketAddr, mpsc::Sender<Envelope>, PartitionFlag) -> _ =
+            start_raft_listener;
+        #[cfg(feature = "tls")]
+        {
+            let _tls: fn(SocketAddr, mpsc::Sender<Envelope>, &TlsConfig, PartitionFlag) -> _ =
+                start_raft_listener_tls;
+        }
+    }
 
     #[test]
     fn encode_client_frame_empty_payload() {

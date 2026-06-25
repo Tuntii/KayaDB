@@ -254,9 +254,14 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         #[cfg(feature = "tls")]
         {
             let tls_cfg = config.tls.as_ref().unwrap();
-            start_raft_listener_tls(config.raft_addr, incoming_tx, tls_cfg)
-                .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::AddrInUse, e))?
+            start_raft_listener_tls(
+                config.raft_addr,
+                incoming_tx,
+                tls_cfg,
+                config.network_partitioned.clone(),
+            )
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::AddrInUse, e))?
         }
         #[cfg(not(feature = "tls"))]
         {

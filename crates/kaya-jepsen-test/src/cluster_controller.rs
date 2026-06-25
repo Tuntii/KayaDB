@@ -232,43 +232,23 @@ impl ClusterController {
         Ok(())
     }
 
-    /// Partition a node: in-process inbound drop (always) plus best-effort OS rules.
+    /// Partition a node via OS rules; inbound drop flag is set only on OS success.
     pub async fn partition_node(&self, id: u64) -> Result<(), String> {
         let node = self.node(id)?;
-        node.network_partitioned.store(true, Ordering::SeqCst);
         let client_port = node.client_addr.port();
         let raft_port = node.raft_addr.port();
-        #[cfg(target_os = "linux")]
-        {
-            let comment = iptables_comment(id);
-            for port in [client_port, raft_port] {
-                let _ = iptables_insert_drop(port, &comment);
-            }
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let _ = windows_firewall_block(id, client_port, raft_port);
-        }
+        apply_os_partition(id, client_port, raft_port)?;
+        node.network_partitioned.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    /// Heal partition: clear in-process flag and best-effort OS cleanup.
+    /// Heal partition: remove OS rules and clear inbound drop flag on success.
     pub async fn heal_partition(&self, id: u64) -> Result<(), String> {
         let node = self.node(id)?;
+        let client_port = node.client_addr.port();
+        let raft_port = node.raft_addr.port();
+        heal_os_partition(id, client_port, raft_port)?;
         node.network_partitioned.store(false, Ordering::SeqCst);
-        #[cfg(target_os = "linux")]
-        {
-            let (client_port, raft_port) = (node.client_addr.port(), node.raft_addr.port());
-            let comment = iptables_comment(id);
-            for port in [client_port, raft_port] {
-                let _ = iptables_delete_drop(port, &comment);
-            }
-            let _ = iptables_delete_by_comment(&comment);
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let _ = windows_firewall_unblock(id);
-        }
         Ok(())
     }
 
@@ -314,6 +294,48 @@ impl ClusterController {
             .iter_mut()
             .find(|n| n.id == id)
             .ok_or_else(|| format!("node {id} not found"))
+    }
+}
+
+fn apply_os_partition(id: u64, client_port: u16, raft_port: u16) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let comment = iptables_comment(id);
+        for port in [client_port, raft_port] {
+            iptables_insert_drop(port, &comment)?;
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows_firewall_block(id, client_port, raft_port)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (id, client_port, raft_port);
+        Err("partition requires linux or windows".into())
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn heal_os_partition(id: u64, client_port: u16, raft_port: u16) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let comment = iptables_comment(id);
+        for port in [client_port, raft_port] {
+            iptables_delete_drop(port, &comment)?;
+        }
+        iptables_delete_by_comment(&comment)?;
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows_firewall_unblock(id)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (id, client_port, raft_port);
+        Err("partition requires linux or windows".into())
     }
 }
 

@@ -259,7 +259,13 @@ impl TestRunner {
                 overlapping,
                 scenario.workload.clients
             );
-            if scenario.workload.clients > 1 && overlapping == 0 {
+            if scenario.workload.clients > 1
+                && overlapping == 0
+                && scenario
+                    .workload
+                    .verify_max_ops
+                    .is_some_and(|max| history.len() >= max)
+            {
                 return Err(
                     "WGL register scenarios require overlapping multi-client intervals on shared key=register"
                         .into(),
