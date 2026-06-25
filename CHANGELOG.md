@@ -11,19 +11,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.1.44] — 2026-06-24
+## [0.1.44] — 2026-06-25
 
-M14 closure: Jepsen full suite hardening and Linux `io_uring` Disk prototype.
+M14 closure: Jepsen full suite hardening, honest partition observability, and Linux `io_uring` Disk prototype.
 
 ### Added
 - `PartitionTracker` in `kaya-jepsen-test` with partition attempted/applied/failed stats on `TestResult`
-- `tests/scenario_registry.rs` — registry integrity checks for smoke + T1–T7
+- `tests/scenario_registry.rs` — registry integrity checks for smoke + T1–T7 (shared `register` key, design client counts)
+- `tests/partition_nemesis.rs` — linux-only `partition_nemesis_applies` proof (`applied>0` via iptables)
 - `IoUringDisk` in `kaya-io` behind `io_uring` feature flag (Linux-only, `io-uring` crate)
 - Shared Disk contract helpers (`contract` module) and `tests/disk_contract.rs` for FileDisk/SimDisk/IoUringDisk
 - `KAYA_JEPSEN_FAST=1` env for shortened local full-gate verification
+- `ClusterConfig.network_partitioned` inbound drop flag (set only when OS partition rules succeed)
+- `apply_os_partition` / `heal_os_partition` in `cluster_controller` (iptables / Windows firewall)
+- TLS raft listener partition flag parity (`start_raft_listener_tls` + unit test)
 
 ### Changed
-- Full gate asserts partition nemesis fired for T2/T5 scenarios
+- WGL full gate: shared-key multi-client register workload with leader-confirmation intervals
+- Full gate: `partition_attempted>0` for T2/T5 always; `partition_applied>0` asserted on linux only
+- Partition `applied` counter records OS rule success only (no in-process flag inflation)
 - ROADMAP M14 marked complete; README status updated
 
 ---

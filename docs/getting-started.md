@@ -12,7 +12,7 @@ This guide gets you from zero to a running KayaDB node (or embedded data directo
 | Requirement | Version |
 |---|---|
 | Rust toolchain | 1.85 or later (see `rust-toolchain.toml`) — only if building from source |
-| `kayactl` + `kayadb-server` | [v0.1.43](releases.md) or latest from crates.io |
+| `kayactl` + `kayadb-server` | [v0.1.44](releases.md) or latest from crates.io |
 | Platform | Linux, macOS, or Windows |
 
 Install Rust via [rustup](https://rustup.rs/) if you plan to build from source:

@@ -68,8 +68,8 @@ cargo install kayactl
 cargo install kaya-server --bin kayadb-server
 ```
 
-Pre-built binaries: [GitHub Releases](https://github.com/Tuntii/KayaDB/releases) (`v0.1.43` and later).  
-Rust library: `kaya-engine = "0.1.43"` — see [installation guide](docs/installation.md).
+Pre-built binaries: [GitHub Releases](https://github.com/Tuntii/KayaDB/releases) (`v0.1.44` and later).  
+Rust library: `kaya-engine = "0.1.44"` — see [installation guide](docs/installation.md).
 
 ---
 

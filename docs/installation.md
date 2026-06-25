@@ -2,7 +2,7 @@
 
 KayaDB ships as Rust crates on [crates.io](https://crates.io) and as pre-built binaries on [GitHub Releases](https://github.com/Tuntii/KayaDB/releases). You can also build everything from source.
 
-**Current stable tag:** `v0.1.43` — see [Releases](releases.md) for notes.
+**Current stable tag:** `v0.1.44` — see [Releases](releases.md) for notes.
 
 ---
 
@@ -43,16 +43,16 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-kaya-engine = "0.1.43"
-kaya-io = "0.1.43"
-kaya-core = "0.1.43"
+kaya-engine = "0.1.44"
+kaya-io = "0.1.44"
+kaya-core = "0.1.44"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
 For remote access:
 
 ```toml
-kaya-client = "0.1.43"
+kaya-client = "0.1.44"
 ```
 
 Published crates (dependency order): `kaya-core`, `kaya-io`, `kaya-wal`, `kaya-lsm`, `kaya-engine`, `kaya-raft`, `kaya-net`, `kaya-client`, `kaya-server`, `kayactl`.
@@ -71,11 +71,11 @@ On each `v*` tag, CI builds `kayadb-server` and `kayactl` for:
 | `aarch64-apple-darwin` | `.tar.gz` |
 
 1. Open [GitHub Releases](https://github.com/Tuntii/KayaDB/releases)
-2. Download the archive for your platform (e.g. `kayadb-v0.1.43-x86_64-unknown-linux-gnu.tar.gz`)
+2. Download the archive for your platform (e.g. `kayadb-v0.1.44-x86_64-unknown-linux-gnu.tar.gz`)
 3. Extract and add the binaries to your `PATH`
 
 ```bash
-tar -xzf kayadb-v0.1.43-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf kayadb-v0.1.44-x86_64-unknown-linux-gnu.tar.gz
 ./kayadb-server --data ./data --client-addr 127.0.0.1:7379
 ```
 

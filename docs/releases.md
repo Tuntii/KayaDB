@@ -7,31 +7,30 @@ KayaDB uses [Semantic Versioning](https://semver.org/) while in `0.1.x` pre-1.0 
 
 ---
 
-## Current release — v0.1.43
+## Current release — v0.1.44
 
 | Item | Detail |
 |---|---|
-| **Tag** | [`v0.1.43`](https://github.com/Tuntii/KayaDB/releases/tag/v0.1.43) |
-| **Date** | 2026-06-23 |
-| **Milestone** | M14 — correctness + algorithms |
-| **Workspace version** | `0.1.43` in root `Cargo.toml` |
+| **Tag** | [`v0.1.44`](https://github.com/Tuntii/KayaDB/releases/tag/v0.1.44) |
+| **Date** | 2026-06-25 |
+| **Milestone** | M14 — correctness + algorithms ✅ |
+| **Workspace version** | `0.1.44` in root `Cargo.toml` |
 
 ### Highlights
 
-- **Compaction policies** — L0 merge, leveled, and size-tiered strategies via `CompactionPolicy`
-- **SSTable bloom filter** — v2 footer with configurable `bloom_bits_per_key`
-- **WAL group-commit batching** — `WalBatchWriter` with record/byte/time flush limits
-- **Module splits** — `kaya-engine`, `kaya-server/cluster`, and `kayactl` decomposed for maintainability
-- **CI gates** — chaos-matrix workflow, Jepsen T1–T7 nightly gate, `cargo audit` + `cargo deny`
+- **Jepsen full gate T1–T7** — WGL concurrent linearizability verify; shared-key register workload; `KAYA_JEPSEN_FAST=1` local shortcut
+- **Honest partition observability** — `PartitionTracker`; OS iptables/firewall success drives `applied`; linux CI owns `applied>0` proof
+- **Linux `io_uring` Disk prototype** — `IoUringDisk` behind `io_uring` feature; shared Disk contract tests
+- **Compaction + bloom + WAL batching** (from M14 track) — policy trait, SSTable v2 bloom, `WalBatchWriter`
 
 ### Install this version
 
 ```bash
-cargo install kayactl --version 0.1.43
-cargo install kaya-server --bin kayadb-server --version 0.1.43
+cargo install kayactl --version 0.1.44
+cargo install kaya-server --bin kayadb-server --version 0.1.44
 ```
 
-Or download binaries from the [v0.1.43 GitHub Release](https://github.com/Tuntii/KayaDB/releases/tag/v0.1.43).
+Or download binaries from the [v0.1.44 GitHub Release](https://github.com/Tuntii/KayaDB/releases/tag/v0.1.44).
 
 See [Installation](installation.md) for full options.
 
@@ -54,52 +53,28 @@ Jepsen full gate (`T1–T7`) runs on tag pushes and nightly — see [jepsen-desi
 
 | Source | Rule |
 |---|---|
-| **Tagged releases** | Explicit `v0.1.N` tags (e.g. `v0.1.43`) |
+| **Tagged releases** | Explicit `v0.1.N` tags (e.g. `v0.1.44`) |
 | **crates.io publish helper** | `scripts/smart_publish.ps1` can auto-bump to `0.1.<git-commit-count>` unless `-SkipVersionUpdate` |
 | **Development** | `main` may be ahead of the latest tag; see [CHANGELOG Unreleased](../CHANGELOG.md) |
 
-Pre-1.0 policy: treat every release as a correctness prototype until [M14 exit gates](../ROADMAP.md#m14--correctness--algorithms-) are met.
-
 ---
 
-## Previous tags
+## Release history (recent)
 
-| Tag | Notes |
+| Tag | Summary |
 |---|---|
-| `v0.1.43` | M14 storage algorithms + CI correctness gates (current) |
-| `v0.1.4` | Earlier prototype release |
-
-Full history: [CHANGELOG](../CHANGELOG.md) and git tags on GitHub.
+| `v0.1.44` | M14 closure: Jepsen full gate, honest partition, io_uring prototype (current) |
+| `v0.1.43` | M14 storage algorithms + CI correctness gates |
+| `v0.1.4` | Early public prototype |
 
 ---
 
-## For maintainers
+## Cutting a release
 
-### Cut a release
-
-1. Ensure `CHANGELOG.md` has a dated section for the new version
-2. Bump `[workspace.package] version` in root `Cargo.toml` if not using commit-count auto-bump
-3. Merge CI fixes (e.g. from `tag/v0.1.43` branch when applicable)
-4. Tag and push:
-
-```bash
-git tag -a v0.1.44 -m "v0.1.44: ..."
-git push origin v0.1.44
-```
-
-5. CI builds multi-platform binaries and creates the GitHub Release
-6. Publish crates: `.\scripts\smart_publish.ps1 -SkipVersionUpdate` (or let `publish.yml` run on tag)
-
-### Release branches
+1. Finalize [CHANGELOG.md](../CHANGELOG.md) for the target version
+2. Update this page and [installation.md](installation.md) version pins
+3. Commit on `main`, then tag: `git tag v0.1.N && git push origin v0.1.N`
+4. GitHub Actions builds multi-platform binaries and creates the GitHub Release
+5. Publish crates: `powershell -File scripts/smart_publish.ps1 -SkipVersionUpdate`
 
 Release-prep branches like `tag/v0.1.43` hold CI and publish fixes that land on `main` before or after the tag. Prefer merging those fixes to `main` so docs and workflows stay aligned.
-
-See [Publishing](publishing.md) for docs deploy and crates.io details.
-
----
-
-## Upgrade notes
-
-- **Storage formats** — inspectable and versioned internally; pre-1.0 compatibility is best-effort. Run `kayactl recover --dry-run` after upgrading before serving traffic.
-- **Cluster rolling upgrade** — follow [rolling restart runbook](runbooks/rolling-restart.md); verify leader health with `kayactl status` between nodes.
-- **TLS** — enable `--features tls` on server and CLI when moving from plain TCP; see [security](security.md).

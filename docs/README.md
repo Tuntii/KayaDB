@@ -4,7 +4,7 @@
 
 **Live site:** [https://tuntii.github.io/KayaDB/](https://tuntii.github.io/KayaDB/)
 
-**Current release:** [v0.1.43](releases.md) (M14 — correctness + algorithms)
+**Current release:** [v0.1.44](releases.md) (M14 — correctness + algorithms ✅)
 
 ---
 
