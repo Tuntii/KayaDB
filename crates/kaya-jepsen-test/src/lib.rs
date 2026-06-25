@@ -56,6 +56,4 @@ pub use scenario::{
     scenario_registry, smoke_scenario, t1_scenario, t2_scenario, t3_scenario, t4_scenario,
     t5_scenario, t6_scenario, t7_scenario, Scenario, Topology, VerifyMode, WorkloadHook,
 };
-pub use workload::{
-    reset_register_record_ticks, Workload, WorkloadConfig, WorkloadType, WGL_VERIFY_MAX_OPS,
-};
+pub use workload::{register_key, Workload, WorkloadConfig, WorkloadType, WGL_VERIFY_MAX_OPS};

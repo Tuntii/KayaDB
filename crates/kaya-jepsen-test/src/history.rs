@@ -300,6 +300,44 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn check_concurrent_accepts_overlapping_register_key() {
+        let history = History::new();
+        let key = b"register".to_vec();
+        let t0 = Instant::now();
+        history.record_timed(
+            0,
+            Op::Put {
+                key: key.clone(),
+                value: b"v1".to_vec(),
+            },
+            OperationResult::Ok,
+            t0,
+            t0 + Duration::from_micros(10),
+        );
+        thread::sleep(Duration::from_micros(5));
+        let t1 = Instant::now();
+        history.record_timed(
+            1,
+            Op::Put {
+                key: key.clone(),
+                value: b"v2".to_vec(),
+            },
+            OperationResult::Ok,
+            t1,
+            t1 + Duration::from_micros(10),
+        );
+        let t2 = Instant::now();
+        history.record_timed(
+            0,
+            Op::Get { key },
+            OperationResult::Value(Some(b"v2".to_vec())),
+            t2,
+            t2 + Duration::from_micros(5),
+        );
+        assert!(history.check_concurrent().is_ok());
+    }
+
+    #[test]
     fn check_concurrent_accepts_overlapping_puts() {
         let history = History::new();
         let t0 = Instant::now();

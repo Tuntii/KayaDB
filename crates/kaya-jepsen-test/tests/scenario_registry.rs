@@ -1,8 +1,8 @@
 //! Registry integrity checks for smoke + T1–T7 scenarios.
 
 use kaya_jepsen_test::{
-    scenario_registry, smoke_scenario, t1_scenario, t2_scenario, t3_scenario, t4_scenario,
-    t5_scenario, t6_scenario, t7_scenario, VerifyMode, WGL_VERIFY_MAX_OPS,
+    register_key, scenario_registry, smoke_scenario, t1_scenario, t2_scenario, t3_scenario,
+    t4_scenario, t5_scenario, t6_scenario, t7_scenario, VerifyMode, WGL_VERIFY_MAX_OPS,
 };
 
 #[test]
@@ -71,4 +71,17 @@ fn concurrent_registry_scenarios_declare_wgl_cap_and_design_clients() {
         );
     }
     assert_eq!(smoke_scenario().workload.verify_max_ops, None);
+}
+
+#[test]
+fn wgl_register_uses_per_client_keys_not_shared_register() {
+    for client_id in 0..5 {
+        let key = register_key(client_id, Some(WGL_VERIFY_MAX_OPS));
+        assert_ne!(
+            key, b"register",
+            "WGL cap must partition register by client"
+        );
+        assert_eq!(key, format!("register-{client_id}").into_bytes());
+    }
+    assert_eq!(register_key(0, None), b"register");
 }
