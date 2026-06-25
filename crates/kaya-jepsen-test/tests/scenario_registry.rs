@@ -2,7 +2,7 @@
 
 use kaya_jepsen_test::{
     scenario_registry, smoke_scenario, t1_scenario, t2_scenario, t3_scenario, t4_scenario,
-    t5_scenario, t6_scenario, t7_scenario, VerifyMode,
+    t5_scenario, t6_scenario, t7_scenario, VerifyMode, WGL_VERIFY_MAX_OPS,
 };
 
 #[test]
@@ -35,4 +35,40 @@ fn every_scenario_has_positive_duration_and_clients() {
         assert!(scenario.workload.clients > 0, "{} clients", scenario.id);
         assert!(scenario.nemesis.is_some(), "{} nemesis", scenario.id);
     }
+}
+
+#[test]
+fn concurrent_registry_scenarios_declare_wgl_cap_and_design_clients() {
+    let cases: [(&str, usize); 7] = [
+        ("t1", 5),
+        ("t2", 5),
+        ("t3", 10),
+        ("t4", 5),
+        ("t5", 20),
+        ("t6", 5),
+        ("t7", 5),
+    ];
+    for (id, clients) in cases {
+        let scenario = match id {
+            "t1" => t1_scenario(),
+            "t2" => t2_scenario(),
+            "t3" => t3_scenario(),
+            "t4" => t4_scenario(),
+            "t5" => t5_scenario(),
+            "t6" => t6_scenario(),
+            "t7" => t7_scenario(),
+            _ => unreachable!(),
+        };
+        assert_eq!(scenario.id, id);
+        assert_eq!(
+            scenario.workload.verify_max_ops,
+            Some(WGL_VERIFY_MAX_OPS),
+            "{id} must cap recorded ops for WGL concurrent verify"
+        );
+        assert_eq!(
+            scenario.workload.clients, clients,
+            "{id} client count must match jepsen-design"
+        );
+    }
+    assert_eq!(smoke_scenario().workload.verify_max_ops, None);
 }

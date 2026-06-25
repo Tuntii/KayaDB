@@ -236,6 +236,10 @@ impl TestRunner {
             let _ = timeout(Duration::from_secs(5), handle).await;
         }
 
+        // Let leader election / read-index paths settle before WGL verify.
+        let _ = wait_for_leader_with_retry(cluster, Duration::from_secs(10), 3).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
         if scenario.id == "t7" {
             let _ = cluster.restart_last_killed();
             tokio::time::sleep(Duration::from_secs(2)).await;

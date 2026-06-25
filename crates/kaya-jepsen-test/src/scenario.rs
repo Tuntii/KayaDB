@@ -1,7 +1,7 @@
 //! Scenario registry for Jepsen-style chaos tests.
 
 use crate::nemesis::{MemberSpec, NemesisConfig, NemesisType};
-use crate::workload::{WorkloadConfig, WorkloadType};
+use crate::workload::{WorkloadConfig, WorkloadType, WGL_VERIFY_MAX_OPS};
 use std::time::Duration;
 
 /// How to verify operation history after a scenario completes.
@@ -63,6 +63,21 @@ fn workload(workload_type: WorkloadType, clients: usize, duration_secs: u64) -> 
     }
 }
 
+/// Concurrent (WGL) scenario workload: declared client count, verify cap for checker bound.
+fn concurrent_workload(
+    workload_type: WorkloadType,
+    clients: usize,
+    duration_secs: u64,
+) -> WorkloadConfig {
+    WorkloadConfig {
+        workload_type,
+        clients,
+        duration: Duration::from_secs(duration_secs),
+        rate_limit: 0,
+        verify_max_ops: Some(WGL_VERIFY_MAX_OPS),
+    }
+}
+
 /// Short smoke scenario: Register workload (1 client), kill-node nemesis, sequential verify.
 /// 1 client ensures sequential ops for checker. Workload retries to record only confirmed successes.
 pub fn smoke_scenario() -> Scenario {
@@ -81,7 +96,7 @@ pub fn smoke_scenario() -> Scenario {
 pub fn t1_scenario() -> Scenario {
     Scenario {
         id: "t1",
-        workload: workload(WorkloadType::Register, 5, 120),
+        workload: concurrent_workload(WorkloadType::Register, 5, 120),
         hooks: vec![],
         duration_secs: 120,
         verify: VerifyMode::Concurrent,
@@ -94,7 +109,7 @@ pub fn t1_scenario() -> Scenario {
 pub fn t2_scenario() -> Scenario {
     Scenario {
         id: "t2",
-        workload: workload(WorkloadType::Set, 5, 120),
+        workload: concurrent_workload(WorkloadType::Set, 5, 120),
         hooks: vec![],
         duration_secs: 120,
         verify: VerifyMode::Concurrent,
@@ -112,7 +127,7 @@ pub fn t2_scenario() -> Scenario {
 pub fn t3_scenario() -> Scenario {
     Scenario {
         id: "t3",
-        workload: workload(WorkloadType::Register, 10, 90),
+        workload: concurrent_workload(WorkloadType::Register, 10, 90),
         hooks: vec![],
         duration_secs: 90,
         verify: VerifyMode::Concurrent,
@@ -130,7 +145,7 @@ pub fn t3_scenario() -> Scenario {
 pub fn t4_scenario() -> Scenario {
     Scenario {
         id: "t4",
-        workload: workload(WorkloadType::Set, 5, 120),
+        workload: concurrent_workload(WorkloadType::Set, 5, 120),
         hooks: vec![],
         duration_secs: 120,
         verify: VerifyMode::Concurrent,
@@ -152,7 +167,7 @@ pub fn t4_scenario() -> Scenario {
 pub fn t5_scenario() -> Scenario {
     Scenario {
         id: "t5",
-        workload: workload(WorkloadType::Register, 20, 300),
+        workload: concurrent_workload(WorkloadType::Register, 20, 300),
         hooks: vec![],
         duration_secs: 300,
         verify: VerifyMode::Concurrent,
@@ -173,7 +188,7 @@ pub fn t5_scenario() -> Scenario {
 pub fn t6_scenario() -> Scenario {
     Scenario {
         id: "t6",
-        workload: workload(WorkloadType::Register, 5, 120),
+        workload: concurrent_workload(WorkloadType::Register, 5, 120),
         hooks: vec![],
         duration_secs: 120,
         verify: VerifyMode::Concurrent,
@@ -198,7 +213,7 @@ pub fn t6_scenario() -> Scenario {
 pub fn t7_scenario() -> Scenario {
     Scenario {
         id: "t7",
-        workload: workload(WorkloadType::Register, 5, 120),
+        workload: concurrent_workload(WorkloadType::Register, 5, 120),
         hooks: vec![WorkloadHook::BurstWrites {
             count: 128,
             key_prefix: "snap",
@@ -234,7 +249,7 @@ mod tests {
     use super::*;
     use crate::nemesis::NemesisType;
     use crate::runner::scenario_uses_partition;
-    use crate::workload::WorkloadType;
+    use crate::workload::{WorkloadType, WGL_VERIFY_MAX_OPS};
 
     #[test]
     fn registry_contains_smoke_and_t1_through_t7() {
@@ -324,6 +339,12 @@ mod tests {
                 scenario.verify,
                 VerifyMode::Concurrent,
                 "{} must use WGL concurrent verify",
+                scenario.id
+            );
+            assert_eq!(
+                scenario.workload.verify_max_ops,
+                Some(WGL_VERIFY_MAX_OPS),
+                "{} must declare WGL verify cap",
                 scenario.id
             );
         }

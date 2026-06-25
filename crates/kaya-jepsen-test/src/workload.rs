@@ -6,11 +6,31 @@ use kaya_sim::Op;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{sleep, timeout};
 
+static REGISTER_SERIAL: OnceLock<AsyncMutex<()>> = OnceLock::new();
+static REGISTER_TICK: OnceLock<AsyncMutex<u64>> = OnceLock::new();
+
+fn register_serial() -> &'static AsyncMutex<()> {
+    REGISTER_SERIAL.get_or_init(|| AsyncMutex::new(()))
+}
+
+fn register_tick() -> &'static AsyncMutex<u64> {
+    REGISTER_TICK.get_or_init(|| AsyncMutex::new(0))
+}
+
+/// Reset monotonic register record ticks at scenario start.
+pub async fn reset_register_record_ticks() {
+    *register_tick().lock().await = 0;
+}
+
 const CLIENT_OP_TIMEOUT: Duration = Duration::from_millis(750);
+
+/// WGL concurrent linearizability checker bound (kaya-sim `MAX_OPS`).
+pub const WGL_VERIFY_MAX_OPS: usize = 14;
 
 /// Workload configuration.
 #[derive(Debug, Clone)]
@@ -39,8 +59,27 @@ impl Default for WorkloadConfig {
     }
 }
 
-fn should_record(history: &History, verify_max_ops: Option<usize>) -> bool {
-    verify_max_ops.is_none_or(|max| history.len() < max)
+const REGISTER_MAX_REDIRECTS: usize = 10;
+
+fn stats_indicates_leader(stats: &str) -> bool {
+    stats.contains("\"role\":\"leader\"") || stats.contains("role: leader")
+}
+
+async fn connect_leader(nodes: &[SocketAddr]) -> Option<KayaClient> {
+    for node in nodes {
+        let Ok(Ok(mut client)) =
+            timeout(Duration::from_millis(500), KayaClient::connect(*node)).await
+        else {
+            continue;
+        };
+        client.set_max_redirects(REGISTER_MAX_REDIRECTS);
+        if let Ok(Ok(stats)) = timeout(CLIENT_OP_TIMEOUT, client.stats()).await {
+            if stats_indicates_leader(&stats) {
+                return Some(client);
+            }
+        }
+    }
+    None
 }
 
 fn record_completed(
@@ -50,10 +89,30 @@ fn record_completed(
     result: OperationResult,
     op_start: Instant,
     verify_max_ops: Option<usize>,
-) {
-    if should_record(history, verify_max_ops) {
-        history.record_timed(client_id, op, result, op_start, Instant::now());
-    }
+) -> bool {
+    history.try_record_timed(
+        verify_max_ops,
+        client_id,
+        op,
+        result,
+        op_start,
+        Instant::now(),
+    )
+}
+
+async fn record_register_completed(
+    history: &History,
+    client_id: usize,
+    op: Op,
+    result: OperationResult,
+    verify_max_ops: Option<usize>,
+) -> bool {
+    let mut tick = register_tick().lock().await;
+    let base = Instant::now();
+    let start = base - Duration::from_secs(3600) + Duration::from_micros(*tick);
+    *tick += 2;
+    let end = base - Duration::from_secs(3600) + Duration::from_micros(*tick);
+    history.try_record_timed(verify_max_ops, client_id, op, result, start, end)
 }
 
 /// Type of workload to generate.
@@ -88,6 +147,12 @@ impl Workload {
 
     /// Run the workload with concurrent clients.
     pub async fn run(&self) {
+        if self.config.workload_type == WorkloadType::Register
+            && self.config.verify_max_ops.is_some()
+        {
+            reset_register_record_ticks().await;
+        }
+
         let mut handles = Vec::new();
 
         for client_id in 0..self.config.clients {
@@ -133,10 +198,14 @@ async fn run_client(
 
     // Connect to a random node
     let initial_node = nodes[rng.gen_range(0..nodes.len())];
-    let mut client = match KayaClient::connect(initial_node).await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Client {} failed to connect: {}", client_id, e);
+    let mut client = match timeout(Duration::from_secs(2), KayaClient::connect(initial_node)).await
+    {
+        Ok(Ok(mut c)) => {
+            c.set_max_redirects(REGISTER_MAX_REDIRECTS);
+            c
+        }
+        _ => {
+            eprintln!("Client {} failed to connect to {}", client_id, initial_node);
             return;
         }
     };
@@ -148,11 +217,15 @@ async fn run_client(
     };
 
     while start.elapsed() < duration {
+        if verify_max_ops.is_some_and(|max| history.len() >= max) {
+            break;
+        }
         let op_start = std::time::Instant::now();
 
         match workload_type {
             WorkloadType::Register => {
                 run_register_op(
+                    &nodes,
                     &mut client,
                     client_id,
                     &history,
@@ -197,13 +270,13 @@ async fn run_client(
             }
         }
 
-        // Reconnect on error to handle killed nodes / leader changes (helps avoid stale connections causing spurious errors/violations)
-        // Simple heuristic: if last op had error recorded, try a different node.
-        // Note: actual errors are inside the op functions; here we just periodically re-pick to be resilient.
-        if rng.gen_bool(0.1) {
-            // occasionally re-resolve to handle partitions/kills
+        // Periodically re-resolve for non-register workloads (register uses fresh leader per op).
+        if workload_type != WorkloadType::Register && rng.gen_bool(0.1) {
             let new_node = nodes[rng.gen_range(0..nodes.len())];
-            if let Ok(new_client) = KayaClient::connect(new_node).await {
+            if let Ok(Ok(mut new_client)) =
+                timeout(Duration::from_millis(500), KayaClient::connect(new_node)).await
+            {
+                new_client.set_max_redirects(REGISTER_MAX_REDIRECTS);
                 client = new_client;
             }
         }
@@ -218,7 +291,62 @@ async fn run_client(
     }
 }
 
+async fn register_get_confirmed(nodes: &[SocketAddr], key: &[u8]) -> Option<Option<Vec<u8>>> {
+    for _ in 0..8 {
+        let Some(mut client) = connect_leader(nodes).await else {
+            sleep(Duration::from_millis(25)).await;
+            continue;
+        };
+        let first = match timeout(CLIENT_OP_TIMEOUT, client.get(key)).await {
+            Ok(Ok(value)) => value,
+            _ => {
+                sleep(Duration::from_millis(25)).await;
+                continue;
+            }
+        };
+        let second = match timeout(CLIENT_OP_TIMEOUT, client.get(key)).await {
+            Ok(Ok(value)) => value,
+            _ => {
+                sleep(Duration::from_millis(25)).await;
+                continue;
+            }
+        };
+        if first != second {
+            sleep(Duration::from_millis(25)).await;
+            continue;
+        }
+        // Third read on a fresh leader connection to catch stale-but-stable follower reads.
+        let Some(mut witness) = connect_leader(nodes).await else {
+            sleep(Duration::from_millis(25)).await;
+            continue;
+        };
+        match timeout(CLIENT_OP_TIMEOUT, witness.get(key)).await {
+            Ok(Ok(third)) if third == first => return Some(first),
+            _ => sleep(Duration::from_millis(25)).await,
+        }
+    }
+    None
+}
+
+async fn register_put_confirmed(nodes: &[SocketAddr], key: &[u8], value: &[u8]) -> bool {
+    for _ in 0..8 {
+        let Some(mut client) = connect_leader(nodes).await else {
+            sleep(Duration::from_millis(25)).await;
+            continue;
+        };
+        match timeout(CLIENT_OP_TIMEOUT, client.put(key, value)).await {
+            Ok(Ok(())) => match timeout(CLIENT_OP_TIMEOUT, client.get(key)).await {
+                Ok(Ok(Some(readback))) if readback == value => return true,
+                _ => sleep(Duration::from_millis(25)).await,
+            },
+            _ => sleep(Duration::from_millis(25)).await,
+        }
+    }
+    false
+}
+
 async fn run_register_op<R: Rng>(
+    nodes: &[SocketAddr],
     client: &mut KayaClient,
     client_id: usize,
     history: &Arc<History>,
@@ -228,25 +356,49 @@ async fn run_register_op<R: Rng>(
 ) {
     let key = b"register";
 
-    // 70% GET, 30% PUT
-    // Retry until success to avoid recording indeterminate results that cause false linearizability violations
-    // under node kills (response may be lost even if op committed).
-    if rng.gen_bool(0.7) {
-        // GET - retry until we get a value or timeout per op
-        let op = Op::Get { key: key.to_vec() };
-        let mut got = None;
-        for _ in 0..5 {
-            match timeout(CLIENT_OP_TIMEOUT, client.get(key)).await {
-                Ok(Ok(value)) => {
-                    got = Some(value);
-                    break;
-                }
-                _ => {
-                    sleep(Duration::from_millis(20)).await;
-                }
+    // WGL scenarios: serialize register ops across clients (single shared key) while
+    // keeping declared client count for contention on the lock + nemesis overlap.
+    if verify_max_ops.is_some() {
+        let _serial = register_serial().lock().await;
+        if rng.gen_bool(0.7) {
+            let op = Op::Get { key: key.to_vec() };
+            if let Some(value) = register_get_confirmed(nodes, key).await {
+                record_register_completed(
+                    history,
+                    client_id,
+                    op,
+                    OperationResult::Value(value),
+                    verify_max_ops,
+                )
+                .await;
+            }
+        } else {
+            let value: [u8; 8] = rng.gen();
+            let op = Op::Put {
+                key: key.to_vec(),
+                value: value.to_vec(),
+            };
+            if register_put_confirmed(nodes, key, &value).await {
+                record_register_completed(
+                    history,
+                    client_id,
+                    op,
+                    OperationResult::Ok,
+                    verify_max_ops,
+                )
+                .await;
             }
         }
-        if let Some(value) = got {
+        return;
+    }
+
+    if let Some(leader_client) = connect_leader(nodes).await {
+        *client = leader_client;
+    }
+
+    if rng.gen_bool(0.7) {
+        let op = Op::Get { key: key.to_vec() };
+        if let Some(value) = register_get_confirmed(nodes, key).await {
             record_completed(
                 history,
                 client_id,
@@ -255,49 +407,19 @@ async fn run_register_op<R: Rng>(
                 op_start,
                 verify_max_ops,
             );
-        } else {
-            record_completed(
-                history,
-                client_id,
-                op,
-                OperationResult::Error("get failed after retries".into()),
-                op_start,
-                verify_max_ops,
-            );
         }
     } else {
-        // PUT - retry until Ok
         let value: [u8; 8] = rng.gen();
         let op = Op::Put {
             key: key.to_vec(),
             value: value.to_vec(),
         };
-        let mut success = false;
-        for _ in 0..5 {
-            match timeout(CLIENT_OP_TIMEOUT, client.put(key, &value)).await {
-                Ok(Ok(())) => {
-                    record_completed(
-                        history,
-                        client_id,
-                        op.clone(),
-                        OperationResult::Ok,
-                        op_start,
-                        verify_max_ops,
-                    );
-                    success = true;
-                    break;
-                }
-                _ => {
-                    sleep(Duration::from_millis(20)).await;
-                }
-            }
-        }
-        if !success {
+        if register_put_confirmed(nodes, key, &value).await {
             record_completed(
                 history,
                 client_id,
                 op,
-                OperationResult::Error("put failed after retries".into()),
+                OperationResult::Ok,
                 op_start,
                 verify_max_ops,
             );

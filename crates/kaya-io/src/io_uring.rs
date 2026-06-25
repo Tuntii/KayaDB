@@ -154,7 +154,8 @@ impl Disk for IoUringDisk {
             .write(true)
             .open(self.resolve(path))?;
         let fd = types::Fd(file.as_raw_fd());
-        self.uring_write(fd, offset, buf)
+        self.uring_write_all(fd, offset, buf)?;
+        Ok(buf.len())
     }
 
     async fn append(&self, path: &RelativePath, buf: &[u8]) -> Result<u64> {

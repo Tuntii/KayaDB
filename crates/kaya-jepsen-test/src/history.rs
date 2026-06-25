@@ -67,8 +67,25 @@ impl History {
         start_time: Instant,
         end_time: Instant,
     ) {
+        let _ = self.try_record_timed(None, client_id, op, result, start_time, end_time);
+    }
+
+    /// Record when under an optional cap; returns false if the cap is already reached.
+    pub fn try_record_timed(
+        &self,
+        max_ops: Option<usize>,
+        client_id: usize,
+        op: Op,
+        result: OperationResult,
+        start_time: Instant,
+        end_time: Instant,
+    ) -> bool {
+        let mut ops = self.operations.lock().unwrap();
+        if max_ops.is_some_and(|max| ops.len() >= max) {
+            return false;
+        }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        self.operations.lock().unwrap().push(Operation {
+        ops.push(Operation {
             id,
             client_id,
             op,
@@ -76,6 +93,7 @@ impl History {
             start_time,
             end_time,
         });
+        true
     }
 
     /// Get the number of recorded operations.

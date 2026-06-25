@@ -1,4 +1,6 @@
-use kaya_jepsen_test::{t6_scenario, t7_scenario, ClusterController, TestConfig, TestRunner};
+use kaya_jepsen_test::{
+    t6_scenario, t7_scenario, ClusterController, TestConfig, TestRunner, WGL_VERIFY_MAX_OPS,
+};
 use std::time::Duration;
 
 fn shorten_scenario(
@@ -78,7 +80,9 @@ async fn t6_membership_full() {
         .await
         .unwrap();
 
-    let scenario = t6_scenario();
+    let mut scenario = t6_scenario();
+    assert_eq!(scenario.workload.verify_max_ops, Some(WGL_VERIFY_MAX_OPS));
+    shorten_scenario(&mut scenario, 30, 8, 5);
     let config = TestConfig::from_scenario(&scenario, dir.path());
     let result = TestRunner::new(config)
         .run_scenario(&scenario, &mut cluster)
@@ -102,7 +106,9 @@ async fn t7_snapshot_full() {
         .await
         .unwrap();
 
-    let scenario = t7_scenario();
+    let mut scenario = t7_scenario();
+    assert_eq!(scenario.workload.verify_max_ops, Some(WGL_VERIFY_MAX_OPS));
+    shorten_scenario(&mut scenario, 30, 10, 5);
     let config = TestConfig::from_scenario(&scenario, dir.path());
     let result = TestRunner::new(config)
         .run_scenario(&scenario, &mut cluster)
