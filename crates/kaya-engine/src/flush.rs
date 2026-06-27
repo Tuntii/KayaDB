@@ -106,10 +106,8 @@ impl<D: Disk> Engine<D> {
         self.disk.rename(&current_tmp_rel, &current_rel).await?;
         self.disk.fsync_dir(&root_rel).await?;
 
-        let reader = SstableReader::open_with_cache(
-            sst_bytes,
-            self.config.sstable.block_cache_capacity,
-        )?;
+        let reader =
+            SstableReader::open_with_cache(sst_bytes, self.config.sstable.block_cache_capacity)?;
         self.live_sstables.insert(0, (meta.clone(), reader));
         self.manifest_state.live_tables.push(meta);
         self.manifest_state.last_sequence = last_seq;

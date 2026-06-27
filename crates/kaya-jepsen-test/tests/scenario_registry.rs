@@ -21,8 +21,12 @@ fn rich_scenario_in_registry_uses_clock_skew_and_disk_latency() {
     let rich = rich_nemesis_scenario();
     match &rich.nemesis.as_ref().unwrap().nemesis_type {
         NemesisType::Composite(types) => {
-            assert!(types.iter().any(|t| matches!(t, NemesisType::ClockSkew { .. })));
-            assert!(types.iter().any(|t| matches!(t, NemesisType::DiskLatency { .. })));
+            assert!(types
+                .iter()
+                .any(|t| matches!(t, NemesisType::ClockSkew { .. })));
+            assert!(types
+                .iter()
+                .any(|t| matches!(t, NemesisType::DiskLatency { .. })));
         }
         other => panic!("expected Composite nemesis, got {other:?}"),
     }

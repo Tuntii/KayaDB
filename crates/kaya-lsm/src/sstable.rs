@@ -352,14 +352,10 @@ fn wrap_data_block_for_storage(raw: &[u8], compression_codec: u32) -> Vec<u8> {
         return raw.to_vec();
     }
     let (store_kind, compressed) = match compression_codec {
-        COMPRESSION_CODEC_LZ4 => (
-            BLOCK_STORE_LZ4,
-            lz4_flex::compress_prepend_size(raw),
-        ),
+        COMPRESSION_CODEC_LZ4 => (BLOCK_STORE_LZ4, lz4_flex::compress_prepend_size(raw)),
         COMPRESSION_CODEC_ZSTD => (
             BLOCK_STORE_ZSTD,
-            zstd::encode_all(raw, zstd::DEFAULT_COMPRESSION_LEVEL)
-                .unwrap_or_else(|_| raw.to_vec()),
+            zstd::encode_all(raw, zstd::DEFAULT_COMPRESSION_LEVEL).unwrap_or_else(|_| raw.to_vec()),
         ),
         _ => return raw.to_vec(),
     };
@@ -383,12 +379,10 @@ fn unwrap_data_block_from_storage(stored: &[u8], compression_codec: u32) -> Resu
     }
     match stored[0] {
         BLOCK_STORE_RAW => Ok(stored[1..].to_vec()),
-        BLOCK_STORE_LZ4 => lz4_flex::decompress_size_prepended(&stored[1..]).map_err(|e| {
-            KayaError::corruption(format!("LZ4 data block decompress failed: {e}"))
-        }),
-        BLOCK_STORE_ZSTD => zstd::decode_all(&stored[1..]).map_err(|e| {
-            KayaError::corruption(format!("ZSTD data block decompress failed: {e}"))
-        }),
+        BLOCK_STORE_LZ4 => lz4_flex::decompress_size_prepended(&stored[1..])
+            .map_err(|e| KayaError::corruption(format!("LZ4 data block decompress failed: {e}"))),
+        BLOCK_STORE_ZSTD => zstd::decode_all(&stored[1..])
+            .map_err(|e| KayaError::corruption(format!("ZSTD data block decompress failed: {e}"))),
         kind => Err(KayaError::corruption(format!(
             "unknown SSTable block store kind: {kind}"
         ))),
@@ -471,8 +465,7 @@ fn estimate_block_size(entries: &[SstEntry], prefix_compression: bool) -> usize 
                 } else {
                     common_prefix_len(&entries[i - 1].key, &e.key)
                 };
-                21 + e.key.len().saturating_sub(shared)
-                    + e.value.as_ref().map_or(0, |v| v.len())
+                21 + e.key.len().saturating_sub(shared) + e.value.as_ref().map_or(0, |v| v.len())
             })
             .sum::<usize>()
             + 8
@@ -979,13 +972,12 @@ impl SstableBuilder {
         }
 
         let compression_codec = resolve_compression_codec(&self.options);
-        let format_version = if compression_codec != COMPRESSION_CODEC_NONE
-            || self.options.prefix_compression
-        {
-            SST_VERSION
-        } else {
-            SST_VERSION_V2
-        };
+        let format_version =
+            if compression_codec != COMPRESSION_CODEC_NONE || self.options.prefix_compression {
+                SST_VERSION
+            } else {
+                SST_VERSION_V2
+            };
 
         // Footer
         let footer = SstFooter {
@@ -1169,9 +1161,7 @@ impl SstableReader {
         let raw = unwrap_data_block_from_storage(stored, self.footer.compression_codec)?;
         let entries = decode_data_block(&raw)?;
         if let Some(cache) = &self.block_cache {
-            cache
-                .borrow_mut()
-                .insert(ie.block_offset, entries.clone());
+            cache.borrow_mut().insert(ie.block_offset, entries.clone());
         }
         Ok(entries)
     }
@@ -1553,7 +1543,7 @@ mod tests {
         });
         for i in 0_u8..20 {
             let key = format!("metric:{i:02}").into_bytes();
-            builder.add(entry_put(&key, &vec![i; 128], u64::from(i) + 1));
+            builder.add(entry_put(&key, &[i; 128], u64::from(i) + 1));
         }
         let bytes = builder.finish().unwrap();
         let footer = decode_footer(&bytes).unwrap();

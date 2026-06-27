@@ -293,11 +293,15 @@ mod tests {
         match &nemesis.nemesis_type {
             NemesisType::Composite(types) => {
                 assert!(
-                    types.iter().any(|t| matches!(t, NemesisType::ClockSkew { .. })),
+                    types
+                        .iter()
+                        .any(|t| matches!(t, NemesisType::ClockSkew { .. })),
                     "rich scenario must include ClockSkew"
                 );
                 assert!(
-                    types.iter().any(|t| matches!(t, NemesisType::DiskLatency { .. })),
+                    types
+                        .iter()
+                        .any(|t| matches!(t, NemesisType::DiskLatency { .. })),
                     "rich scenario must include DiskLatency"
                 );
             }

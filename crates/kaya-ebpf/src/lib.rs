@@ -20,6 +20,14 @@ pub mod linux {
         "Requires clang, llvm, bpf-linker or libbpf; not needed for `cargo test --workspace`.";
 
     /// Syscall groups traced by `scripts/ebpf/durability-syscalls.bt`.
-    pub const DURABILITY_SYSCALLS: &[&str] =
-        &["write", "writev", "pwrite64", "fsync", "fdatasync", "rename", "unlink", "fsyncdir"];
+    pub const DURABILITY_SYSCALLS: &[&str] = &[
+        "write",
+        "writev",
+        "pwrite64",
+        "fsync",
+        "fdatasync",
+        "rename",
+        "unlink",
+        "fsyncdir",
+    ];
 }

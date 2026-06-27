@@ -466,6 +466,17 @@ impl Nemesis {
     }
 }
 
+async fn find_leader(endpoints: &[SocketAddr]) -> Option<SocketAddr> {
+    for &addr in endpoints {
+        if let Ok((status, body)) = roundtrip(addr, 5, &[]).await {
+            if status == STATUS_OK && String::from_utf8(body).ok().as_deref() == Some("leader") {
+                return Some(addr);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod rich_nemesis_tests {
     use super::*;
@@ -509,17 +520,9 @@ mod rich_nemesis_tests {
             other => panic!("expected InjectDiskLatency, got {other:?}"),
         }
         assert!(matches!(rx.try_recv().unwrap(), NemesisAction::Sleep(_)));
-        assert!(matches!(rx.try_recv().unwrap(), NemesisAction::ClearDiskLatency));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NemesisAction::ClearDiskLatency
+        ));
     }
-}
-
-async fn find_leader(endpoints: &[SocketAddr]) -> Option<SocketAddr> {
-    for &addr in endpoints {
-        if let Ok((status, body)) = roundtrip(addr, 5, &[]).await {
-            if status == STATUS_OK && String::from_utf8(body).ok().as_deref() == Some("leader") {
-                return Some(addr);
-            }
-        }
-    }
-    None
 }

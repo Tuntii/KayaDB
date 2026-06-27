@@ -260,10 +260,8 @@ impl<D: Disk> Engine<D> {
             let sst_len = self.disk.file_len(&sst_rel).await?;
             let mut sst_buf = vec![0u8; sst_len as usize];
             self.disk.read_at(&sst_rel, 0, &mut sst_buf).await?;
-            let reader = SstableReader::open_with_cache(
-                sst_buf,
-                self.config.sstable.block_cache_capacity,
-            )?;
+            let reader =
+                SstableReader::open_with_cache(sst_buf, self.config.sstable.block_cache_capacity)?;
             new_live.push((meta.clone(), reader));
         }
         new_live.sort_by_key(|b| std::cmp::Reverse(b.0.table_id));

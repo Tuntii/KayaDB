@@ -179,11 +179,8 @@ impl<D: Disk> Engine<D> {
             WalWriter::open_at(config.wal.clone(), disk.clone(), next_lsn, next_sequence).await?;
 
         let (manifest_state, live_sstables, manifest_records_replayed, manifest_warnings) =
-            recovery::load_manifest_and_sstables(
-                disk.clone(),
-                config.sstable.block_cache_capacity,
-            )
-            .await?;
+            recovery::load_manifest_and_sstables(disk.clone(), config.sstable.block_cache_capacity)
+                .await?;
         let next_table_id = manifest_state
             .live_tables
             .iter()
@@ -374,10 +371,8 @@ impl<D: Disk> Engine<D> {
         self.disk.rename(&current_tmp_rel, &current_rel).await?;
         self.disk.fsync_dir(&root_rel).await?;
 
-        let new_reader = SstableReader::open_with_cache(
-            sst_bytes,
-            self.config.sstable.block_cache_capacity,
-        )?;
+        let new_reader =
+            SstableReader::open_with_cache(sst_bytes, self.config.sstable.block_cache_capacity)?;
         let mut new_live: Vec<(TableMetadata, SstableReader)> = Vec::new();
         for (meta, reader) in self.live_sstables.drain(..) {
             if !input_set.contains(&meta.table_id) {
@@ -591,7 +586,8 @@ mod tests {
 
             let mut engine2 = Engine::open(config, disk).await.unwrap();
             assert_eq!(
-                engine2.get(b"metric:10", ReadOptions::default())
+                engine2
+                    .get(b"metric:10", ReadOptions::default())
                     .await
                     .unwrap(),
                 Some(vec![10u8; 64]),
