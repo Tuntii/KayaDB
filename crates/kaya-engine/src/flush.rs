@@ -22,10 +22,8 @@ impl<D: Disk> Engine<D> {
         let table_id = self.next_table_id;
         self.next_table_id += 1;
 
-        let mut builder = SstableBuilder::new(
-            self.config.sstable.block_target_bytes,
-            self.config.sstable.bloom_bits_per_key,
-        );
+        let mut builder =
+            SstableBuilder::with_options(kaya_lsm::SstableBuildOptions::from(&self.config.sstable));
         for (key, record) in self.memtable.iter() {
             match record {
                 ValueRecord::Put { value, sequence } => {
@@ -48,7 +46,10 @@ impl<D: Disk> Engine<D> {
         let sst_file_size = sst_bytes.len() as u64;
         let (sst_table_min_seq, sst_table_max_seq, smallest_key, largest_key) = {
             let footer = decode_footer(&sst_bytes)?;
-            let reader_tmp = SstableReader::open(sst_bytes.clone())?;
+            let reader_tmp = SstableReader::open_with_cache(
+                sst_bytes.clone(),
+                self.config.sstable.block_cache_capacity,
+            )?;
             let entries = reader_tmp.all_entries()?;
             let sk = entries.first().map(|e| e.key.clone()).unwrap_or_default();
             let lk = entries.last().map(|e| e.key.clone()).unwrap_or_default();
@@ -105,7 +106,10 @@ impl<D: Disk> Engine<D> {
         self.disk.rename(&current_tmp_rel, &current_rel).await?;
         self.disk.fsync_dir(&root_rel).await?;
 
-        let reader = SstableReader::open(sst_bytes)?;
+        let reader = SstableReader::open_with_cache(
+            sst_bytes,
+            self.config.sstable.block_cache_capacity,
+        )?;
         self.live_sstables.insert(0, (meta.clone(), reader));
         self.manifest_state.live_tables.push(meta);
         self.manifest_state.last_sequence = last_seq;

@@ -50,7 +50,7 @@ let _ = outbound;
 - `handle(env)` — processes a single inbound message and returns outbound messages
 - `propose(command)` — leader-only append of a new command
 - `broadcast()` — immediately emit `AppendEntries` after a proposal
-- `status()` — inspect the node’s current role, term, and commit progress
+- `status()` — inspect the node's current role, term, and commit progress
 - `drain_applied()` — retrieve newly applied commands for the host state machine
 
 ## Where it is used
@@ -61,12 +61,12 @@ let _ = outbound;
 
 ## Scope and limitations
 
-This crate focuses on the current KayaDB prototype’s consensus loop.
+This crate focuses on the KayaDB consensus loop. Raft log snapshots (`InstallSnapshot` RPC) and dynamic membership (joint consensus) are implemented in `kaya-server` and exercised by integration and Jepsen tests.
 
-**Work in progress (as of 2026-06-14):**
-- Raft log snapshots + compaction (`InstallSnapshot` RPC, compacted log prefix in `MemLog`).
-- Once stable, dynamic membership will be the next major addition.
+**Remaining limitations:**
+- Reads go through the leader (ReadIndex); follower reads are not supported.
+- In-process TLS and operator-token enforcement live in `kaya-server`, not in this crate.
 
-See ROADMAP.md and the production readiness items in `memory/TODOLIST.md`.
+See [ROADMAP.md](../../ROADMAP.md) for parallel tracks and accepted deployment gaps in [security.md](../../docs/security.md).
 
 See the [workspace README](../../README.md) and [architecture docs](../../docs/architecture.md) for the larger system context.

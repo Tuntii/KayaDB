@@ -11,6 +11,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.45] — 2026-06-27
+
+Post-M14 storage + correctness tracks: ZSTD/prefix compression, block cache stats, eBPF stub, rich Jepsen nemesis, manifest TLA+.
+
+### Added
+- SSTable v3 with optional LZ4 data-block compression (`SstableConfig.compression_lz4`, `SstableBuilder::with_options`)
+- Per-reader decoded block LRU cache (`SstableConfig.block_cache_capacity`, `SstableReader::open_with_cache`)
+- ZSTD compression (`SstableConfig.compression_zstd`, `COMPRESSION_CODEC_ZSTD`) and prefix compression with restart points (`SstableConfig.prefix_compression`)
+- Public `SstableReader::block_cache_stats()` and `SstableBuildOptions` builder config
+- `kaya-ebpf` stub crate (Linux-gated module, non-hard workspace dep) + `scripts/ebpf/durability-syscalls.bt`
+- Jepsen nemesis types `ClockSkew` and `DiskLatency` with runner actions; `rich_nemesis_scenario` in registry
+- TLA+ model `spec/specs/manifest/ManifestCompaction.tla` (+ `.cfg`)
+
+### Changed
+- Removed no-op Clojure Jepsen `workflow_dispatch` stub from `.github/workflows/jepsen.yml` (Rust-native harness is the sole CI gate)
+- Updated stale docs: `KayaDB_Explained` (EN/TR), `kaya-raft` README, `productization.md`, `publishing.md`, `SUMMARY.md`, `jepsen-design.md`, `ROADMAP.md`
+- New SSTables without compression remain format v2; LZ4/ZSTD tables use v3 footer (`SST_FOOTER_LEN_V3`)
+
+---
+
 ## [0.1.44] — 2026-06-25
 
 M14 closure: Jepsen full suite hardening, honest partition observability, and Linux `io_uring` Disk prototype.

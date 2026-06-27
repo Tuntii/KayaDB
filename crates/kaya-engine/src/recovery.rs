@@ -84,6 +84,7 @@ pub async fn recover<D: Disk>(config: EngineConfig, disk: Arc<D>) -> Result<Reco
 /// Returns `(ManifestState, live_sstables sorted newest-first, manifest_records_replayed, manifest_warnings)`.
 pub(crate) async fn load_manifest_and_sstables<D: Disk>(
     disk: Arc<D>,
+    block_cache_capacity: usize,
 ) -> Result<(
     ManifestState,
     Vec<(TableMetadata, SstableReader)>,
@@ -125,7 +126,7 @@ pub(crate) async fn load_manifest_and_sstables<D: Disk>(
         let sst_len = disk.file_len(&sst_rel).await?;
         let mut sst_buf = vec![0u8; sst_len as usize];
         disk.read_at(&sst_rel, 0, &mut sst_buf).await?;
-        let reader = SstableReader::open(sst_buf)?;
+        let reader = SstableReader::open_with_cache(sst_buf, block_cache_capacity)?;
         live_sstables.push((meta.clone(), reader));
     }
     // Sort newest-first (highest table_id first).

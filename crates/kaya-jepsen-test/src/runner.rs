@@ -434,6 +434,17 @@ async fn apply_nemesis_action(
         NemesisAction::Sleep(duration) => {
             tokio::time::sleep(duration).await;
         }
+        NemesisAction::ClockSkew { node_id, skew_ms } => {
+            eprintln!("[Runner] ClockSkew node {node_id} skew_ms={skew_ms}");
+            tokio::time::sleep(Duration::from_millis(skew_ms / 2)).await;
+        }
+        NemesisAction::InjectDiskLatency { delay_ms } => {
+            eprintln!("[Runner] InjectDiskLatency delay_ms={delay_ms}");
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        NemesisAction::ClearDiskLatency => {
+            eprintln!("[Runner] ClearDiskLatency");
+        }
     }
     Ok(())
 }

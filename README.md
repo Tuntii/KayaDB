@@ -68,8 +68,8 @@ cargo install kayactl
 cargo install kaya-server --bin kayadb-server
 ```
 
-Pre-built binaries: [GitHub Releases](https://github.com/Tuntii/KayaDB/releases) (`v0.1.44` and later).  
-Rust library: `kaya-engine = "0.1.44"` — see [installation guide](docs/installation.md).
+Pre-built binaries: [GitHub Releases](https://github.com/Tuntii/KayaDB/releases) (`v0.1.45` and later).  
+Rust library: `kaya-engine = "0.1.45"` — see [installation guide](docs/installation.md).
 
 ---
 
@@ -88,7 +88,7 @@ Rust library: `kaya-engine = "0.1.44"` — see [installation guide](docs/install
 | Async Rust client | ✅ Implemented | `kaya-client` with leader redirection support |
 | Operator CLI | ✅ Implemented | Local mode, server mode, inspect, stats, `add-node`/`remove-node` |
 | Production hardening | ✅ M13 | Native TLS (`tls` feature), operator token, mTLS sidecar runbooks, chaos validation |
-| Storage algorithms | ✅ M14 | Compaction policy, bloom filter, WAL batching, io_uring prototype |
+| Storage algorithms | ✅ M14+ | Compaction, bloom, WAL batching, io_uring; block cache + LZ4 (SSTable v3) |
 
 > KayaDB completed M13 productization (2026-06-21) and **M14 correctness+algorithm** (v0.1.44, 2026-06-24): LSM policy upgrades, Jepsen full gate T1–T7, and Linux `io_uring` Disk prototype. It remains a correctness-first distributed KV engine with documented day-2 runbooks — not a fully hardened multi-tenant SaaS database. See [security and deployment notes](docs/security.md) and accepted risks (§7) before any production-like deployment.
 

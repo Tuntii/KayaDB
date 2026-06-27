@@ -5,7 +5,7 @@
 
 > **"Geniş ve yaşayan yol haritası"** — Bu belge hem tarihi başarıları arşivler, hem şu anki odak noktalarını gösterir, hem de uzun vadeli vizyonu (birden fazla paralel track ile) detaylandırır. Tasarım-öncelikli ve correctness-öncelikli felsefe korunur.
 
-**Not (2026-06-16):** M0–M11'in çok detaylı listeleri ve eski "Current snapshot" bölümü bu belgenin okunabilirliğini bozduğu için büyük ölçüde arşivlenmiştir (yukarıdaki "Completed Work — Historical Archive" bölümüne bakın). Bundan sonra roadmap **geniş gelecek vizyonu** + aktif M14 üzerine odaklanacak.  
+**Not (2026-06-16):** M0–M11'in çok detaylı listeleri ve eski "Current snapshot" bölümü bu belgenin okunabilirliğini bozduğu için büyük ölçüde arşivlenmiştir (yukarıdaki "Completed Work — Historical Archive" bölümüne bakın). M14 tamamlandı (2026-06-24); roadmap artık **geniş gelecek vizyonu** + paralel track'lere odaklanıyor.
 
 KayaDB is developed design-first and correctness-first. The roadmap intentionally prioritizes crash consistency, deterministic failure testing and inspectable storage formats before performance or distributed features.
 
@@ -53,7 +53,7 @@ Goal: deepen LSM algorithm choices and distributed correctness proof while keepi
 8. **Jepsen full suite** ✅ — Partition nemesis observability (`PartitionTracker`), scenario registry tests (`scenario_registry.rs`), full gate partition assertions for T2/T5; `KAYA_JEPSEN_FAST=1` for shortened local verification.
 9. **io_uring backend** ✅ — `IoUringDisk` in `kaya-io` behind `io_uring` feature flag (Linux-only); shared `contract` helpers + `tests/disk_contract.rs` for FileDisk/SimDisk/IoUringDisk parity.
 
-**M14 exit (2026-06-24):** Jepsen full gate T1–T7 pass with WGL concurrent verify; `io_uring` prototype compiles and satisfies Disk contract tests on Linux with `--features io_uring`. Clojure Jepsen harness remains an optional `workflow_dispatch` stub only.
+**M14 exit (2026-06-24):** Jepsen full gate T1–T7 pass with WGL concurrent verify; `io_uring` prototype compiles and satisfies Disk contract tests on Linux with `--features io_uring`. Rust-native `kaya-jepsen-test` is the sole CI correctness gate; external Clojure Jepsen is out-of-band only (no in-repo harness).
 
 ---
 
@@ -638,13 +638,13 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 
 - Linux `io_uring` Disk implementasyonu (yeni async backend) — ✅ M14 (`IoUringDisk`, `io_uring` feature)
 - Gelişmiş compaction stratejileri (leveled + tiered hibrit) — ✅ `CompactionPolicy` wired (M14)
-- Block cache, bloom filter, compression seçenekleri (SSTable v2) — ✅ bloom filter (M14); block cache + compression ⬜
+- Block cache, bloom filter, compression seçenekleri (SSTable v2/v3) — ✅ bloom (M14); block cache + LZ4 compression (v0.1.45 track)
 - WAL group-commit batching — ✅ `WalBatchWriter` (M14)
 - Daha iyi fsync_dir semantiği + directory sync optimizasyonları
 
 ### Track C: Distributed Correctness & Chaos
 
-- Tam Clojure Jepsen suite (gerçek cluster + dynamic membership + snapshots altında) — optional stub; Rust-native T1–T7 full gate ✅ M14
+- Tam Clojure Jepsen suite (gerçek cluster + dynamic membership + snapshots altında) — out-of-band only; Rust-native T1–T7 full gate ✅ M14
 - Rust-native Jepsen CI (smoke + nightly T1–T7) — ✅ M14
 - Chaos matrix CI (DiskFull, NetworkPartition, ClockSkew) — ✅ M14
 - Daha zengin nemesis seti + clock skew, disk latency injection — 🟡 partial (clock skew in chaos matrix)
@@ -692,6 +692,4 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 
 Bu yapı ile roadmap **hem tarihsel olarak temiz, hem çok geniş (8 paralel track), hem de eBPF/observability için somut actionable adımlar** içeriyor.
 
-Devam etmek istersen bir track'i derinleştirelim (örneğin Track A'daki bir sonraki eBPF script'ini veya kaya-ebpf stub'unu yapalım). 
-
-Ne dersin?
+Devam etmek istersen bir track'i derinleştirelim (örneğin Track A'daki eBPF script'leri veya Track B'deki block cache + compression).

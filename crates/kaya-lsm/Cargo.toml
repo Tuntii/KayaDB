@@ -14,6 +14,8 @@ categories.workspace = true
 
 [dependencies]
 kaya-core.workspace = true
+lz4_flex = "0.11"
+zstd = "0.13"
 
 [lib]
 path = "src/lib.rs"

@@ -1,0 +1,28 @@
+#!/usr/bin/env bpftrace
+// Trace durability-related syscalls for a KayaDB data directory.
+// Usage (Linux, root): bpftrace durability-syscalls.bt /path/to/data_dir
+
+BEGIN
+{
+    printf("durability syscall trace — filter paths containing: %s\n", str($1));
+}
+
+tracepoint:syscalls:sys_enter_write,
+tracepoint:syscalls:sys_enter_writev,
+tracepoint:syscalls:sys_enter_pwrite64,
+tracepoint:syscalls:sys_enter_fsync,
+tracepoint:syscalls:sys_enter_fdatasync,
+tracepoint:syscalls:sys_enter_rename,
+tracepoint:syscalls:sys_enter_unlink,
+tracepoint:syscalls:sys_enter_fsyncdir
+{
+    @path = str(args.filename);
+    if (strpos(@path, str($1)) >= 0) {
+        printf("%d %s %s\n", pid, comm, probe);
+    }
+}
+
+END
+{
+    clear(@path);
+}

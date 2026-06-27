@@ -1,6 +1,6 @@
 # KayaDB Explained: What It Actually Is and How It Works
 
-**KayaDB** is a **correctness-first, embeddable distributed key-value database** written in Rust. Current release: **v0.1.43** (M14). It is a deployable correctness prototype — not a fully hardened multi-tenant production database — whose primary goal is to make storage bugs **reproducible, inspectable, and eventually impossible to introduce silently**.
+**KayaDB** is a **correctness-first, embeddable distributed key-value database** written in Rust. Current release: **v0.1.44** (M14 complete). It is a deployable correctness prototype — not a fully hardened multi-tenant production database — whose primary goal is to make storage bugs **reproducible, inspectable, and eventually impossible to introduce silently**.
 
 This document is the single place that tries to explain **everything** about KayaDB — philosophy, architecture, components, unique features, how data flows, how testing works, current status, and where it is headed.
 
@@ -204,7 +204,7 @@ There is a complete Rust-native harness (`kaya-jepsen-test`) with:
 - History recording + linearizability checking
 - Process control scripts (cross-platform .sh/.ps1)
 
-Full external Jepsen (Clojure) is planned but deferred until the Rust-native harness and production hardening mature (snapshots and dynamic membership are now in place).
+The Rust-native harness is the sole CI correctness gate (smoke on PR, T1–T7 WGL full gate nightly). External Clojure Jepsen is not vendored; operators may run it out-of-band against a provisioned cluster if desired.
 
 ---
 
@@ -218,9 +218,8 @@ Once the local engine was solid, a Raft prototype was added.
 
 Client library (`kaya-client`) and `kayactl` automatically follow redirects.
 
-Current limitations (v0.1.43):
+Current limitations (v0.1.44):
 - Dynamic membership via joint consensus (operator token required when configured)
-- Raft snapshots exist; log compaction policies are evolving in M14
 - Reads go through the leader (ReadIndex)
 - Full client authZ, data-at-rest encryption, and compliance audit logging are not built-in — see [security §7](security.md#7-accepted-risks-and-future-hardening-m13-exit)
 
@@ -243,7 +242,7 @@ All persistent formats are documented in `spec/docs/` and the inspectors emit hu
 
 ---
 
-## 8. Current Status (v0.1.43 — M14)
+## 8. Current Status (v0.1.44 — M14 complete)
 
 **Shipped and solid:**
 - Full LSM engine (WAL + memtable + SSTable + manifest + compaction policies + bloom filters)
@@ -252,12 +251,13 @@ All persistent formats are documented in `spec/docs/` and the inspectors emit hu
 - Raft cluster with durable state, snapshots, dynamic membership, leader redirection
 - Native TLS (`tls` feature) + operator token for admin ops; mTLS sidecar runbooks
 - `kayactl` + `kaya-client`; day-2 runbooks under `docs/runbooks/`
-- Jepsen-style harness (T1–T7), chaos-matrix CI, fuzz targets, perf regression gate
+- Jepsen-style harness (T1–T7 full gate + partition observability), chaos-matrix CI, fuzz targets, perf regression gate
+- Linux `io_uring` Disk prototype (`kaya-io` `io_uring` feature)
 
-**M14 remaining / accepted gaps:**
-- Jepsen full suite hardening under partition nemesis (in progress)
-- Linux `io_uring` disk backend (planned)
-- Full client authZ, data-at-rest encryption, multi-tenant isolation — documented as accepted deployment risks
+**Accepted deployment gaps (not correctness bugs):**
+- Full client authZ, data-at-rest encryption, multi-tenant isolation — see [security §7](security.md#7-accepted-risks-and-future-hardening-m13-exit)
+
+**Track B (storage):** block cache (LRU per reader) and optional LZ4 compression (SSTable v3) are available via `SstableConfig`; off by default for compression, cache on by default (`block_cache_capacity=64`).
 
 See [security](security.md), [releases](releases.md), and [ROADMAP](../ROADMAP.md) for the honest envelope.
 
@@ -327,4 +327,4 @@ Everything else (LSM details, Raft, CLI, etc.) exists to support that vision.
 
 ---
 
-*This file synthesizes the root README, architecture document, technical specs, roadmap, and crate structure as of v0.1.43 (2026-06-23).*
+*This file synthesizes the root README, architecture document, technical specs, roadmap, and crate structure as of v0.1.44 (2026-06-24).*

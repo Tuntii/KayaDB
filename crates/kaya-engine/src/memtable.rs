@@ -82,9 +82,11 @@ impl<D: Disk> Engine<D> {
         }
         for (_, reader) in &self.live_sstables {
             if let Some(entry) = reader.get(key)? {
+                self.sync_block_cache_stats();
                 return Ok(entry.value);
             }
         }
+        self.sync_block_cache_stats();
         Ok(None)
     }
 
@@ -112,7 +114,20 @@ impl<D: Disk> Engine<D> {
         if let Some(limit) = opts.limit {
             result.truncate(limit);
         }
+        self.sync_block_cache_stats();
         Ok(result)
+    }
+
+    fn sync_block_cache_stats(&mut self) {
+        let mut hits = 0u64;
+        let mut misses = 0u64;
+        for (_, reader) in &self.live_sstables {
+            let s = reader.block_cache_stats();
+            hits += s.hits;
+            misses += s.misses;
+        }
+        self.stats.block_cache_hits = hits;
+        self.stats.block_cache_misses = misses;
     }
 
     pub(crate) fn validate_key(&self, key: &[u8]) -> Result<()> {

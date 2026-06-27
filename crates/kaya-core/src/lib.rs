@@ -12,6 +12,7 @@ pub const DEFAULT_SEGMENT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_MEMTABLE_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_SSTABLE_BLOCK_TARGET_BYTES: usize = 32 * 1024;
 pub const DEFAULT_SSTABLE_BLOOM_BITS_PER_KEY: u32 = 10;
+pub const DEFAULT_SSTABLE_BLOCK_CACHE_CAPACITY: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KayaError {
@@ -231,6 +232,14 @@ pub struct SstableConfig {
     pub block_target_bytes: usize,
     /// Bloom filter bits per key; `0` disables the filter.
     pub bloom_bits_per_key: u32,
+    /// Decoded data blocks cached per open `SstableReader`; `0` disables the cache.
+    pub block_cache_capacity: usize,
+    /// When true, new SSTables use LZ4-compressed data blocks (format v3).
+    pub compression_lz4: bool,
+    /// When true, new SSTables use ZSTD-compressed data blocks (format v3; takes precedence over LZ4).
+    pub compression_zstd: bool,
+    /// When true, data blocks use prefix compression with restart points.
+    pub prefix_compression: bool,
 }
 
 impl Default for SstableConfig {
@@ -238,6 +247,10 @@ impl Default for SstableConfig {
         Self {
             block_target_bytes: DEFAULT_SSTABLE_BLOCK_TARGET_BYTES,
             bloom_bits_per_key: DEFAULT_SSTABLE_BLOOM_BITS_PER_KEY,
+            block_cache_capacity: DEFAULT_SSTABLE_BLOCK_CACHE_CAPACITY,
+            compression_lz4: false,
+            compression_zstd: false,
+            prefix_compression: false,
         }
     }
 }

@@ -60,6 +60,10 @@ pub enum NemesisType {
     RemoveMember(u64),
     /// Run multiple nemesis types sequentially each cycle
     Composite(Vec<NemesisType>),
+    /// Inject logical clock skew (harness sleep simulating fast/slow node)
+    ClockSkew { node_id: u64, skew_ms: u64 },
+    /// Inject disk latency on I/O path (harness sleep before heal)
+    DiskLatency { delay_ms: u64 },
     /// No-op (for testing)
     None,
 }
@@ -76,6 +80,9 @@ pub enum NemesisAction {
     KillFollower,
     RestartFollower,
     Sleep(Duration),
+    ClockSkew { node_id: u64, skew_ms: u64 },
+    InjectDiskLatency { delay_ms: u64 },
+    ClearDiskLatency,
 }
 
 /// A nemesis that injects failures.
@@ -207,6 +214,14 @@ impl Nemesis {
             NemesisType::RemoveMember(node_id) => {
                 Self::remove_member_roundtrip(&[], *node_id).await;
             }
+            NemesisType::ClockSkew { node_id, skew_ms } => {
+                eprintln!("[Nemesis] ClockSkew node {node_id} skew_ms={skew_ms}");
+                sleep(Duration::from_millis(*skew_ms / 2)).await;
+            }
+            NemesisType::DiskLatency { delay_ms } => {
+                eprintln!("[Nemesis] DiskLatency delay_ms={delay_ms}");
+                sleep(Duration::from_millis(*delay_ms)).await;
+            }
             NemesisType::Composite(_) => {}
             NemesisType::None => {}
         }
@@ -286,6 +301,19 @@ impl Nemesis {
             }
             NemesisType::RemoveMember(node_id) => {
                 let _ = cmd_tx.send(NemesisAction::RemoveMember(*node_id));
+            }
+            NemesisType::ClockSkew { node_id, skew_ms } => {
+                let _ = cmd_tx.send(NemesisAction::ClockSkew {
+                    node_id: *node_id,
+                    skew_ms: *skew_ms,
+                });
+            }
+            NemesisType::DiskLatency { delay_ms } => {
+                let _ = cmd_tx.send(NemesisAction::InjectDiskLatency {
+                    delay_ms: *delay_ms,
+                });
+                let _ = cmd_tx.send(NemesisAction::Sleep(failure_duration));
+                let _ = cmd_tx.send(NemesisAction::ClearDiskLatency);
             }
             NemesisType::Composite(_) => {}
             NemesisType::None => {}
@@ -435,6 +463,53 @@ impl Nemesis {
                 .env("CLUSTER_DIR", cluster_dir)
                 .output();
         }
+    }
+}
+
+#[cfg(test)]
+mod rich_nemesis_tests {
+    use super::*;
+    use rand::SeedableRng;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn clock_skew_and_disk_latency_emit_actions() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut rng = StdRng::from_entropy();
+
+        Nemesis::emit_controller_action_one(
+            &NemesisType::ClockSkew {
+                node_id: 2,
+                skew_ms: 40,
+            },
+            &mut rng,
+            &tx,
+            &[],
+            Duration::from_millis(5),
+        )
+        .await;
+        match rx.try_recv().unwrap() {
+            NemesisAction::ClockSkew { node_id, skew_ms } => {
+                assert_eq!(node_id, 2);
+                assert_eq!(skew_ms, 40);
+            }
+            other => panic!("expected ClockSkew, got {other:?}"),
+        }
+
+        Nemesis::emit_controller_action_one(
+            &NemesisType::DiskLatency { delay_ms: 25 },
+            &mut rng,
+            &tx,
+            &[],
+            Duration::from_millis(5),
+        )
+        .await;
+        match rx.try_recv().unwrap() {
+            NemesisAction::InjectDiskLatency { delay_ms } => assert_eq!(delay_ms, 25),
+            other => panic!("expected InjectDiskLatency, got {other:?}"),
+        }
+        assert!(matches!(rx.try_recv().unwrap(), NemesisAction::Sleep(_)));
+        assert!(matches!(rx.try_recv().unwrap(), NemesisAction::ClearDiskLatency));
     }
 }
 

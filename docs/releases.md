@@ -7,30 +7,30 @@ KayaDB uses [Semantic Versioning](https://semver.org/) while in `0.1.x` pre-1.0 
 
 ---
 
-## Current release — v0.1.44
+## Current release — v0.1.45
 
 | Item | Detail |
 |---|---|
-| **Tag** | [`v0.1.44`](https://github.com/Tuntii/KayaDB/releases/tag/v0.1.44) |
-| **Date** | 2026-06-25 |
-| **Milestone** | M14 — correctness + algorithms ✅ |
-| **Workspace version** | `0.1.44` in root `Cargo.toml` |
+| **Tag** | [`v0.1.45`](https://github.com/Tuntii/KayaDB/releases/tag/v0.1.45) |
+| **Date** | 2026-06-27 |
+| **Milestone** | Post-M14 tracks A/B/C — storage codecs + correctness artifacts ✅ |
+| **Workspace version** | `0.1.45` in root `Cargo.toml` |
 
 ### Highlights
 
-- **Jepsen full gate T1–T7** — WGL concurrent linearizability verify; shared-key register workload; `KAYA_JEPSEN_FAST=1` local shortcut
-- **Honest partition observability** — `PartitionTracker`; OS iptables/firewall success drives `applied`; linux CI owns `applied>0` proof
-- **Linux `io_uring` Disk prototype** — `IoUringDisk` behind `io_uring` feature; shared Disk contract tests
-- **Compaction + bloom + WAL batching** (from M14 track) — policy trait, SSTable v2 bloom, `WalBatchWriter`
+- **SSTable v3 codecs** — LZ4 + ZSTD data-block compression; prefix compression with restart points; decoded block LRU cache with public hit/miss stats
+- **Rich Jepsen nemesis** — `ClockSkew` and `DiskLatency` injection; `rich_nemesis_scenario` in scenario registry
+- **eBPF stub + scripts** — `kaya-ebpf` workspace crate; `scripts/ebpf/durability-syscalls.bt` for durability syscall tracing
+- **TLA+ manifest model** — `spec/specs/manifest/ManifestCompaction.tla` compaction visibility invariants
 
 ### Install this version
 
 ```bash
-cargo install kayactl --version 0.1.44
-cargo install kaya-server --bin kayadb-server --version 0.1.44
+cargo install kayactl --version 0.1.45
+cargo install kaya-server --bin kayadb-server --version 0.1.45
 ```
 
-Or download binaries from the [v0.1.44 GitHub Release](https://github.com/Tuntii/KayaDB/releases/tag/v0.1.44).
+Or download binaries from the [v0.1.45 GitHub Release](https://github.com/Tuntii/KayaDB/releases/tag/v0.1.45).
 
 See [Installation](installation.md) for full options.
 
@@ -63,7 +63,8 @@ Jepsen full gate (`T1–T7`) runs on tag pushes and nightly — see [jepsen-desi
 
 | Tag | Summary |
 |---|---|
-| `v0.1.44` | M14 closure: Jepsen full gate, honest partition, io_uring prototype (current) |
+| `v0.1.45` | Post-M14: ZSTD/prefix/cache stats, rich nemesis, eBPF stub, manifest TLA+ (current) |
+| `v0.1.44` | M14 closure: Jepsen full gate, honest partition, io_uring prototype |
 | `v0.1.43` | M14 storage algorithms + CI correctness gates |
 | `v0.1.4` | Early public prototype |
 
@@ -77,4 +78,4 @@ Jepsen full gate (`T1–T7`) runs on tag pushes and nightly — see [jepsen-desi
 4. GitHub Actions builds multi-platform binaries and creates the GitHub Release
 5. Publish crates: `powershell -File scripts/smart_publish.ps1 -SkipVersionUpdate`
 
-Release-prep branches like `tag/v0.1.43` hold CI and publish fixes that land on `main` before or after the tag. Prefer merging those fixes to `main` so docs and workflows stay aligned.
+Release-prep branches like `tag/v0.1.44` hold CI and publish fixes that land on `main` before or after the tag. Prefer merging those fixes to `main` so docs and workflows stay aligned.

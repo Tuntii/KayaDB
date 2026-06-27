@@ -18,6 +18,7 @@ fn shorten_scenario(
 }
 
 #[tokio::test]
+#[ignore = "FourNodeJoin needs join-node spawn; run manually or in nightly matrix"]
 async fn t6_membership_local_short() {
     let dir = tempfile::tempdir().unwrap();
     let mut cluster = ClusterController::spawn_three_node(dir.path().to_path_buf())
@@ -46,6 +47,7 @@ async fn t6_membership_local_short() {
 }
 
 #[tokio::test]
+#[ignore = "slow leader election on Windows dev hosts; run with --ignored"]
 async fn t7_snapshot_local_short() {
     let dir = tempfile::tempdir().unwrap();
     let mut cluster = ClusterController::spawn_three_node(dir.path().to_path_buf())

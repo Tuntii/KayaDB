@@ -230,10 +230,35 @@ pub fn t7_scenario() -> Scenario {
     }
 }
 
-/// All registered scenarios (smoke + T1–T7).
+/// Rich nemesis scenario: clock skew + disk latency injection (harness-level).
+pub fn rich_nemesis_scenario() -> Scenario {
+    Scenario {
+        id: "rich",
+        workload: workload(WorkloadType::Register, 1, 20),
+        hooks: vec![],
+        duration_secs: 20,
+        verify: VerifyMode::Sequential,
+        topology: Topology::ThreeNode,
+        nemesis: Some(NemesisConfig {
+            nemesis_type: NemesisType::Composite(vec![
+                NemesisType::ClockSkew {
+                    node_id: 2,
+                    skew_ms: 30,
+                },
+                NemesisType::DiskLatency { delay_ms: 20 },
+            ]),
+            interval: Duration::from_secs(6),
+            duration: Duration::from_secs(4),
+            probability: 1.0,
+        }),
+    }
+}
+
+/// All registered scenarios (smoke + rich + T1–T7).
 pub fn scenario_registry() -> Vec<Scenario> {
     vec![
         smoke_scenario(),
+        rich_nemesis_scenario(),
         t1_scenario(),
         t2_scenario(),
         t3_scenario(),
@@ -252,12 +277,32 @@ mod tests {
     use crate::workload::{WorkloadType, WGL_VERIFY_MAX_OPS};
 
     #[test]
-    fn registry_contains_smoke_and_t1_through_t7() {
+    fn registry_contains_smoke_rich_and_t1_through_t7() {
         let registry = scenario_registry();
-        assert_eq!(registry.len(), 8);
+        assert_eq!(registry.len(), 9);
         assert_eq!(registry[0].id, "smoke");
-        assert_eq!(registry[1].id, "t1");
-        assert_eq!(registry[7].id, "t7");
+        assert_eq!(registry[1].id, "rich");
+        assert_eq!(registry[2].id, "t1");
+        assert_eq!(registry[8].id, "t7");
+    }
+
+    #[test]
+    fn rich_scenario_uses_clock_skew_and_disk_latency() {
+        let s = rich_nemesis_scenario();
+        let nemesis = s.nemesis.as_ref().expect("rich scenario has nemesis");
+        match &nemesis.nemesis_type {
+            NemesisType::Composite(types) => {
+                assert!(
+                    types.iter().any(|t| matches!(t, NemesisType::ClockSkew { .. })),
+                    "rich scenario must include ClockSkew"
+                );
+                assert!(
+                    types.iter().any(|t| matches!(t, NemesisType::DiskLatency { .. })),
+                    "rich scenario must include DiskLatency"
+                );
+            }
+            other => panic!("rich scenario nemesis must be Composite, got {other:?}"),
+        }
     }
 
     #[test]

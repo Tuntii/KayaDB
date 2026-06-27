@@ -4,9 +4,6 @@ name: Jepsen
 # - PR / main: smoke scenario only (sequential verify, kill-node nemesis, <5 min)
 # - Nightly / release tags: full scenario registry T1–T7 (WGL concurrent verify)
 #
-# Optional Clojure Jepsen: no harness is checked into this repo. To experiment with
-# external Jepsen, run workflow_dispatch with jepsen=1 (sets JEPSEN=1 on the job).
-
 on:
   pull_request:
   push:
@@ -25,14 +22,6 @@ on:
         options:
           - smoke
           - full
-      jepsen:
-        description: "Run optional Clojure Jepsen step (JEPSEN=1; requires external harness)"
-        required: false
-        default: "0"
-        type: choice
-        options:
-          - "0"
-          - "1"
 
 jobs:
   smoke:
@@ -87,19 +76,3 @@ jobs:
           name: jepsen-traces
           path: "**/traces/*.jsonl"
           retention-days: 14
-
-  clojure-jepsen:
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.jepsen == '1'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    env:
-      JEPSEN: "1"
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Clojure Jepsen (optional, not in repo)
-        run: |
-          echo "JEPSEN=${JEPSEN}: no Clojure Jepsen harness is vendored in KayaDB."
-          echo "Primary correctness gate is the Rust kaya-jepsen-test harness (smoke + full_gate)."
-          echo "To run external Jepsen: provision a Linux cluster, add your harness, and invoke it here."
-          exit 0

@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-bench"
-version = "0.1.44"
+version = "0.1.45"
 dependencies = [
  "criterion",
  "kaya-core",
@@ -346,7 +346,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-client"
-version = "0.1.44"
+version = "0.1.45"
 dependencies = [
  "kaya-core",
  "kaya-net",
@@ -356,14 +356,18 @@ dependencies = [
 
 [[package]]
 name = "kaya-core"
-version = "0.1.44"
+version = "0.1.45"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
+name = "kaya-ebpf"
+version = "0.1.45"
+
+[[package]]
 name = "kaya-engine"
-version = "0.1.44"
+version = "0.1.45"
 dependencies = [
  "kaya-core",
  "kaya-io",
@@ -375,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-io"
-version = "0.1.44"
+version = "0.1.45"
 dependencies = [
  "io-uring",
  "kaya-core",
@@ -385,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-jepsen-test"
-version = "0.1.44"
+version = "0.1.45"
 dependencies = [
  "kaya-client",
  "kaya-net",
@@ -398,14 +402,16 @@ dependencies = [
 
 [[package]]
 name = "kaya-lsm"
-version = "0.1.44"
+version = "0.1.45"
 dependencies = [
  "kaya-core",
+ "lz4_flex",
+ "zstd",
 ]
 
 [[package]]
 name = "kaya-net"
-version = "0.1.44"
+version = "0.1.45"
 dependencies = [
  "kaya-core",
  "kaya-raft",
@@ -417,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-raft"
-version = "0.1.44"
+version = "0.1.45"
 dependencies = [
  "kaya-core",
  "kaya-io",
@@ -425,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-server"
-version = "0.1.44"
+version = "0.1.45"
 dependencies = [
  "kaya-client",
  "kaya-core",
@@ -439,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-sim"
-version = "0.1.44"
+version = "0.1.45"
 dependencies = [
  "kaya-core",
  "kaya-engine",
@@ -452,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-wal"
-version = "0.1.44"
+version = "0.1.45"
 dependencies = [
  "kaya-core",
  "kaya-io",
@@ -461,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "kayactl"
-version = "0.1.44"
+version = "0.1.45"
 dependencies = [
  "kaya-core",
  "kaya-engine",
@@ -489,6 +495,15 @@ name = "log"
 version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+dependencies = [
+ "twox-hash",
+]
 
 [[package]]
 name = "memchr"
@@ -533,6 +548,12 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "pkg-config"
+version = "0.3.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "ppv-lite86"
@@ -870,6 +891,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "twox-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1040,3 +1067,31 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.0.16+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+dependencies = [
+ "cc",
+ "pkg-config",
+]

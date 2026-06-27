@@ -1,9 +1,9 @@
 # KayaDB Expanded Implementation Roadmap
 
-**Status:** Draft v0.1  
+**Status:** Historical archive (M0–M14 complete as of 2026-06-24)  
 **Source:** PRD + technical spec expansion  
 
-Bu dosya spec'leri uygulanabilir issue setlerine böler. Issue numaraları GitHub'a taşınırken değişebilir; burada kalıcı ID olarak `KD-*` kullanılır.
+Bu dosya spec'leri uygulanabilir issue setlerine böler. KD-* maddeleri başlangıç planıdır; güncel durum için [ROADMAP.md](../../ROADMAP.md) kullanın. Issue numaraları GitHub'a taşınırken değişebilir; burada kalıcı ID olarak `KD-*` kullanılır.
 
 ---
 

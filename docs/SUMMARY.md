@@ -10,7 +10,7 @@
 
 * [Installation](installation.md) — crates.io, release binaries, build from source
 * [Getting Started](getting-started.md) — first server, first commands, cluster quick-start
-* [Releases & Versioning](releases.md) — tags, v0.1.43, upgrade notes
+* [Releases & Versioning](releases.md) — tags, v0.1.44, upgrade notes
 
 ## Using KayaDB
 

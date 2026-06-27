@@ -48,6 +48,10 @@ pub struct EngineStats {
     pub compaction_max_us: u64,
     /// Number of compact() operations performed.
     pub compaction_count: u64,
+    /// Aggregate decoded block-cache hits across open SSTable readers.
+    pub block_cache_hits: u64,
+    /// Aggregate decoded block-cache misses across open SSTable readers.
+    pub block_cache_misses: u64,
 }
 
 use kaya_io::Disk;

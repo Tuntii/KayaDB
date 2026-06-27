@@ -53,7 +53,8 @@ pub use nemesis::{MemberSpec, Nemesis, NemesisConfig, NemesisType};
 pub use partition::PartitionTracker;
 pub use runner::{scenario_uses_partition, TestConfig, TestResult, TestRunner};
 pub use scenario::{
-    scenario_registry, smoke_scenario, t1_scenario, t2_scenario, t3_scenario, t4_scenario,
-    t5_scenario, t6_scenario, t7_scenario, Scenario, Topology, VerifyMode, WorkloadHook,
+    rich_nemesis_scenario, scenario_registry, smoke_scenario, t1_scenario, t2_scenario,
+    t3_scenario, t4_scenario, t5_scenario, t6_scenario, t7_scenario, Scenario, Topology,
+    VerifyMode, WorkloadHook,
 };
 pub use workload::{register_key, Workload, WorkloadConfig, WorkloadType, WGL_VERIFY_MAX_OPS};

@@ -1,6 +1,8 @@
 # M13 Authenticated Transport + Ops Runbooks Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status: COMPLETE (2026-06-21).** All tasks below were implemented; checkboxes retained for audit trail.
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Advance M13 productization by delivering authenticated transport foundations (operator-protected membership changes + complete mTLS sidecar story) and day-2 operations runbooks, while polishing the security enforcement table.
 
@@ -47,7 +49,7 @@
 - Create: `crates/kaya-server/src/operator_auth.rs` (small)
 - Test: unit tests in the new module or existing codec tests
 
-- [ ] **Step 1: Write the failing test for credential encoding**
+- [x] **Step 1: Write the failing test for credential encoding**
 Add a simple test that a token can be attached to admin payloads and roundtrips.
 
 ```rust
@@ -63,12 +65,12 @@ fn operator_token_roundtrips() {
 
 Expected: FAIL (function not exist).
 
-- [ ] **Step 2: Run the test**
+- [x] **Step 2: Run the test**
 ```bash
 cargo test -p kaya-net operator_token -- --nocapture
 ```
 
-- [ ] **Step 3: Implement minimal token attachment helpers**
+- [x] **Step 3: Implement minimal token attachment helpers**
 Add (or extend existing member payload helpers):
 
 ```rust
@@ -93,12 +95,12 @@ pub fn decode_admin_payload(data: &[u8]) -> Result<(u8, Vec<u8>, Option<String>)
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 ```bash
 cargo test -p kaya-net -- --quiet
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 ```bash
 git add crates/kaya-net/src/...
 git commit -m "feat(net): add optional operator token framing for admin ops"
@@ -114,10 +116,10 @@ git commit -m "feat(net): add optional operator token framing for admin ops"
 - Modify: `crates/kaya-server/src/command.rs` or wherever opcodes are dispatched
 - Test: `crates/kaya-server/src/integration_tests.rs`
 
-- [ ] **Step 1: Add `--operator-token` / `KAYA_OPERATOR_TOKEN` to server**
+- [x] **Step 1: Add `--operator-token` / `KAYA_OPERATOR_TOKEN` to server**
 Parse in main.rs. Store in a way passed down to command handling (e.g. Arc<String> or in ClusterConfig).
 
-- [ ] **Step 2: Write failing integration test**
+- [x] **Step 2: Write failing integration test**
 ```rust
 #[tokio::test]
 async fn add_member_requires_correct_operator_token() {
@@ -130,7 +132,7 @@ async fn add_member_requires_correct_operator_token() {
 
 Run and confirm FAIL.
 
-- [ ] **Step 3: Implement enforcement in the ADD/REMOVE paths**
+- [x] **Step 3: Implement enforcement in the ADD/REMOVE paths**
 When handling opcode 7/8 (or ConfigChange), require matching token if server was started with one.
 
 Example sketch (to be placed correctly):
@@ -146,12 +148,12 @@ if let Some(expected) = &self.operator_token {
 
 Also handle the case when no token configured (current open behavior for backward compat in dev).
 
-- [ ] **Step 4: Run the new test + existing membership tests**
+- [x] **Step 4: Run the new test + existing membership tests**
 ```bash
 cargo test -p kaya-server membership -- --test-threads=1 --nocapture
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 ```bash
 git commit -m "feat(server): enforce optional operator token on ADD/REMOVE_MEMBER"
 ```
@@ -163,17 +165,17 @@ git commit -m "feat(server): enforce optional operator token on ADD/REMOVE_MEMBE
 **Files:**
 - Modify: `crates/kayactl/src/main.rs` (around add-node / remove-node + global flags)
 
-- [ ] **Step 1: Add flag parsing**
+- [x] **Step 1: Add flag parsing**
 Support `--operator-token <tok>` and `KAYA_OPERATOR_TOKEN` env.
 
-- [ ] **Step 2: Wire token into the membership client calls**
+- [x] **Step 2: Wire token into the membership client calls**
 Pass the token when encoding the admin payload for add/remove.
 
-- [ ] **Step 3: Update help / examples in code**
-- [ ] **Step 4: Manual test**
+- [x] **Step 3: Update help / examples in code**
+- [x] **Step 4: Manual test**
 Build and run `kayactl --help` and a dry usage.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ---
 
@@ -185,15 +187,15 @@ Build and run `kayactl --help` and a dry usage.
 - Modify: `docs/security.md` (expand the ghostunnel section with copy-pasteable commands + warnings)
 - Modify: `docs/runbooks/secure-deployment.md` (new if needed)
 
-- [ ] **Step 1: Write a small cert generation script** (self-signed CA + per-node certs for demo)
-- [ ] **Step 2: Create a docker-compose example** that wraps 3 kaya nodes with ghostunnel (mTLS on public ports, plain to localhost kaya).
-- [ ] **Step 3: Document exact steps** in security.md under a "Production mTLS with Sidecar" subsection, including:
+- [x] **Step 1: Write a small cert generation script** (self-signed CA + per-node certs for demo)
+- [x] **Step 2: Create a docker-compose example** that wraps 3 kaya nodes with ghostunnel (mTLS on public ports, plain to localhost kaya).
+- [x] **Step 3: Document exact steps** in security.md under a "Production mTLS with Sidecar" subsection, including:
   - How to generate certs
   - How to start the wrappers
   - How to tell kayactl / clients to talk to the TLS port
   - Firewall note
-- [ ] **Step 4: Add a runbook entry** `docs/runbooks/mtls-sidecar.md`
-- [ ] **Step 5: Commit + verify links**
+- [x] **Step 4: Add a runbook entry** `docs/runbooks/mtls-sidecar.md`
+- [x] **Step 5: Commit + verify links**
 
 ---
 
@@ -206,11 +208,11 @@ Build and run `kayactl --help` and a dry usage.
   - `backup-restore.md` (simple tar of data_dir + notes)
   - `detecting-split-brain.md` (using kayactl status + apply index comparison)
 
-- [ ] **Step 1: Write `add-remove-node.md`** using existing `kayactl add-node` / `remove-node` + the new `--operator-token`.
-- [ ] **Step 2: Write `rolling-restart.md`** (one node at a time, wait for leader, check applied index).
-- [ ] **Step 3: Write lightweight backup/restore guidance** (rsync/tar of data_dir + WAL/manifest/SST precautions).
-- [ ] **Step 4: Split-brain detection runbook** (compare terms, applied indices, last log across nodes using kayactl status + inspect).
-- [ ] **Step 5: Cross-link from README, usage.md, productization.md, and cli-reference.md**
+- [x] **Step 1: Write `add-remove-node.md`** using existing `kayactl add-node` / `remove-node` + the new `--operator-token`.
+- [x] **Step 2: Write `rolling-restart.md`** (one node at a time, wait for leader, check applied index).
+- [x] **Step 3: Write lightweight backup/restore guidance** (rsync/tar of data_dir + WAL/manifest/SST precautions).
+- [x] **Step 4: Split-brain detection runbook** (compare terms, applied indices, last log across nodes using kayactl status + inspect).
+- [x] **Step 5: Cross-link from README, usage.md, productization.md, and cli-reference.md**
 
 ---
 
@@ -221,15 +223,15 @@ Build and run `kayactl --help` and a dry usage.
 - Modify: `docs/productization.md`
 - Modify: `ROADMAP.md`
 
-- [ ] **Step 1: Expand the table** with rows for:
+- [x] **Step 1: Expand the table** with rows for:
   - Operator credential on admin ops
   - Snapshot refcount protection (already partially added)
   - Client opcode validation
   - Any other current guard (frame limits etc.)
-- [ ] **Step 2: Add a "Current Enforcement Status" section** that points at code locations.
-- [ ] **Step 3: Update gate status** in productization.md and ROADMAP.md for gate 2 (partial, sidecar + credential) and gate 5.
-- [ ] **Step 4: Run any link/doc checks if present**
-- [ ] **Step 5: Commit**
+- [x] **Step 2: Add a "Current Enforcement Status" section** that points at code locations.
+- [x] **Step 3: Update gate status** in productization.md and ROADMAP.md for gate 2 (partial, sidecar + credential) and gate 5.
+- [x] **Step 4: Run any link/doc checks if present**
+- [x] **Step 5: Commit**
 
 ---
 
@@ -239,14 +241,14 @@ Build and run `kayactl --help` and a dry usage.
 - `crates/kaya-server/src/integration_tests.rs` (add token-protected membership test)
 - Possibly extend one chaos test if membership under auth
 
-- [ ] **Step 1: Add / expand test that exercises protected ADD/REMOVE**
-- [ ] **Step 2: Run full relevant test suite**
+- [x] **Step 1: Add / expand test that exercises protected ADD/REMOVE**
+- [x] **Step 2: Run full relevant test suite**
   ```bash
   cargo test -p kaya-server -- --test-threads=1
   cargo test -p kayactl
   ```
-- [ ] **Step 3: Manual smoke with sidecar scripts** (if docker available)
-- [ ] **Step 4: Commit**
+- [x] **Step 3: Manual smoke with sidecar scripts** (if docker available)
+- [x] **Step 4: Commit**
 
 ---
 

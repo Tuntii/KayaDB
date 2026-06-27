@@ -179,7 +179,11 @@ impl<D: Disk> Engine<D> {
             WalWriter::open_at(config.wal.clone(), disk.clone(), next_lsn, next_sequence).await?;
 
         let (manifest_state, live_sstables, manifest_records_replayed, manifest_warnings) =
-            recovery::load_manifest_and_sstables(disk.clone()).await?;
+            recovery::load_manifest_and_sstables(
+                disk.clone(),
+                config.sstable.block_cache_capacity,
+            )
+            .await?;
         let next_table_id = manifest_state
             .live_tables
             .iter()
@@ -285,10 +289,8 @@ impl<D: Disk> Engine<D> {
         let new_table_id = self.next_table_id;
         self.next_table_id += 1;
 
-        let mut builder = SstableBuilder::new(
-            self.config.sstable.block_target_bytes,
-            self.config.sstable.bloom_bits_per_key,
-        );
+        let mut builder =
+            SstableBuilder::with_options(kaya_lsm::SstableBuildOptions::from(&self.config.sstable));
         for (key, (seq, value)) in &merged {
             builder.add(SstEntry {
                 key: key.clone(),
@@ -301,7 +303,10 @@ impl<D: Disk> Engine<D> {
 
         let (sst_table_min_seq, sst_table_max_seq, smallest_key, largest_key) = {
             let footer = decode_footer(&sst_bytes)?;
-            let reader_tmp = SstableReader::open(sst_bytes.clone())?;
+            let reader_tmp = SstableReader::open_with_cache(
+                sst_bytes.clone(),
+                self.config.sstable.block_cache_capacity,
+            )?;
             let entries = reader_tmp.all_entries()?;
             let sk = entries.first().map(|e| e.key.clone()).unwrap_or_default();
             let lk = entries.last().map(|e| e.key.clone()).unwrap_or_default();
@@ -369,7 +374,10 @@ impl<D: Disk> Engine<D> {
         self.disk.rename(&current_tmp_rel, &current_rel).await?;
         self.disk.fsync_dir(&root_rel).await?;
 
-        let new_reader = SstableReader::open(sst_bytes)?;
+        let new_reader = SstableReader::open_with_cache(
+            sst_bytes,
+            self.config.sstable.block_cache_capacity,
+        )?;
         let mut new_live: Vec<(TableMetadata, SstableReader)> = Vec::new();
         for (meta, reader) in self.live_sstables.drain(..) {
             if !input_set.contains(&meta.table_id) {
@@ -544,6 +552,51 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(items.len(), 3);
+        });
+    }
+
+    #[test]
+    fn engine_zstd_prefix_cache_flush_get_path() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut config = EngineConfig::default();
+            config.sstable.compression_zstd = true;
+            config.sstable.prefix_compression = true;
+            config.sstable.block_cache_capacity = 32;
+
+            let mut engine = Engine::open(config.clone(), disk.clone()).await.unwrap();
+            for i in 0_u8..24 {
+                let key = format!("metric:{i:02}").into_bytes();
+                let val = vec![i; 64];
+                engine.put(key, val, strict_opts()).await.unwrap();
+            }
+            engine.flush().await.unwrap();
+
+            let key = b"metric:05".to_vec();
+            assert_eq!(
+                engine.get(&key, ReadOptions::default()).await.unwrap(),
+                Some(vec![5u8; 64])
+            );
+            let misses_after_first = engine.stats().block_cache_misses;
+            assert!(misses_after_first > 0, "first get should miss block cache");
+
+            assert_eq!(
+                engine.get(&key, ReadOptions::default()).await.unwrap(),
+                Some(vec![5u8; 64])
+            );
+            assert!(
+                engine.stats().block_cache_hits > 0,
+                "second get should hit block cache"
+            );
+
+            let mut engine2 = Engine::open(config, disk).await.unwrap();
+            assert_eq!(
+                engine2.get(b"metric:10", ReadOptions::default())
+                    .await
+                    .unwrap(),
+                Some(vec![10u8; 64]),
+                "reopen must read ZSTD+prefix SSTable"
+            );
         });
     }
 

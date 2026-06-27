@@ -2,7 +2,7 @@
 
 KayaDB ships as Rust crates on [crates.io](https://crates.io) and as pre-built binaries on [GitHub Releases](https://github.com/Tuntii/KayaDB/releases). You can also build everything from source.
 
-**Current stable tag:** `v0.1.44` — see [Releases](releases.md) for notes.
+**Current stable tag:** `v0.1.45` — see [Releases](releases.md) for notes.
 
 ---
 
