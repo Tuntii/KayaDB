@@ -280,10 +280,7 @@ pub(crate) fn print_latency_human(stats: &EngineStats) {
         println!("  avg_us:  {avg}");
     }
     println!();
-    println!("Cross-reference with:");
-    println!("  kayactl ebpf fsync-latency   (kernel fsync hist)");
-    println!("  kayactl ebpf syscall-timeline (write/fsync/rename timeline + TID corr)");
-    println!("  (Linux only; see scripts/ebpf/README.md)");
+    println!("Cross-reference with scripts/ebpf/ (Linux bpftrace probes; see README.md)");
     println!("========================================");
 }
 

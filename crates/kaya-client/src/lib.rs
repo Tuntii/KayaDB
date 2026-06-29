@@ -7,12 +7,14 @@ use kaya_net::{
 
 #[cfg(feature = "tls")]
 use kaya_net::{roundtrip_tls, TlsConfig};
+#[cfg(feature = "trace")]
 use kaya_sim::{LinearizabilityChecker, Op, OpResult};
 use std::net::SocketAddr;
 
 pub struct KayaClient {
     addr: SocketAddr,
     max_redirects: usize,
+    #[cfg(feature = "trace")]
     trace: Option<LinearizabilityChecker>,
     #[cfg(feature = "tls")]
     tls_config: Option<TlsConfig>,
@@ -23,6 +25,7 @@ impl KayaClient {
         Ok(Self {
             addr,
             max_redirects: 3,
+            #[cfg(feature = "trace")]
             trace: None,
             #[cfg(feature = "tls")]
             tls_config: None,
@@ -34,6 +37,7 @@ impl KayaClient {
         Ok(Self {
             addr,
             max_redirects: 3,
+            #[cfg(feature = "trace")]
             trace: None,
             tls_config: Some(tls_config),
         })
@@ -47,18 +51,22 @@ impl KayaClient {
         self.addr
     }
 
+    #[cfg(feature = "trace")]
     pub fn enable_tracing(&mut self) {
         self.trace = Some(LinearizabilityChecker::new());
     }
 
+    #[cfg(feature = "trace")]
     pub fn disable_tracing(&mut self) {
         self.trace = None;
     }
 
+    #[cfg(feature = "trace")]
     pub fn trace_len(&self) -> usize {
         self.trace.as_ref().map_or(0, |t| t.len())
     }
 
+    #[cfg(feature = "trace")]
     pub fn take_trace(&mut self, seed: u64) -> Option<String> {
         self.trace.take().map(|checker| {
             let s = checker.to_trace_string(seed);
@@ -67,10 +75,12 @@ impl KayaClient {
         })
     }
 
+    #[cfg(feature = "trace")]
     pub fn check_trace(&self) -> Option<std::result::Result<(), Vec<String>>> {
         self.trace.as_ref().map(|c| c.check_sequential())
     }
 
+    #[cfg(feature = "trace")]
     fn record(&mut self, op: Op, result: OpResult) {
         if let Some(ref mut checker) = self.trace {
             checker.record_next(op, result);
@@ -115,8 +125,6 @@ impl KayaClient {
                                 }
                             }
                         }
-                        // Empty hint (common for single-node during election).
-                        // Retry current address a few times before giving up.
                         if attempt < self.max_redirects {
                             tokio::time::sleep(std::time::Duration::from_millis(60)).await;
                             continue;
@@ -141,6 +149,7 @@ impl KayaClient {
         let payload = encode_put_payload(key, value);
         let (status, body) = self.send_with_retry(1, &payload).await?;
         if status == STATUS_OK {
+            #[cfg(feature = "trace")]
             self.record(
                 Op::Put {
                     key: key.to_vec(),
@@ -152,6 +161,7 @@ impl KayaClient {
         } else if status == STATUS_INVALID_ARGUMENT {
             let msg =
                 decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            #[cfg(feature = "trace")]
             self.record(
                 Op::Put {
                     key: key.to_vec(),
@@ -162,6 +172,7 @@ impl KayaClient {
             Err(KayaError::invalid_argument(msg))
         } else {
             let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
+            #[cfg(feature = "trace")]
             self.record(
                 Op::Put {
                     key: key.to_vec(),
@@ -178,21 +189,25 @@ impl KayaClient {
         let (status, body) = self.send_with_retry(2, &payload).await?;
         if status == STATUS_OK {
             let val = decode_value_payload(&body).map_err(KayaError::corruption)?;
+            #[cfg(feature = "trace")]
             self.record(
                 Op::Get { key: key.to_vec() },
                 OpResult::Value(Some(val.clone())),
             );
             Ok(Some(val))
         } else if status == STATUS_NOT_FOUND {
+            #[cfg(feature = "trace")]
             self.record(Op::Get { key: key.to_vec() }, OpResult::Value(None));
             Ok(None)
         } else if status == STATUS_INVALID_ARGUMENT {
             let msg =
                 decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            #[cfg(feature = "trace")]
             self.record(Op::Get { key: key.to_vec() }, OpResult::Error(msg.clone()));
             Err(KayaError::invalid_argument(msg))
         } else {
             let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
+            #[cfg(feature = "trace")]
             self.record(Op::Get { key: key.to_vec() }, OpResult::Error(msg.clone()));
             Err(KayaError::internal(msg))
         }
@@ -202,11 +217,13 @@ impl KayaClient {
         let payload = encode_key_payload(key);
         let (status, body) = self.send_with_retry(3, &payload).await?;
         if status == STATUS_OK {
+            #[cfg(feature = "trace")]
             self.record(Op::Delete { key: key.to_vec() }, OpResult::Ok);
             Ok(())
         } else if status == STATUS_INVALID_ARGUMENT {
             let msg =
                 decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            #[cfg(feature = "trace")]
             self.record(
                 Op::Delete { key: key.to_vec() },
                 OpResult::Error(msg.clone()),
@@ -214,6 +231,7 @@ impl KayaClient {
             Err(KayaError::invalid_argument(msg))
         } else {
             let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
+            #[cfg(feature = "trace")]
             self.record(
                 Op::Delete { key: key.to_vec() },
                 OpResult::Error(msg.clone()),
@@ -227,6 +245,7 @@ impl KayaClient {
         let (status, body) = self.send_with_retry(4, &payload).await?;
         if status == STATUS_OK {
             let items = decode_scan_response(&body).map_err(KayaError::corruption)?;
+            #[cfg(feature = "trace")]
             self.record(
                 Op::Scan {
                     prefix: prefix.to_vec(),
@@ -237,6 +256,7 @@ impl KayaClient {
         } else if status == STATUS_INVALID_ARGUMENT {
             let msg =
                 decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            #[cfg(feature = "trace")]
             self.record(
                 Op::Scan {
                     prefix: prefix.to_vec(),
@@ -246,6 +266,7 @@ impl KayaClient {
             Err(KayaError::invalid_argument(msg))
         } else {
             let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
+            #[cfg(feature = "trace")]
             self.record(
                 Op::Scan {
                     prefix: prefix.to_vec(),

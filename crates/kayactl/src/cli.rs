@@ -42,9 +42,8 @@ pub(crate) fn print_usage() {
     println!();
     println!("OBSERVABILITY COMMANDS");
     println!("  kayactl [--data <dir>] [--json] [--latency] stats   (add --latency for focused durability + flush/compaction timers)");
-    println!("  kayactl [--data <dir>] [--durability ...] [--json] flush   (force publish to see latency numbers move; pairs with --latency and ebpf probes)");
+    println!("  kayactl [--data <dir>] [--durability ...] [--json] flush   (force publish to see latency numbers move; pairs with --latency)");
     println!("  kayactl [--data <dir>] [--json] recover --dry-run");
-    println!("  kayactl ebpf [fsync-latency|...|list|status|help] [--pid <pid>] [--run] [--duration 30s]   (Linux eBPF experiments, Track A)");
     println!();
     println!("CLUSTER MODE (via running kayadb-server)");
     println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--operator-token <tok>] [--json] put <key> <value>");

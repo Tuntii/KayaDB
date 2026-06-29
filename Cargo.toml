@@ -13,7 +13,6 @@ members = [
     "crates/kaya-bench",
     "crates/kaya-client",
     "crates/kaya-jepsen-test",
-    "crates/kaya-ebpf",
 ]
 resolver = "2"
 

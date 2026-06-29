@@ -1,5 +1,4 @@
 mod cli;
-mod ebpf;
 mod inspect;
 mod local;
 mod server;
@@ -60,20 +59,6 @@ fn run() -> Result<()> {
     };
 
     let latency_view = remove_flag(&mut args, "--latency");
-
-    // ── eBPF observability (Linux experiments, M12) ───────────────────────────
-    // Handled early so it works standalone or alongside --server/--data.
-    if !args.is_empty() && args[0] == "ebpf" {
-        let sub = if args.len() > 1 {
-            args[1].clone()
-        } else {
-            "help".to_string()
-        };
-        let pid: Option<u32> = remove_value_flag(&mut args, "--pid").and_then(|s| s.parse().ok());
-        let run = remove_flag(&mut args, "--run");
-        let duration: Option<String> = remove_value_flag(&mut args, "--duration");
-        return ebpf::handle_ebpf(&sub, pid, run, duration, json);
-    }
 
     // ── server mode ───────────────────────────────────────────────────────────
     if !server_addrs.is_empty() {

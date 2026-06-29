@@ -143,12 +143,6 @@ impl fmt::Display for SequenceNumber {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct KeyBytes(pub Bytes);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValueBytes(pub Bytes);
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyValue {
     pub key: Bytes,

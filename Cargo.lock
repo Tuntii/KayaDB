@@ -362,10 +362,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kaya-ebpf"
-version = "0.1.45"
-
-[[package]]
 name = "kaya-engine"
 version = "0.1.45"
 dependencies = [

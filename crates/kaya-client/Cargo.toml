@@ -13,9 +13,10 @@ rust-version.workspace = true
 [dependencies]
 kaya-core.workspace = true
 kaya-net.workspace = true
-kaya-sim.workspace = true
 tokio.workspace = true
+kaya-sim = { workspace = true, optional = true }
 
 [features]
 default = []
 tls = ["kaya-net/tls"]
+trace = ["dep:kaya-sim"]
