@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use kaya_core::{DurabilityMode, KayaError, Result};
 use kaya_net::{
-    decode_error_payload, encode_client_auth_payload, roundtrip, STATUS_ERROR, STATUS_INVALID_ARGUMENT,
-    STATUS_NOT_LEADER, STATUS_OK,
+    decode_error_payload, encode_client_auth_payload, roundtrip, STATUS_ERROR,
+    STATUS_INVALID_ARGUMENT, STATUS_NOT_LEADER, STATUS_OK,
 };
 
 use crate::cli::block_on;
@@ -101,14 +101,8 @@ fn run_watch_server(
         loop {
             clear_screen();
             print_timestamp_header();
-            fetch_and_print_server_status(
-                &endpoints,
-                json,
-                latency_view,
-                timeout,
-                &client_token,
-            )
-            .await?;
+            fetch_and_print_server_status(&endpoints, json, latency_view, timeout, &client_token)
+                .await?;
             io::stdout().flush().ok();
             tokio::time::sleep(interval).await;
         }

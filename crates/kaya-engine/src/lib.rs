@@ -190,7 +190,10 @@ impl<D: Disk> Engine<D> {
             .unwrap_or(1);
         let next_manifest_edit_seq = manifest_state.last_edit_seq + 1;
 
-        let recovery_duration_us = recovery_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        let recovery_duration_us = recovery_started
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
         let stats = EngineStats {
             memtable_entries: memtable.len() as u64,
             sstable_count: live_sstables.len() as u64,

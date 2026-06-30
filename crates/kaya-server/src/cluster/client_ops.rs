@@ -338,23 +338,23 @@ async fn dispatch(
     // Data-path opcodes 1-4 and 6 (STATS) with optional client token enforcement.
     // HEALTH (5) stays open for liveness probes.
     let payload = if matches!(opcode, 1..=4 | 6) {
-        let (clean_payload, presented) =
-            if payload.len() >= CLIENT_AUTH_PREFIX.len() && payload.starts_with(CLIENT_AUTH_PREFIX)
-            {
-                match decode_client_auth_payload(&payload) {
-                    Ok((inner, tok)) => (inner, tok),
-                    Err(e) => {
-                        return outcome(
-                            STATUS_INVALID_ARGUMENT,
-                            encode_error_payload(&e),
-                            client_auth,
-                            None,
-                        );
-                    }
+        let (clean_payload, presented) = if payload.len() >= CLIENT_AUTH_PREFIX.len()
+            && payload.starts_with(CLIENT_AUTH_PREFIX)
+        {
+            match decode_client_auth_payload(&payload) {
+                Ok((inner, tok)) => (inner, tok),
+                Err(e) => {
+                    return outcome(
+                        STATUS_INVALID_ARGUMENT,
+                        encode_error_payload(&e),
+                        client_auth,
+                        None,
+                    );
                 }
-            } else {
-                (payload, None)
-            };
+            }
+        } else {
+            (payload, None)
+        };
 
         if let Some(expected) = &client_token {
             if presented.as_deref() != Some(expected.as_str()) {
@@ -396,7 +396,9 @@ async fn dispatch(
             match propose_read_and_wait(raft, read_propose_tx, req_id).await {
                 Ok(()) => match decode_key_payload(&payload) {
                     Ok(key) => match engine.lock().await.get(&key, ReadOptions::default()).await {
-                        Ok(Some(v)) => outcome(STATUS_OK, encode_value_payload(&v), client_auth, None),
+                        Ok(Some(v)) => {
+                            outcome(STATUS_OK, encode_value_payload(&v), client_auth, None)
+                        }
                         Ok(None) => outcome(STATUS_NOT_FOUND, vec![], client_auth, None),
                         Err(e) => outcome(
                             STATUS_ERROR,

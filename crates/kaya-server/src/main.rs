@@ -157,9 +157,8 @@ fn run() -> Result<(), String> {
         }
     }
 
-    let audit_log = audit_log_flag.unwrap_or_else(|| {
-        config.operator_token.is_some() || config.client_token.is_some()
-    });
+    let audit_log = audit_log_flag
+        .unwrap_or_else(|| config.operator_token.is_some() || config.client_token.is_some());
     config = config.with_audit_log(audit_log);
 
     config = match metrics_addr {

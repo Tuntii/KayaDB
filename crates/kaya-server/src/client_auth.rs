@@ -5,6 +5,4 @@
 //!
 //! This module is intentionally small and mirrors `operator_auth`.
 
-pub use kaya_net::{
-    decode_client_auth_payload, encode_client_auth_payload, CLIENT_AUTH_PREFIX,
-};
+pub use kaya_net::{decode_client_auth_payload, encode_client_auth_payload, CLIENT_AUTH_PREFIX};

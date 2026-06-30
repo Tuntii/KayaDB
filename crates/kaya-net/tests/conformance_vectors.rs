@@ -43,16 +43,14 @@ struct ScanItemInput {
 }
 
 fn vectors_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/clients/conformance/vectors.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/clients/conformance/vectors.json")
 }
 
 fn load_vectors() -> Vec<ConformanceVector> {
     let path = vectors_path();
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
 }
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
@@ -65,7 +63,11 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
-fn bytes_from_fields(text: Option<&str>, hex: Option<&str>, field: &str) -> Result<Vec<u8>, String> {
+fn bytes_from_fields(
+    text: Option<&str>,
+    hex: Option<&str>,
+    field: &str,
+) -> Result<Vec<u8>, String> {
     match (text, hex) {
         (_, Some(h)) => decode_hex(h).map_err(|e| format!("{field}_hex: {e}")),
         (Some(s), None) => Ok(s.as_bytes().to_vec()),
@@ -115,7 +117,9 @@ fn run_vector(vector: &ConformanceVector) {
 
 fn run_put_roundtrip(input: &VectorInput) -> Result<(), String> {
     if let Some(raw) = &input.raw_hex {
-        return decode_put_payload(&decode_hex(raw)?).map(|_| ()).map_err(|e| e);
+        return decode_put_payload(&decode_hex(raw)?)
+            .map(|_| ())
+            .map_err(|e| e);
     }
     let key = bytes_from_fields(input.key.as_deref(), input.key_hex.as_deref(), "key")?;
     let value = bytes_from_fields(input.value.as_deref(), input.value_hex.as_deref(), "value")?;
@@ -131,7 +135,9 @@ fn run_put_roundtrip(input: &VectorInput) -> Result<(), String> {
 
 fn run_key_roundtrip(input: &VectorInput) -> Result<(), String> {
     if let Some(raw) = &input.raw_hex {
-        return decode_key_payload(&decode_hex(raw)?).map(|_| ()).map_err(|e| e);
+        return decode_key_payload(&decode_hex(raw)?)
+            .map(|_| ())
+            .map_err(|e| e);
     }
     let key = bytes_from_fields(input.key.as_deref(), input.key_hex.as_deref(), "key")?;
     let encoded = encode_key_payload(&key);
@@ -156,7 +162,9 @@ fn run_admin_roundtrip(input: &VectorInput) -> Result<(), String> {
         ));
     }
     if decoded_inner != inner {
-        return Err(format!("inner mismatch: got {decoded_inner:?}, want {inner:?}"));
+        return Err(format!(
+            "inner mismatch: got {decoded_inner:?}, want {inner:?}"
+        ));
     }
     if decoded_token.as_deref() != token {
         return Err(format!(
@@ -174,7 +182,9 @@ fn run_client_roundtrip(input: &VectorInput) -> Result<(), String> {
     let encoded = encode_client_auth_payload(&inner, token);
     let (decoded_inner, decoded_token) = decode_client_auth_payload(&encoded)?;
     if decoded_inner != inner {
-        return Err(format!("inner mismatch: got {decoded_inner:?}, want {inner:?}"));
+        return Err(format!(
+            "inner mismatch: got {decoded_inner:?}, want {inner:?}"
+        ));
     }
     if decoded_token.as_deref() != token {
         return Err(format!(
@@ -214,7 +224,9 @@ fn run_error_roundtrip(input: &VectorInput) -> Result<(), String> {
     let encoded = encode_error_payload(message);
     let decoded = decode_error_payload(&encoded)?;
     if decoded != message {
-        return Err(format!("message mismatch: got {decoded:?}, want {message:?}"));
+        return Err(format!(
+            "message mismatch: got {decoded:?}, want {message:?}"
+        ));
     }
     Ok(())
 }

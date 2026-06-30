@@ -19,10 +19,7 @@ impl AuditLog {
     /// Open (or create) the audit log under `data_dir`.
     pub fn open(data_dir: &Path, node_id: NodeId) -> io::Result<Self> {
         let path = data_dir.join("audit.jsonl");
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             node_id: node_id.0,
             file: Mutex::new(file),
@@ -67,7 +64,6 @@ impl AuditLog {
         let _ = guard.flush();
         Ok(())
     }
-
 }
 
 fn format_audit_line(
@@ -97,9 +93,7 @@ fn utc_timestamp_ms() -> String {
     let secs = dur.as_secs();
     let millis = dur.subsec_millis();
     let (year, month, day, hour, min, sec) = unix_secs_to_utc(secs);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{millis:03}Z"
-    )
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{millis:03}Z")
 }
 
 /// Convert Unix seconds to UTC calendar components (no external deps).
@@ -120,16 +114,8 @@ fn unix_secs_to_utc(mut secs: u64) -> (u32, u32, u32, u32, u32, u32) {
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 {
-        mp + 3
-    } else {
-        mp - 9
-    } as u32;
-    let year = if month <= 2 {
-        (y + 1) as u32
-    } else {
-        y as u32
-    };
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = if month <= 2 { (y + 1) as u32 } else { y as u32 };
     (year, month, day, hour, min, sec)
 }
 

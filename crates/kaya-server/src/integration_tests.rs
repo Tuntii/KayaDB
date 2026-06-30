@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::cluster::{ClusterConfig, ClusterNode};
     use crate::client_auth::encode_client_auth_payload;
+    use crate::cluster::{ClusterConfig, ClusterNode};
     use crate::operator_auth::encode_admin_payload;
     use kaya_net::{
         decode_hello_response, decode_value_payload, encode_hello_request, encode_key_payload,

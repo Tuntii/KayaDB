@@ -378,7 +378,10 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
                 Some(Arc::new(log))
             }
             Err(e) => {
-                eprintln!("[node {}] warning: audit log disabled: {e}", config.node_id.0);
+                eprintln!(
+                    "[node {}] warning: audit log disabled: {e}",
+                    config.node_id.0
+                );
                 None
             }
         }
@@ -485,11 +488,7 @@ async fn handle_metrics_connection(
                 (guard.status(), guard.is_leader())
             };
             let engine_stats = engine.lock().await.stats();
-            crate::metrics::MetricsSnapshot::from_engine_and_raft(
-                engine_stats,
-                &status,
-                is_leader,
-            )
+            crate::metrics::MetricsSnapshot::from_engine_and_raft(engine_stats, &status, is_leader)
         };
         let body = crate::metrics::render_prometheus(&snapshot);
         let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n{body}");
