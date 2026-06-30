@@ -4,7 +4,7 @@
 
 KayaDB completed **M13 productization (2026-06-21)**, **M14 correctness + algorithms (2026-06-24)**, and **M15 remaining tracks (2026-06-30)**. The project is deliberately evolved into a **trustworthy, deployable distributed database** — not a forever-demo.
 
-Correctness-first milestones (local engine, simulation, Raft, membership, snapshots, Jepsen full gate) are the foundation. Further work proceeds via parallel tracks in [ROADMAP.md](../ROADMAP.md).
+Correctness-first milestones (local engine, simulation, Raft, membership, snapshots, Jepsen full gate) are the foundation. Further work proceeds via parallel tracks in [ROADMAP.md](ROADMAP.md).
 
 ---
 
@@ -28,7 +28,7 @@ Correctness-first milestones (local engine, simulation, Raft, membership, snapsh
 3. **Chaos proof** ✅ — PR smoke green (0 violations after fixing concurrent-clients + sequential-checker mismatch and adding resilience for kills). T7 + harness complete.
 4. **Operations** ✅ — backup/restore, rolling restart, add/remove node, split-brain detection, mTLS sidecar runbooks in `docs/runbooks/`.
 5. **Security audit pass** ✅ — [security.md](security.md) enforcement table + §7 accepted risks documented.
-6. **Performance envelope** ✅ — published benchmark methodology + regression budget in CI ([BENCHMARKS.md](../BENCHMARKS.md) gates + `perf_gate` release assertion). CI regression gate runs on every PR/push.
+6. **Performance envelope** ✅ — published benchmark methodology + regression budget in CI ([BENCHMARKS.md](BENCHMARKS.md) gates + `perf_gate` release assertion). CI regression gate runs on every PR/push.
 
 ### M13 exit (2026-06-21)
 
@@ -63,4 +63,4 @@ M14 — Correctness + algorithms ✅
 M15 — Remaining tracks ✅
 ```
 
-The living milestone checklist also lives in local `ROADMAP.md` (may be gitignored in some clones).
+The living milestone checklist lives in [ROADMAP.md](ROADMAP.md) (also at the repository root on GitHub).

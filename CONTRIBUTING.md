@@ -10,9 +10,9 @@ By participating, you agree to uphold our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Before you start
 
-1. Check the [ROADMAP.md](ROADMAP.md) and open issues.
+1. Check the [ROADMAP.md](ROADMAP.md) and open [issues](https://github.com/Tuntii/KayaDB/issues).
 2. For larger changes, open an issue first or discuss in a GitHub Discussion to align on design.
-3. Read the relevant sections of the documentation in `docs/` (especially `development.md`, `architecture.md`, and specs).
+3. Read the **[documentation site](https://tuntii.github.io/KayaDB/)** — sources in `docs/` plus root companions (`ROADMAP.md`, `CHANGELOG.md`, …) bundled at deploy time. Start with `development.md`, `architecture.md`, and [specifications](https://tuntii.github.io/KayaDB/#/specifications).
 
 ## Contribution expectations
 
@@ -61,7 +61,7 @@ If tests flake with `AddrInUse`, add `-j 1` before `--`.
 1. Fork the repo and create a feature branch from `main`.
 2. Make your changes + add tests.
 3. Run the full check suite locally.
-4. Update or add documentation when behavior or user-facing interfaces change.
+4. Update or add documentation when behavior or user-facing interfaces change. Use **site-relative** links in `docs/` (`ROADMAP.md`, not `../ROADMAP.md`). Preview with `scripts/prepare_docs_site.ps1` then serve `build/docs-site/`.
 5. Fill out the PR template completely (roadmap link, invariants, crash considerations).
 6. Request review. Maintainers will merge once CI is green and correctness requirements are met.
 

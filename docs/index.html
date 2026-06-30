@@ -7,7 +7,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
   <meta name="description" content="Correctness-first distributed key-value database. Install, run, operate clusters, and inspect every on-disk format.">
   <link rel="stylesheet" href="//cdn.jsdelivr.net/npm/docsify@4/themes/vue.css">
-  <!-- Optional: better code highlighting -->
   <link rel="stylesheet" href="//cdn.jsdelivr.net/npm/prismjs@1/themes/prism-tomorrow.css">
 </head>
 <body>
@@ -17,30 +16,36 @@
       name: 'KayaDB',
       repo: 'https://github.com/Tuntii/KayaDB',
       logo: 'kaya-logo.png',
+      homepage: 'README.md',
 
-      // Sidebar
       loadSidebar: true,
       subMaxLevel: 3,
       auto2top: true,
 
-      // Search
+      notFoundPage: '404.md',
+
       search: {
-        maxAge: 86400000, // 1 day
+        maxAge: 86400000,
         paths: 'auto',
         placeholder: 'Search documentation...',
         noData: 'No results found.',
       },
 
-      // Plugins / behavior
       formatUpdated: '{MM}/{DD} {HH}:{mm}',
       plugins: [
         function (hook) {
           hook.beforeEach(function (html) {
-            const footer = '<hr><small>Edit this page on ' +
-              '<a href="https://github.com/Tuntii/KayaDB/edit/main/docs/' +
-              window.location.hash.slice(1).split('?')[0] +
-              '" target="_blank">GitHub</a></small>';
-
+            const raw = window.location.hash.slice(1).split('?')[0];
+            const path = raw.replace(/^\//, '');
+            const rootFiles = ['ROADMAP.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'BENCHMARKS.md', 'CODE_OF_CONDUCT.md'];
+            const isRoot = rootFiles.some(function (f) { return path === f || path.endsWith('/' + f); });
+            const editBase = isRoot
+              ? 'https://github.com/Tuntii/KayaDB/edit/main/'
+              : 'https://github.com/Tuntii/KayaDB/edit/main/docs/';
+            const editPath = isRoot ? path.split('/').pop() : (path || 'README.md');
+            const footer = '<hr><small>Edit on ' +
+              '<a href="' + editBase + editPath + '" target="_blank" rel="noopener">GitHub</a> · ' +
+              '<a href="https://github.com/Tuntii/KayaDB/issues/new" target="_blank" rel="noopener">Report issue</a></small>';
             return html + footer;
           });
         }
@@ -48,16 +53,9 @@
     };
   </script>
 
-  <!-- Docsify core -->
   <script src="//cdn.jsdelivr.net/npm/docsify@4"></script>
-
-  <!-- Search plugin -->
   <script src="//cdn.jsdelivr.net/npm/docsify/lib/plugins/search.min.js"></script>
-
-  <!-- Optional: Copy to clipboard for code blocks -->
   <script src="//cdn.jsdelivr.net/npm/docsify-copy-code/dist/docsify-copy-code.min.js"></script>
-
-  <!-- Emoji support -->
   <script src="//cdn.jsdelivr.net/npm/docsify/lib/plugins/emoji.min.js"></script>
 </body>
 </html>

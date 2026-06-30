@@ -22,6 +22,9 @@ docs/KayaDB_Explained_TR.md
 # Git worktrees (local isolated workspaces)
 .worktrees/
 
+# Assembled Docsify site (scripts/prepare_docs_site.*)
+/build/docs-site/
+
 # OS / editor
 .DS_Store
 Thumbs.db

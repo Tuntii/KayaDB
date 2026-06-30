@@ -42,7 +42,7 @@ KayaDB completed **M13–M15** (TLS, tokens, audit, Prometheus, Go client, Docke
 | Deploy with Docker/K8s | [Deployment](deployment.md) |
 | Operate a cluster safely | [Security](security.md) + [Runbooks](runbooks/rolling-restart.md) |
 | CI / GitHub Actions | [CI & Actions](ci-and-actions.md) |
-| See version history | [Releases](releases.md) + [CHANGELOG](../CHANGELOG.md) |
+| See version history | [Releases](releases.md) + [CHANGELOG](CHANGELOG.md) |
 | Understand the full picture | [KayaDB Explained](KayaDB_Explained.md) |
 
 ---
@@ -73,7 +73,7 @@ KayaDB completed **M13–M15** (TLS, tokens, audit, Prometheus, Go client, Docke
 ### Correctness & development
 
 - [Development guide](development.md) — tests, SimDisk, fuzzing, benchmarks
-- [Benchmarks](../BENCHMARKS.md) — methodology and performance envelope
+- [Benchmarks](BENCHMARKS.md) — methodology and performance envelope
 
 ### Reference & project
 
@@ -81,7 +81,7 @@ KayaDB completed **M13–M15** (TLS, tokens, audit, Prometheus, Go client, Docke
 - [Releases & versioning](releases.md) — tags, crates.io, GitHub releases
 - [Publishing docs](publishing.md) — GitHub Pages, local preview, maintainer publish flow
 - [Productization north star](productization.md) — M13 exit gates
-- [Roadmap](../ROADMAP.md) · [Contributing](../CONTRIBUTING.md)
+- [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md)
 
 ---
 
@@ -112,7 +112,7 @@ use kaya_engine::{Engine, ReadOptions, WriteOptions};
 // See crates/kaya-engine/examples/embedded.rs
 ```
 
-Full walkthrough: [Getting started → embedded](getting-started.md#embedded-mode-no-server-needed) and [`kaya-engine` README](../crates/kaya-engine/README.md).
+Full walkthrough: [Getting started → embedded](getting-started.md#embedded-mode-no-server-needed) and [`kaya-engine` README on GitHub](https://github.com/Tuntii/KayaDB/blob/main/crates/kaya-engine/README.md).
 
 ### Contribute or debug correctness
 
@@ -127,7 +127,7 @@ Full walkthrough: [Getting started → embedded](getting-started.md#embedded-mod
 - [GitHub repository](https://github.com/Tuntii/KayaDB)
 - [Issue tracker](https://github.com/Tuntii/KayaDB/issues)
 - [crates.io: kaya-engine](https://crates.io/crates/kaya-engine) · [kayactl](https://crates.io/crates/kayactl)
-- [Root README](../README.md)
+- [Repository README on GitHub](https://github.com/Tuntii/KayaDB/blob/main/README.md)
 
 ---
 

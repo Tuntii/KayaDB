@@ -401,7 +401,7 @@ Windows için `.ps1` versiyonları mevcuttur.
 cargo bench -p kaya-bench
 ```
 
-Sonuçlar `target/criterion/` altında saklanır. Detaylı karşılaştırma için [BENCHMARKS.md](../BENCHMARKS.md) dosyasına bakın.
+Sonuçlar `target/criterion/` altında saklanır. Detaylı karşılaştırma için [BENCHMARKS.md](BENCHMARKS.md) dosyasına bakın.
 
 **Simülasyon testleri (doğruluk odaklı):**
 ```bash

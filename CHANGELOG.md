@@ -30,6 +30,7 @@ M15 remaining tracks: client auth, audit logging, conformance, Go client, Promet
 ### Changed
 - `docs/security.md` §7: client token auth and local audit logging marked implemented; remaining gaps documented (data-at-rest, multi-tenant, SIEM export)
 - ROADMAP M15 section and parallel tracks (D, E, A, G) status updated
+- Documentation site: GitHub Pages bundle via `scripts/prepare_docs_site.*` (ROADMAP, CHANGELOG, specs, deploy READMEs); fixed `../` links that caused 404 on Pages; added `404.md` and release notes template
 
 ### Security
 - Data-path authZ available via `--client-token`; compliance SIEM export and data-at-rest encryption remain accepted deployment risks — see `docs/security.md` §7

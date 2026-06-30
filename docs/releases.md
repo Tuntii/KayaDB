@@ -2,8 +2,8 @@
 
 KayaDB uses [Semantic Versioning](https://semver.org/) while in `0.1.x` pre-1.0 development. Breaking storage-format or wire-protocol changes bump the minor segment; patch releases add features and fixes within a milestone.
 
-**Changelog:** [CHANGELOG.md](../CHANGELOG.md)  
-**Roadmap:** [ROADMAP.md](../ROADMAP.md)
+**Changelog:** [CHANGELOG.md](CHANGELOG.md)  
+**Roadmap:** [ROADMAP.md](ROADMAP.md)
 
 ---
 
@@ -11,7 +11,7 @@ KayaDB uses [Semantic Versioning](https://semver.org/) while in `0.1.x` pre-1.0 
 
 | Item | Detail |
 |---|---|
-| **Tag** | `v0.1.46` (tag when published; `main` carries this version) |
+| **Tag** | [`v0.1.46`](https://github.com/Tuntii/KayaDB/releases/tag/v0.1.46) |
 | **Date** | 2026-06-30 |
 | **Milestone** | M15 — remaining tracks (auth, ops, clients, deploy) ✅ |
 | **Workspace version** | `0.1.46` in root `Cargo.toml` |
@@ -60,7 +60,7 @@ See [Installation](installation.md) for full options.
 
 ## Release artifacts
 
-Each `v*` tag triggers [`.github/workflows/release.yml`](../.github/workflows/release.yml):
+Each `v*` tag triggers the [Release Binaries workflow](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/release.yml):
 
 | Artifact | Contents |
 |---|---|
@@ -77,7 +77,7 @@ Jepsen full gate (`T1–T7`) runs on tag pushes and nightly — see [jepsen-desi
 |---|---|
 | **Tagged releases** | Explicit `v0.1.N` tags (e.g. `v0.1.44`) |
 | **crates.io publish helper** | `scripts/smart_publish.ps1` can auto-bump to `0.1.<git-commit-count>` unless `-SkipVersionUpdate` |
-| **Development** | `main` may be ahead of the latest tag; see [CHANGELOG Unreleased](../CHANGELOG.md) |
+| **Development** | `main` may be ahead of the latest tag; see [CHANGELOG](CHANGELOG.md) |
 
 ---
 
@@ -85,7 +85,8 @@ Jepsen full gate (`T1–T7`) runs on tag pushes and nightly — see [jepsen-desi
 
 | Tag | Summary |
 |---|---|
-| `v0.1.45` | Post-M14: ZSTD/prefix/cache stats, rich nemesis, eBPF stub, manifest TLA+ (current) |
+| `v0.1.46` | M15: client auth, audit, Go client, Prometheus, Docker/K8s, watch (current) |
+| `v0.1.45` | Post-M14: ZSTD/prefix/cache stats, rich nemesis, eBPF stub, manifest TLA+ |
 | `v0.1.44` | M14 closure: Jepsen full gate, honest partition, io_uring prototype |
 | `v0.1.43` | M14 storage algorithms + CI correctness gates |
 | `v0.1.4` | Early public prototype |
@@ -94,7 +95,7 @@ Jepsen full gate (`T1–T7`) runs on tag pushes and nightly — see [jepsen-desi
 
 ## Cutting a release
 
-1. Finalize [CHANGELOG.md](../CHANGELOG.md) for the target version
+1. Finalize [CHANGELOG.md](CHANGELOG.md) and add `docs/release-notes/v0.1.N.md` for the GitHub Release body
 2. Update this page and [installation.md](installation.md) version pins
 3. Commit on `main`, then tag: `git tag v0.1.N && git push origin v0.1.N`
 4. GitHub Actions builds multi-platform binaries and creates the GitHub Release

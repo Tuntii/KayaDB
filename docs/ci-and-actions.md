@@ -10,25 +10,24 @@ KayaDB uses [GitHub Actions](https://github.com/Tuntii/KayaDB/actions) for conti
 
 | Workflow | File | Triggers | Purpose |
 |---|---|---|---|
-| **CI** | [`ci.yml`](../.github/workflows/ci.yml) | `push` to `main`, all `pull_request` | `fmt`, `clippy`, tests (excludes `kaya-jepsen-test` in PR path), smoke bench, `perf_gate` |
-| **Audit** | [`audit.yml`](../.github/workflows/audit.yml) | `push` to `main`, `pull_request`, weekly cron | `cargo audit` + `cargo deny` |
-| **Chaos matrix** | [`chaos-matrix.yml`](../.github/workflows/chaos-matrix.yml) | PR smoke, nightly cron | DiskFull / NetworkPartition / ClockSkew axes |
-| **Jepsen** | [`jepsen.yml`](../.github/workflows/jepsen.yml) | PR smoke, nightly + tags | Rust-native T1–T7 full gate |
-| **Docs (Pages)** | [`docs.yml`](../.github/workflows/docs.yml) | `push` to `main` when `docs/**` changes, `workflow_dispatch` | Deploy Docsify site to GitHub Pages |
-| **Release** | [`release.yml`](../.github/workflows/release.yml) | `push` tags `v*` | Multi-platform binaries + release assets |
-| **Publish** | [`publish.yml`](../.github/workflows/publish.yml) | Manual / release pipeline | crates.io publish helper |
+| **CI** | [`ci.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/ci.yml) | `push` to `main`, all `pull_request` | `fmt`, `clippy`, tests (excludes `kaya-jepsen-test` in PR path), smoke bench, `perf_gate` |
+| **Audit** | [`audit.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/audit.yml) | `push` to `main`, `pull_request`, weekly cron | `cargo audit` + `cargo deny` |
+| **Chaos matrix** | [`chaos-matrix.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/chaos-matrix.yml) | PR smoke, nightly cron | DiskFull / NetworkPartition / ClockSkew axes |
+| **Jepsen** | [`jepsen.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/jepsen.yml) | PR smoke, nightly + tags | Rust-native T1–T7 full gate |
+| **Docs (Pages)** | [`docs.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/docs.yml) | `push` to `main` (docs + companion files), `workflow_dispatch` | Deploy Docsify site to GitHub Pages |
+| **Release** | [`release.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/release.yml) | `push` tags `v*` | Multi-platform binaries + release assets |
+| **Publish** | [`publish.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/publish.yml) | Manual / after Release | crates.io publish helper |
 
-Badges in the root [README](../README.md) link to the CI workflow. Other workflows are listed under **Actions** in the GitHub UI.
+Badges in the [repository README](https://github.com/Tuntii/KayaDB/blob/main/README.md) link to the CI workflow.
 
 ---
 
 ## What runs on every `main` push
 
-After you push to `main`:
-
 1. **CI** — format, clippy, unit/integration tests, smoke benchmark, performance regression gate.
 2. **Audit** — dependency vulnerability scan.
-3. **Docs** — only when files under `docs/` changed; rebuilds [https://tuntii.github.io/KayaDB/](https://tuntii.github.io/KayaDB/).
+3. **Jepsen smoke** — scenario smoke on `main` pushes.
+4. **Docs** — when `docs/**`, `ROADMAP.md`, `CHANGELOG.md`, deploy READMEs, or `spec/docs/**` change; rebuilds [https://tuntii.github.io/KayaDB/](https://tuntii.github.io/KayaDB/).
 
 Chaos matrix and Jepsen full gate run on schedule and tags; PRs get smoke subsets.
 
@@ -36,24 +35,21 @@ Chaos matrix and Jepsen full gate run on schedule and tags; PRs get smoke subset
 
 ## Branch protection note
 
-`main` may reject **merge commits** (`GH013: This branch must not contain merge commits`). Use **squash merge** or rebase when integrating PRs — the M15 push used a single squash commit for this reason.
+`main` may reject **merge commits** (`GH013: This branch must not contain merge commits`). Use **squash merge** or rebase when integrating PRs.
 
 ---
 
 ## Local checks (match CI)
 
 ```bash
-cargo fmt --all -- --check
+cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --exclude kaya-jepsen-test -- --test-threads=1
-cargo test -p kaya-raft --features disk-storage -- --test-threads=1
 ```
 
-### Windows tip
+On Windows, full parallel `cargo test --workspace` can hit `AddrInUse`; prefer:
 
-Parallel crate test binaries can contend for localhost ports. If tests flake with `AddrInUse`:
-
-```bash
+```powershell
 cargo test --workspace -j 1 -- --test-threads=1
 ```
 
@@ -61,24 +57,15 @@ cargo test --workspace -j 1 -- --test-threads=1
 
 ## Troubleshooting: Actions tab empty
 
-If **Settings → Actions** shows workflows disabled or the **Actions** tab has no runs:
-
-1. **Enable Actions** — Repo **Settings → Actions → General → Allow all actions** (or org policy equivalent).
-2. **Forks** — Actions do not run on forks until you enable them under **Actions** tab → “I understand my workflows, go ahead and enable them”.
-3. **GitHub Pages** — For docs deploy: **Settings → Pages → Build and deployment → Source: GitHub Actions** (not “Deploy from branch”). Without this, `docs.yml` uploads an artifact but the site may not update.
-4. **Billing / minutes** — Private repos need Actions minutes; public repos are free for standard workloads.
-5. **First push after enable** — Open [Actions](https://github.com/Tuntii/KayaDB/actions) and confirm `CI` ran on the latest `main` commit.
-
-### Manually trigger docs deploy
-
-```text
-Actions → Deploy Documentation (GitHub Pages) → Run workflow
-```
+1. **Billing / plan** — Free tier minutes or account lock stops jobs before they start. Upgrade or fix billing under GitHub Settings → Billing.
+2. **Actions disabled** — Repository → Settings → Actions → General → allow actions.
+3. **Pages source** — Settings → Pages → Source: **GitHub Actions** (not “Deploy from branch” only).
+4. **First-time Pages** — Run **Deploy Documentation** via Actions → workflow_dispatch once after enabling Pages.
 
 ---
 
 ## Related
 
-- [Development guide](development.md) — test tiers, SimDisk, fuzzing
-- [Publishing documentation](publishing.md) — local Docsify preview, maintainer flow
-- [Jepsen design](jepsen-design.md) — what the Jepsen workflow exercises
+- [Development guide](development.md)
+- [Releases](releases.md)
+- [Publishing](publishing.md)

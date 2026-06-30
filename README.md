@@ -9,7 +9,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](Cargo.toml)
 [![crates.io: kaya-engine](https://img.shields.io/crates/v/kaya-engine.svg?label=kaya-engine)](https://crates.io/crates/kaya-engine)
 [![crates.io: kayactl](https://img.shields.io/crates/v/kayactl.svg?label=kayactl)](https://crates.io/crates/kayactl)
-[![Status](https://img.shields.io/badge/status-M15%20complete-brightgreen.svg)](ROADMAP.md)
+[![Status](https://img.shields.io/badge/status-M15%20complete-brightgreen.svg)](https://tuntii.github.io/KayaDB/#/ROADMAP.md)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://tuntii.github.io/KayaDB/)
 
 **A correctness-first, embeddable distributed key-value database built in Rust.**

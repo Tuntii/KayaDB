@@ -5,6 +5,15 @@ on:
     branches: [ main ]
     paths:
       - 'docs/**'
+      - 'ROADMAP.md'
+      - 'CHANGELOG.md'
+      - 'CONTRIBUTING.md'
+      - 'BENCHMARKS.md'
+      - 'CODE_OF_CONDUCT.md'
+      - 'deploy/**/README.md'
+      - 'spec/docs/**'
+      - 'spec/issues/expanded-implementation-roadmap.md'
+      - 'scripts/prepare_docs_site.sh'
   workflow_dispatch:
 
 permissions:
@@ -18,10 +27,6 @@ concurrency:
 
 jobs:
   deploy:
-    # Note: For this to work, go to repo Settings > Pages and set "Source" to "GitHub Actions".
-    # The "github-pages" environment is optional here; we removed the hard requirement
-    # to avoid deploys getting stuck on first-time setup or protection rules.
-    # If you want stricter control, create the environment in Settings > Environments.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -30,24 +35,12 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
-      - name: Prepare site artifact (include .nojekyll and dot files for Jekyll bypass)
-        run: |
-          mkdir -p /tmp/site
-          cp -r docs/. /tmp/site/ 2>/dev/null || true
-          # Explicitly copy dot files ( _sidebar.md , .nojekyll etc may be missed by some cp )
-          for f in docs/.*; do
-            [ -e "$f" ] && cp -a "$f" /tmp/site/ || true
-          done
-          touch /tmp/site/.nojekyll
-          # Exclude internal AI plans/specs from public docs site (avoid bloat or parse issues)
-          rm -rf /tmp/site/superpowers || true
-          ls -la /tmp/site/ | head -10
-          echo ".nojekyll and dotfiles ensured; internal dirs cleaned"
+      - name: Prepare site artifact
+        run: bash scripts/prepare_docs_site.sh /tmp/site
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
         with:
-          # The folder that contains the Docsify site
           path: '/tmp/site'
 
       - name: Deploy to GitHub Pages

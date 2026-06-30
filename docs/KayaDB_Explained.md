@@ -259,7 +259,7 @@ All persistent formats are documented in `spec/docs/` and the inspectors emit hu
 
 **Track B (storage):** block cache (LRU per reader) and optional LZ4 compression (SSTable v3) are available via `SstableConfig`; off by default for compression, cache on by default (`block_cache_capacity=64`).
 
-See [security](security.md), [releases](releases.md), and [ROADMAP](../ROADMAP.md) for the honest envelope.
+See [security](security.md), [releases](releases.md), and [ROADMAP](ROADMAP.md) for the honest envelope.
 
 ---
 

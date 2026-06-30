@@ -10,7 +10,7 @@ KayaDB ships as Rust crates on [crates.io](https://crates.io) and as pre-built b
 
 | Requirement | Version |
 |---|---|
-| Rust toolchain | 1.85+ ([`rust-toolchain.toml`](../rust-toolchain.toml)) |
+| Rust toolchain | 1.85+ ([`rust-toolchain.toml` on GitHub](https://github.com/Tuntii/KayaDB/blob/main/rust-toolchain.toml)) |
 | Platform | Linux, macOS, Windows (x86_64 and Apple Silicon for releases) |
 
 ---

@@ -6,7 +6,7 @@ KayaDB **v0.1.46 (M15)** ships example deployment layouts under `deploy/` in the
 
 ## Docker Compose (3-node cluster)
 
-**Path:** [`deploy/docker/`](../deploy/docker/)
+**Path:** [`deploy/docker/`](deploy/docker/README.md)
 
 ```bash
 cd deploy/docker
@@ -22,13 +22,13 @@ docker exec kayadb-node1 kayactl --server kayadb-node1:7379 get hello
 | node2 | 7380 | 7482 |
 | node3 | 7381 | 7483 |
 
-See [`deploy/docker/README.md`](../deploy/docker/README.md) for build details, volumes, and security notes.
+See [deploy/docker/README.md](deploy/docker/README.md) for build details, volumes, and security notes.
 
 ---
 
 ## Kubernetes (StatefulSet)
 
-**Path:** [`deploy/k8s/`](../deploy/k8s/)
+**Path:** [`deploy/k8s/`](deploy/k8s/README.md)
 
 ```bash
 docker build -f deploy/docker/Dockerfile -t kayadb:latest .
@@ -41,7 +41,7 @@ kubectl -n kayadb port-forward pod/kayadb-0 7379:7379
 
 Headless service DNS: `kayadb-0.kayadb-headless`, `kayadb-1.kayadb-headless`, …
 
-See [`deploy/k8s/README.md`](../deploy/k8s/README.md) for peer roster template and rollout notes.
+See [deploy/k8s/README.md](deploy/k8s/README.md) for peer roster template and rollout notes.
 
 ---
 

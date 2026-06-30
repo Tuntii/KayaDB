@@ -248,5 +248,5 @@ Before opening a pull request:
 
 - [Architecture overview](architecture.md)
 - [Getting started](getting-started.md)
-- [ROADMAP.md](../ROADMAP.md)
-- [CONTRIBUTING.md](../CONTRIBUTING.md)
+- [ROADMAP.md](ROADMAP.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md)

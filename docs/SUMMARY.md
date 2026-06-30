@@ -65,7 +65,7 @@
 * [Linearizability](jepsen-design.md)
 * [Development workflow](development.md)
 * [CI & GitHub Actions](ci-and-actions.md)
-* [Benchmarks](../BENCHMARKS.md)
+* [Benchmarks](BENCHMARKS.md)
 
 ## Reference
 
@@ -76,10 +76,11 @@
 
 ## Contributing & Project
 
-* [Contributing](../CONTRIBUTING.md)
-* [Roadmap](../ROADMAP.md)
-* [Changelog](../CHANGELOG.md)
-* [License](../README.md#license)
+* [Contributing](CONTRIBUTING.md)
+* [Roadmap](ROADMAP.md)
+* [Changelog](CHANGELOG.md)
+* [Code of Conduct](CODE_OF_CONDUCT.md)
+* [License](https://github.com/Tuntii/KayaDB/blob/main/README.md#license)
 
 ---
 
