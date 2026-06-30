@@ -22,6 +22,19 @@ pub fn parse_raw_fsync_event(raw: &RawFsyncEvent, seq: u64) -> ProbeEvent {
     parse_raw_fsync_event_at(raw, seq, drain_timestamp_ns())
 }
 
+/// Shared decode path for live ringbuf drain, injected integration tests, and replay.
+pub fn decode_ringbuf_items(items: &[RawFsyncEvent], seq: &mut u64) -> Vec<ProbeEvent> {
+    let ts_ns = drain_timestamp_ns();
+    items
+        .iter()
+        .map(|raw| {
+            let event = parse_raw_fsync_event_at(raw, *seq, ts_ns);
+            *seq += 1;
+            event
+        })
+        .collect()
+}
+
 /// Parse with an explicit drain timestamp (deterministic tests + live drain).
 pub fn parse_raw_fsync_event_at(raw: &RawFsyncEvent, seq: u64, ts_ns: u64) -> ProbeEvent {
     let syscall = if raw.syscall_kind == 1 {
@@ -120,16 +133,15 @@ impl KernelBackend {
         if !self.attached {
             return Vec::new();
         }
+        let mut raws = Vec::new();
         while let Some(item) = self.ring_buf.next() {
             if item.len() < std::mem::size_of::<RawFsyncEvent>() {
                 continue;
             }
-            let raw = unsafe { *(item.as_ptr() as *const RawFsyncEvent) };
-            let ts_ns = drain_timestamp_ns();
-            self.pending
-                .push(parse_raw_fsync_event_at(&raw, self.next_seq, ts_ns));
-            self.next_seq += 1;
+            raws.push(unsafe { *(item.as_ptr() as *const RawFsyncEvent) });
         }
+        let decoded = decode_ringbuf_items(&raws, &mut self.next_seq);
+        self.pending.extend(decoded);
         self.pending.drain(..).collect()
     }
 
@@ -318,6 +330,38 @@ mod tests {
     #[test]
     fn drain_timestamp_ns_is_nonzero() {
         assert!(drain_timestamp_ns() > 0);
+    }
+
+    #[test]
+    fn decode_ringbuf_injected_items_produces_nonempty_events_with_ts_ns() {
+        let golden = [
+            RawFsyncEvent {
+                latency_us: 1_024,
+                syscall_kind: 0,
+            },
+            RawFsyncEvent {
+                latency_us: 256,
+                syscall_kind: 1,
+            },
+        ];
+        let mut seq = 7;
+        let events = decode_ringbuf_items(&golden, &mut seq);
+        assert_eq!(events.len(), 2);
+        assert_eq!(seq, 9);
+        for event in &events {
+            match event {
+                ProbeEvent::FsyncLatency { ts_ns, latency_us, .. } => {
+                    assert!(*ts_ns > 0);
+                    assert!(*latency_us > 0);
+                }
+            }
+        }
+        match &events[0] {
+            ProbeEvent::FsyncLatency { syscall, latency_us, .. } => {
+                assert_eq!(*syscall, SyscallKind::Fsync);
+                assert_eq!(*latency_us, 1_024);
+            }
+        }
     }
 
     #[test]

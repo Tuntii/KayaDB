@@ -161,11 +161,12 @@ async fn kayadb_server_bin_ebpf_metrics_nonzero_after_put() {
     }
 
     let status_path = data_dir.join("ebpf/status.json");
+    let mut status_raw = String::new();
     let mut status_ready = false;
     for _ in 0..40 {
         if status_path.exists() {
-            let status_raw = std::fs::read_to_string(&status_path).unwrap();
-            if status_raw.contains("kernel") {
+            status_raw = std::fs::read_to_string(&status_path).unwrap();
+            if status_raw.contains("kernel-simulated") || status_raw.contains("kernel-live") {
                 status_ready = true;
                 std::fs::write(scratch.join("ebpf-status.json"), &status_raw).unwrap();
                 break;
@@ -175,8 +176,14 @@ async fn kayadb_server_bin_ebpf_metrics_nonzero_after_put() {
     }
     assert!(
         status_ready,
-        "ebpf/status.json must exist with kernel-family backend after PUT"
+        "ebpf/status.json must exist with kernel backend after PUT"
     );
+    if cfg!(not(target_os = "linux")) {
+        assert!(
+            status_raw.contains("kernel-simulated"),
+            "non-Linux bin launch must honestly report kernel-simulated backend, not live kprobe\n{status_raw}"
+        );
+    }
 
     let trace_path = data_dir.join("ebpf/trace.jsonl");
     if trace_path.exists() {
@@ -187,9 +194,15 @@ async fn kayadb_server_bin_ebpf_metrics_nonzero_after_put() {
         );
     }
 
+    let backend_slot = if status_raw.contains("kernel-live") {
+        "kernel-live"
+    } else {
+        "kernel-simulated"
+    };
     let fallback_note = format!(
         "host={} os={}\n\
-         backend_slot=KernelPreferred try-live-then-fallback (kernel-simulated on this host; kernel-live when Linux+kernel-probes+CAP_BPF)\n\
+         backend_slot={backend_slot} (KernelPreferred; sim fallback expected on non-Linux)\n\
+         kernel_attach_proof=kaya-ebpf decode_ringbuf_injected_items + linux kernel_load_object_and_drain_injected_ringbuf\n\
          metrics_help=kernel-slot (not userspace-tap)\n\
          evidence=bin-metrics-scrape-0.txt bin-metrics-scrape-1.txt ebpf-metrics-integration.log ebpf-status.json\n\
          linux_bpf_gate=scripts/linux_verify_ebpf_kernel.sh + .github/workflows/ci.yml\n\

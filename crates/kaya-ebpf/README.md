@@ -17,8 +17,16 @@ attempt **kernel-live** attach first, fall back to **kernel-simulated** when liv
 is unavailable (non-Linux, missing bpf `.o`, or no `CAP_BPF`). Engine counters
 (`kaya_wal_fsync_*`) remain separate.
 
-Linux CI runs `scripts/linux_verify_ebpf_kernel.sh` (bpf compile + `bpf_object_loads`
-without `CAP_BPF`). Optional live attach: `KAYA_EBPF_LIVE_KERNEL=1 cargo test -p kaya-ebpf --features kernel-probes live_kernel_attach -- --ignored`.
+Kernel I/O tiers (shared `decode_ringbuf_items` decode path):
+
+| Tier | Test | Host |
+|------|------|------|
+| A | `decode_ringbuf_injected_items_produces_nonempty_events_with_ts_ns` | all platforms |
+| B | `bpf_object_loads_without_cap_bpf` + `kernel_load_object_and_drain_injected_ringbuf` | Linux + `kernel-probes` |
+| C | `live_kernel_attach_streams_events` (`#[ignore]`, needs `CAP_BPF`) | Linux optional |
+
+Linux CI: `scripts/linux_verify_ebpf_kernel.sh`. `kayadb-server --features ebpf` enables
+`kaya-ebpf/kernel-probes` on Linux via target-specific dependency features.
 
 ## Features
 

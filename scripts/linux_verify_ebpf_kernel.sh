@@ -16,7 +16,9 @@ if ! command -v clang >/dev/null 2>&1; then
   sudo apt-get install -y clang llvm
 fi
 
-echo "==> cargo test -p kaya-ebpf --features kernel-probes"
+echo "==> cargo test -p kaya-ebpf --features kernel-probes (tier B: bpf load + injected decode)"
+cargo test -p kaya-ebpf --features kernel-probes bpf_object_loads_without_cap_bpf kernel_load_object_and_drain_injected_ringbuf -- --test-threads=1
+echo "==> cargo test -p kaya-ebpf --features kernel-probes (full crate)"
 cargo test -p kaya-ebpf --features kernel-probes -- --test-threads=1
 
 BPF_OBJ="$(find target -name 'fsync_latency.bpf.o' -print -quit || true)"

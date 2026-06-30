@@ -21,6 +21,9 @@ kaya-raft = { workspace = true, features = ["disk-storage"] }
 kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.46", optional = true }
 tokio.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.46", optional = true, features = ["kernel-probes"] }
+
 [features]
 default = []
 ebpf = ["dep:kaya-ebpf"]
