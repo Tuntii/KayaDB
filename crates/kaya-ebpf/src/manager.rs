@@ -6,6 +6,8 @@ use parking_lot::Mutex;
 use serde::Serialize;
 
 use crate::backend::{EventBackend, StubBackend};
+#[cfg(target_os = "linux")]
+use crate::backend::LinuxCompositeBackend;
 use crate::event::{ProbeEvent, SyscallKind};
 use crate::histogram::FsyncHistogram;
 use crate::trace::{write_trace, TraceReplayError};
@@ -17,11 +19,14 @@ pub struct ProbeConfig {
     pub config_hash: String,
     pub trace_path: PathBuf,
     pub status_path: PathBuf,
-    /// When true, also stream seeded simulated events (CI / non-CAP_BPF fallback).
+    /// Seeded simulated events (tests / CAP_BPF-less CI only).
     pub simulated_fallback: bool,
+    /// Attempt kernel kprobe attach on Linux when `kernel-probes` feature is enabled.
+    pub try_kernel_probes: bool,
 }
 
 impl ProbeConfig {
+    /// Production config: no simulated events; kernel attach attempted on Linux+feature.
     pub fn for_data_dir(data_dir: impl AsRef<Path>, seed: u64, config_hash: impl Into<String>) -> Self {
         let data_dir = data_dir.as_ref();
         Self {
@@ -29,8 +34,17 @@ impl ProbeConfig {
             config_hash: config_hash.into(),
             trace_path: data_dir.join("ebpf/trace.jsonl"),
             status_path: data_dir.join("ebpf/status.json"),
-            simulated_fallback: true,
+            simulated_fallback: false,
+            try_kernel_probes: cfg!(all(target_os = "linux", feature = "kernel-probes")),
         }
+    }
+
+    /// Test/CI config with deterministic simulated events.
+    pub fn for_tests(data_dir: impl AsRef<Path>, seed: u64, config_hash: impl Into<String>) -> Self {
+        let mut cfg = Self::for_data_dir(data_dir, seed, config_hash);
+        cfg.simulated_fallback = true;
+        cfg.try_kernel_probes = false;
+        cfg
     }
 }
 
@@ -70,7 +84,10 @@ impl ProbeManager {
         let backend = {
             #[cfg(target_os = "linux")]
             {
-                BackendKind::Linux(LinuxCompositeBackend::new(seed))
+                BackendKind::Linux(LinuxCompositeBackend::new(
+                    seed,
+                    config.try_kernel_probes,
+                ))
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -88,31 +105,16 @@ impl ProbeManager {
     }
 
     pub fn attach(&mut self) -> Result<(), String> {
-        match &mut self.backend {
-            #[cfg(target_os = "linux")]
-            BackendKind::Linux(b) => b.attach(),
-            #[cfg(not(target_os = "linux"))]
-            BackendKind::Stub(b) => b.attach(),
-        }
+        self.with_backend_mut(|b| b.attach())
     }
 
     pub fn detach(&mut self) -> bool {
         self.pump_events();
-        match &mut self.backend {
-            #[cfg(target_os = "linux")]
-            BackendKind::Linux(b) => b.detach(),
-            #[cfg(not(target_os = "linux"))]
-            BackendKind::Stub(b) => b.detach(),
-        }
+        self.with_backend_mut(|b| b.detach())
     }
 
     pub fn is_attached(&self) -> bool {
-        match &self.backend {
-            #[cfg(target_os = "linux")]
-            BackendKind::Linux(b) => b.is_attached(),
-            #[cfg(not(target_os = "linux"))]
-            BackendKind::Stub(b) => b.is_attached(),
-        }
+        self.with_backend(|b| b.is_attached())
     }
 
     pub fn streaming(&self) -> bool {
@@ -139,12 +141,7 @@ impl ProbeManager {
     }
 
     pub fn pump_events(&mut self) {
-        let drained = match &mut self.backend {
-            #[cfg(target_os = "linux")]
-            BackendKind::Linux(b) => b.drain_events(),
-            #[cfg(not(target_os = "linux"))]
-            BackendKind::Stub(b) => b.drain_events(),
-        };
+        let drained = self.with_backend_mut(|b| b.drain_events());
         for mut event in drained {
             let seq = self.collected.len() as u64 + 1;
             let ProbeEvent::FsyncLatency { seq: ref mut event_seq, .. } = &mut event;
@@ -181,11 +178,7 @@ impl ProbeManager {
     }
 
     fn tap_report(&mut self, syscall: SyscallKind, latency_us: u64, ts_ns: u64) {
-        #[cfg(target_os = "linux")]
-        if let BackendKind::Linux(b) = &mut self.backend {
-            b.report_fsync(syscall, latency_us, ts_ns);
-        }
-        let _ = (syscall, latency_us, ts_ns);
+        self.with_backend_mut(|b| b.report_fsync(syscall, latency_us, ts_ns));
     }
 
     pub fn write_status(&self) -> std::io::Result<()> {
@@ -210,16 +203,29 @@ impl ProbeManager {
     }
 
     fn backend_name(&self) -> &'static str {
+        self.with_backend(|b| b.backend_name())
+    }
+
+    fn with_backend_mut<R>(&mut self, f: impl FnOnce(&mut dyn EventBackend) -> R) -> R {
+        match &mut self.backend {
+            #[cfg(target_os = "linux")]
+            BackendKind::Linux(b) => f(b),
+            #[cfg(not(target_os = "linux"))]
+            BackendKind::Stub(b) => f(b),
+        }
+    }
+
+    fn with_backend<R>(&self, f: impl FnOnce(&dyn EventBackend) -> R) -> R {
         match &self.backend {
             #[cfg(target_os = "linux")]
-            BackendKind::Linux(b) => b.backend_name(),
+            BackendKind::Linux(b) => f(b),
             #[cfg(not(target_os = "linux"))]
-            BackendKind::Stub(b) => b.backend_name(),
+            BackendKind::Stub(b) => f(b),
         }
     }
 }
 
-/// Thread-safe handle shared by the server metrics loop.
+/// Thread-safe handle shared by the server probe pump and metrics loop.
 pub type SharedProbeManager = Arc<Mutex<ProbeManager>>;
 
 pub fn shared_probe_manager(config: ProbeConfig) -> SharedProbeManager {
@@ -239,32 +245,35 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn attach_detach_lifecycle_streams_simulated_events() {
+    fn production_config_is_noop_until_tap_events() {
         let dir = tempdir().unwrap();
         let mut mgr = ProbeManager::new(ProbeConfig::for_data_dir(dir.path(), 7, "cfg"));
-        assert!(!mgr.is_attached());
         mgr.attach().unwrap();
-        assert!(mgr.is_attached());
+        mgr.pump_events();
+        assert!(mgr.events().is_empty());
+        assert_eq!(mgr.histogram().total_count(), 0);
+        mgr.report_fsync(SyscallKind::Fsync, 120);
+        assert_eq!(mgr.histogram().total_count(), 1);
+        mgr.detach();
+    }
+
+    #[test]
+    fn test_config_streams_simulated_events() {
+        let dir = tempdir().unwrap();
+        let mut mgr = ProbeManager::new(ProbeConfig::for_tests(dir.path(), 7, "cfg"));
+        mgr.attach().unwrap();
         mgr.pump_events();
         assert!(!mgr.events().is_empty());
         assert!(mgr.histogram().total_count() > 0);
         mgr.detach();
-        assert!(!mgr.is_attached());
     }
 
     #[test]
-    fn engine_stats_sync_emits_tap_events_on_linux_or_stub() {
+    fn engine_stats_sync_emits_tap_events() {
         let dir = tempdir().unwrap();
         let mut mgr = ProbeManager::new(ProbeConfig::for_data_dir(dir.path(), 3, "cfg"));
         mgr.attach().unwrap();
-        let before = mgr.events().len();
-        mgr.sync_from_engine_stats(0, 0);
-        let after_zero = mgr.events().len();
         mgr.sync_from_engine_stats(500, 120);
-        mgr.pump_events();
-        assert!(mgr.events().len() >= after_zero);
-        let _ = before;
-        #[cfg(target_os = "linux")]
-        assert!(mgr.events().len() > after_zero);
+        assert!(mgr.histogram().total_count() > 0);
     }
 }

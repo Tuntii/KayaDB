@@ -42,6 +42,7 @@ use crate::audit::AuditLog;
 use crate::membership::{load_persisted_roster, persist_roster, shared_roster, SharedRoster};
 use crate::raft_persister::RaftPersister;
 
+#[cfg(feature = "ebpf")]
 use kaya_ebpf::{shared_probe_manager, ProbeConfig, SharedProbeManager};
 
 use client_ops::{ProposeReq, ReadIndexReq};
@@ -85,9 +86,11 @@ pub struct ClusterConfig {
     pub audit_log: bool,
     /// When `Some`, expose Prometheus metrics at this listen address (`GET /metrics`).
     pub metrics_addr: Option<SocketAddr>,
-    /// When true, start the in-process eBPF probe runtime (Linux userspace tap + optional simulated fallback).
+    /// When true, start the in-process eBPF probe runtime (`ebpf` feature).
+    #[cfg(feature = "ebpf")]
     pub ebpf_enabled: bool,
     /// Deterministic seed for eBPF trace artifacts.
+    #[cfg(feature = "ebpf")]
     pub ebpf_seed: u64,
 }
 
@@ -127,7 +130,9 @@ impl ClusterConfig {
             network_partitioned: None,
             audit_log: false,
             metrics_addr: None,
+            #[cfg(feature = "ebpf")]
             ebpf_enabled: false,
+            #[cfg(feature = "ebpf")]
             ebpf_seed: 0,
         }
     }
@@ -183,6 +188,7 @@ impl ClusterConfig {
     }
 
     /// Enable in-process eBPF observability with a deterministic trace seed.
+    #[cfg(feature = "ebpf")]
     pub fn with_ebpf(mut self, seed: u64) -> Self {
         self.ebpf_enabled = true;
         self.ebpf_seed = seed;
@@ -225,10 +231,19 @@ pub(crate) type SharedApplyIndex = Arc<Mutex<RaftApplyIndex>>;
 
 async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     // ── engine ────────────────────────────────────────────────────────────────
+    #[cfg(feature = "ebpf")]
+    let durability_mode = if config.ebpf_enabled {
+        DurabilityMode::Strict
+    } else {
+        DurabilityMode::Relaxed
+    };
+    #[cfg(not(feature = "ebpf"))]
+    let durability_mode = DurabilityMode::Relaxed;
+
     let engine_cfg = EngineConfig {
         data_dir: config.data_dir.clone(),
         durability: DurabilityConfig {
-            mode: DurabilityMode::Relaxed,
+            mode: durability_mode,
             ..DurabilityConfig::default()
         },
         ..EngineConfig::default()
@@ -344,6 +359,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         config.node_id.0
     );
 
+    #[cfg(feature = "ebpf")]
     let shared_ebpf: Option<SharedProbeManager> = if config.ebpf_enabled {
         let config_hash = format!(
             "node={}:durability=strict:ebpf_seed={}",
@@ -371,6 +387,26 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         None
     };
 
+    #[cfg(feature = "ebpf")]
+    let ebpf_pump_fut = if let Some(ref ebpf) = shared_ebpf {
+        let ebpf = ebpf.clone();
+        let engine = shared_engine.clone();
+        Some(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let stats = engine.lock().await.stats();
+                let mut guard = ebpf.lock();
+                guard.sync_from_engine_stats(stats.wal_fsync_total_us, stats.wal_fsync_max_us);
+                let _ = guard.write_status();
+                if !guard.events().is_empty() {
+                    let _ = guard.flush_trace();
+                }
+            }
+        })
+    } else {
+        None
+    };
+
     let metrics_fut = if let Some(metrics_addr) = config.metrics_addr {
         let metrics_listener = TcpListener::bind(metrics_addr).await?;
         let metrics_bound = metrics_listener.local_addr()?;
@@ -380,8 +416,15 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         );
         let r = shared_raft.clone();
         let e = shared_engine.clone();
-        let ebpf = shared_ebpf.clone();
-        Some(metrics_accept_loop(metrics_listener, r, e, ebpf))
+        #[cfg(feature = "ebpf")]
+        {
+            let ebpf = shared_ebpf.clone();
+            Some(metrics_accept_loop(metrics_listener, r, e, ebpf))
+        }
+        #[cfg(not(feature = "ebpf"))]
+        {
+            Some(metrics_accept_loop(metrics_listener, r, e))
+        }
     } else {
         None
     };
@@ -481,6 +524,39 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         config.tls.clone(),
     );
 
+    #[cfg(feature = "ebpf")]
+    match (metrics_fut, ebpf_pump_fut) {
+        (Some(metrics_fut), Some(ebpf_pump_fut)) => {
+            tokio::select! {
+                _ = accept_fut => {}
+                _ = raft_fut => {}
+                _ = metrics_fut => {}
+                _ = ebpf_pump_fut => {}
+            }
+        }
+        (Some(metrics_fut), None) => {
+            tokio::select! {
+                _ = accept_fut => {}
+                _ = raft_fut => {}
+                _ = metrics_fut => {}
+            }
+        }
+        (None, Some(ebpf_pump_fut)) => {
+            tokio::select! {
+                _ = accept_fut => {}
+                _ = raft_fut => {}
+                _ = ebpf_pump_fut => {}
+            }
+        }
+        (None, None) => {
+            tokio::select! {
+                _ = accept_fut => {}
+                _ = raft_fut => {}
+            }
+        }
+    }
+
+    #[cfg(not(feature = "ebpf"))]
     match metrics_fut {
         Some(metrics_fut) => {
             tokio::select! {
@@ -497,6 +573,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         }
     }
 
+    #[cfg(feature = "ebpf")]
     if let Some(ebpf) = shared_ebpf {
         let mut guard = ebpf.lock();
         guard.pump_events();
@@ -513,6 +590,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ebpf")]
 async fn metrics_accept_loop(
     listener: TcpListener,
     raft: SharedRaft,
@@ -530,6 +608,23 @@ async fn metrics_accept_loop(
     }
 }
 
+#[cfg(not(feature = "ebpf"))]
+async fn metrics_accept_loop(
+    listener: TcpListener,
+    raft: SharedRaft,
+    engine: SharedEngine,
+) -> std::io::Result<()> {
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let raft = raft.clone();
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            let _ = handle_metrics_connection(stream, raft, engine).await;
+        });
+    }
+}
+
+#[cfg(feature = "ebpf")]
 async fn handle_metrics_connection(
     mut stream: TcpStream,
     raft: SharedRaft,
@@ -559,6 +654,36 @@ async fn handle_metrics_connection(
         };
         let ebpf_hist = ebpf.as_ref().map(|mgr| mgr.lock().histogram().clone());
         let body = crate::metrics::render_prometheus_with_ebpf(&snapshot, ebpf_hist.as_ref());
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n{body}");
+        stream.write_all(response.as_bytes()).await?;
+    } else {
+        let response = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\n";
+        stream.write_all(response.as_bytes()).await?;
+    }
+    stream.shutdown().await?;
+    Ok(())
+}
+
+#[cfg(not(feature = "ebpf"))]
+async fn handle_metrics_connection(
+    mut stream: TcpStream,
+    raft: SharedRaft,
+    engine: SharedEngine,
+) -> std::io::Result<()> {
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await?;
+    let request = std::str::from_utf8(&buf[..n]).unwrap_or("");
+
+    if request.starts_with("GET /metrics") {
+        let snapshot = {
+            let (status, is_leader) = {
+                let guard = raft.lock().unwrap();
+                (guard.status(), guard.is_leader())
+            };
+            let engine_stats = engine.lock().await.stats();
+            crate::metrics::MetricsSnapshot::from_engine_and_raft(engine_stats, &status, is_leader)
+        };
+        let body = crate::metrics::render_prometheus(&snapshot);
         let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n{body}");
         stream.write_all(response.as_bytes()).await?;
     } else {

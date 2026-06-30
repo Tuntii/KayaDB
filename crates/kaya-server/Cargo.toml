@@ -18,11 +18,12 @@ kaya-engine.workspace = true
 kaya-io.workspace = true
 kaya-net.workspace = true
 kaya-raft = { workspace = true, features = ["disk-storage"] }
-kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.46" }
+kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.46", optional = true }
 tokio.workspace = true
 
 [features]
 default = []
+ebpf = ["dep:kaya-ebpf"]
 tls = ["kaya-net/tls"]
 
 [lib]
@@ -34,6 +35,6 @@ path = "src/main.rs"
 
 [dev-dependencies]
 kaya-client = { path = "../kaya-client" }
+kaya-net = { path = "../kaya-net" }
 kaya-sim = { path = "../kaya-sim" }
 serial_test = "3"
-

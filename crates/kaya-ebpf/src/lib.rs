@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn probe_manager_lifecycle_and_trace_roundtrip() {
         let dir = tempdir().unwrap();
-        let mut mgr = ProbeManager::new(ProbeConfig::for_data_dir(dir.path(), 42, "unit-test"));
+        let mut mgr = ProbeManager::new(ProbeConfig::for_tests(dir.path(), 42, "unit-test"));
         mgr.attach().unwrap();
         mgr.pump_events();
         mgr.flush_trace().unwrap();

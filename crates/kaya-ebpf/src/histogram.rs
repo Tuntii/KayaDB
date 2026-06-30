@@ -49,6 +49,10 @@ impl FsyncHistogram {
         self.fsync_count + self.fdatasync_count
     }
 
+    pub fn has_nonzero_observations(&self) -> bool {
+        self.total_count() > 0 && (self.fsync_sum_us > 0 || self.fdatasync_sum_us > 0)
+    }
+
     pub fn render_prometheus(&self) -> String {
         let mut out = String::new();
         render_syscall_histogram(

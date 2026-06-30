@@ -84,11 +84,20 @@ fn run() -> Result<(), String> {
         None
     };
 
-    let ebpf_enabled = args.iter().any(|a| a == "--ebpf");
-    if ebpf_enabled {
+    let ebpf_flag = args.iter().any(|a| a == "--ebpf");
+    if ebpf_flag {
         args.retain(|a| a != "--ebpf");
     }
+    #[cfg(feature = "ebpf")]
+    let ebpf_enabled = ebpf_flag;
+    #[cfg(not(feature = "ebpf"))]
+    if ebpf_flag {
+        return Err(
+            "eBPF support not compiled in; rebuild kayadb-server with --features ebpf".to_owned(),
+        );
+    }
 
+    #[cfg(feature = "ebpf")]
     let ebpf_seed: u64 = if ebpf_enabled {
         take_value(&mut args, "--ebpf-seed")
             .map(|s| s.parse::<u64>().map_err(|e| format!("--ebpf-seed: {e}")))
@@ -195,6 +204,7 @@ fn run() -> Result<(), String> {
         config = config.with_join_cluster();
     }
 
+    #[cfg(feature = "ebpf")]
     if ebpf_enabled {
         config = config.with_ebpf(ebpf_seed);
     }

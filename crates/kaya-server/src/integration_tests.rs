@@ -1233,6 +1233,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
+    #[cfg(feature = "ebpf")]
+    fn prometheus_sample_value(body: &str, metric_prefix: &str) -> Option<u64> {
+        body.lines()
+            .find(|line| line.starts_with(metric_prefix) && !line.contains("#"))
+            .and_then(|line| line.split_whitespace().last())
+            .and_then(|v| v.parse().ok())
+    }
+
+    #[cfg(feature = "ebpf")]
     #[serial]
     #[tokio::test]
     async fn ebpf_enabled_metrics_expose_fsync_histogram() {
@@ -1269,18 +1278,57 @@ mod tests {
         let (status, _) = roundtrip(client_addr, 1, &put).await.unwrap();
         assert_eq!(status, 0);
 
-        for _ in 0..2 {
+        async fn scrape_metrics_body(metrics_addr: SocketAddr) -> String {
             let mut stream = tokio::net::TcpStream::connect(metrics_addr).await.unwrap();
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             stream
                 .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
                 .await
                 .unwrap();
-            let mut buf = vec![0u8; 16_384];
+            let mut buf = vec![0u8; 32_768];
             let n = stream.read(&mut buf).await.unwrap();
-            let body = String::from_utf8_lossy(&buf[..n]);
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        }
+
+        let mut saw_nonzero = false;
+        for _ in 0..80 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let body = scrape_metrics_body(metrics_addr).await;
+            let ebpf_count = prometheus_sample_value(
+                &body,
+                "kaya_ebpf_fsync_latency_us_count{syscall=\"fsync\"}",
+            )
+            .unwrap_or(0);
+            let wal_total = prometheus_sample_value(&body, "kaya_wal_fsync_total_us").unwrap_or(0);
+            if ebpf_count > 0 && wal_total > 0 {
+                saw_nonzero = true;
+                break;
+            }
+        }
+        assert!(saw_nonzero, "timed out waiting for non-zero eBPF/WAL fsync metrics");
+
+        for _run in 0..2 {
+            let body = scrape_metrics_body(metrics_addr).await;
+
+            let ebpf_count = prometheus_sample_value(
+                &body,
+                "kaya_ebpf_fsync_latency_us_count{syscall=\"fsync\"}",
+            )
+            .unwrap_or(0);
+            let ebpf_sum = prometheus_sample_value(
+                &body,
+                "kaya_ebpf_fsync_latency_us_sum{syscall=\"fsync\"}",
+            )
+            .unwrap_or(0);
+            let wal_total = prometheus_sample_value(&body, "kaya_wal_fsync_total_us").unwrap_or(0);
+
+            assert!(
+                ebpf_count > 0,
+                "expected non-zero eBPF fsync count after PUT; body:\n{body}"
+            );
+            assert!(ebpf_sum > 0, "expected non-zero eBPF fsync sum");
+            assert!(wal_total > 0, "expected non-zero userspace wal fsync total");
             assert!(body.contains("kaya_ebpf_fsync_latency_us_bucket"));
-            assert!(body.contains("kaya_wal_fsync_total_us"));
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 

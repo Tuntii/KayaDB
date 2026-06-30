@@ -1,0 +1,135 @@
+//! Launch real `kayadb-server --ebpf` and verify non-zero eBPF Prometheus samples.
+
+#![cfg(feature = "ebpf")]
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
+use kaya_net::{encode_put_payload, roundtrip};
+use serial_test::serial;
+use tokio::net::TcpListener;
+
+fn server_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/debug/kayadb-server.exe")
+}
+
+async fn free_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+fn prometheus_sample(body: &str, prefix: &str) -> Option<u64> {
+    body.lines()
+        .find(|l| l.starts_with(prefix) && !l.contains("#"))
+        .and_then(|l| l.split_whitespace().last())
+        .and_then(|v| v.parse().ok())
+}
+
+fn spawn_server(data_dir: &PathBuf, client: SocketAddr, raft: SocketAddr, metrics: SocketAddr) -> Child {
+    Command::new(server_bin())
+        .args([
+            "--node-id",
+            "1",
+            "--data",
+            &data_dir.display().to_string(),
+            "--client-addr",
+            &client.to_string(),
+            "--raft-addr",
+            &raft.to_string(),
+            "--metrics-addr",
+            &metrics.to_string(),
+            "--ebpf",
+            "--ebpf-seed",
+            "42",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn kayadb-server")
+}
+
+#[serial]
+#[tokio::test]
+async fn kayadb_server_bin_ebpf_metrics_nonzero_after_put() {
+    assert!(
+        server_bin().exists(),
+        "build kayadb-server first: cargo build -p kaya-server --features ebpf --bin kayadb-server"
+    );
+
+    let test_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let data_dir = std::env::temp_dir().join(format!("kayadb_bin_ebpf_{test_id}"));
+    let client_port = free_port().await;
+    let raft_port = free_port().await;
+    let metrics_port = free_port().await;
+    let client_addr: SocketAddr = format!("127.0.0.1:{client_port}").parse().unwrap();
+    let raft_addr: SocketAddr = format!("127.0.0.1:{raft_port}").parse().unwrap();
+    let metrics_addr: SocketAddr = format!("127.0.0.1:{metrics_port}").parse().unwrap();
+
+    let mut child = spawn_server(&data_dir, client_addr, raft_addr, metrics_addr);
+
+    let mut ready = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Ok((status, body)) = roundtrip(client_addr, 5, &[]).await {
+            if status == 0 && body == b"leader" {
+                ready = true;
+                break;
+            }
+        }
+    }
+    assert!(ready, "server failed to become leader");
+
+    let put = encode_put_payload(b"bin-ebpf-key", b"bin-ebpf-val");
+    let (status, _) = roundtrip(client_addr, 1, &put).await.unwrap();
+    assert_eq!(status, 0);
+
+    let mut saw_nonzero = false;
+    for _ in 0..80 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut stream = tokio::net::TcpStream::connect(metrics_addr).await.unwrap();
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 32_768];
+        let n = stream.read(&mut buf).await.unwrap();
+        let body = String::from_utf8_lossy(&buf[..n]);
+        let count = prometheus_sample(&body, "kaya_ebpf_fsync_latency_us_count{syscall=\"fsync\"}")
+            .unwrap_or(0);
+        let wal = prometheus_sample(&body, "kaya_wal_fsync_total_us").unwrap_or(0);
+        if count > 0 && wal > 0 {
+            saw_nonzero = true;
+            break;
+        }
+    }
+    assert!(saw_nonzero, "bin launch: timed out waiting for non-zero ebpf metrics");
+
+    for _run in 0..2 {
+        let mut stream = tokio::net::TcpStream::connect(metrics_addr).await.unwrap();
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 32_768];
+        let n = stream.read(&mut buf).await.unwrap();
+        let body = String::from_utf8_lossy(&buf[..n]).to_string();
+
+        let count = prometheus_sample(&body, "kaya_ebpf_fsync_latency_us_count{syscall=\"fsync\"}")
+            .unwrap_or(0);
+        let sum = prometheus_sample(&body, "kaya_ebpf_fsync_latency_us_sum{syscall=\"fsync\"}")
+            .unwrap_or(0);
+        assert!(count > 0, "bin launch: eBPF count must be >0\n{body}");
+        assert!(sum > 0, "bin launch: eBPF sum must be >0");
+    }
+
+    let _ = child.kill();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}

@@ -8,10 +8,10 @@ fn bounded_chaos_workload_produces_trace_with_durability_events() {
     let dir = tempdir().unwrap();
     let seed = 2026;
     let mut mgr = ProbeManager::new(ProbeConfig::for_data_dir(dir.path(), seed, "chaos-bounded"));
+    // report_fsync drives real tap path (not simulated prefill).
     mgr.attach().unwrap();
-    mgr.pump_events();
 
-    // Simulate workload + crash-injection window: WAL fsync bursts.
+    // Simulate workload + crash-injection window via userspace tap (report_fsync).
     for i in 0..5u64 {
         mgr.report_fsync(SyscallKind::Fsync, 80 + i * 20);
         mgr.report_fsync(SyscallKind::Fdatasync, 40 + i * 10);

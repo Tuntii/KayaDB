@@ -1,5 +1,6 @@
 //! Prometheus text exposition for engine and Raft observability.
 
+#[cfg(feature = "ebpf")]
 use kaya_ebpf::FsyncHistogram;
 use kaya_engine::EngineStats;
 use kaya_raft::{RaftStatus, Role};
@@ -39,17 +40,8 @@ fn role_label(role: Role) -> String {
     format!("{role:?}").to_lowercase()
 }
 
-/// Render Prometheus text exposition format (0.0.4) for the given snapshot.
-pub fn render_prometheus(snapshot: &MetricsSnapshot) -> String {
-    render_prometheus_with_ebpf(snapshot, None)
-}
-
-/// Render engine/Raft metrics plus optional eBPF-derived fsync histograms.
-pub fn render_prometheus_with_ebpf(
-    snapshot: &MetricsSnapshot,
-    ebpf: Option<&FsyncHistogram>,
-) -> String {
-    let mut body = format!(
+fn render_base_prometheus(snapshot: &MetricsSnapshot) -> String {
+    format!(
         concat!(
             "# HELP kaya_wal_fsync_total_us Cumulative microseconds spent in WAL fsync calls.\n",
             "# TYPE kaya_wal_fsync_total_us counter\n",
@@ -72,7 +64,28 @@ pub fn render_prometheus_with_ebpf(
         snapshot.live_sstables,
         snapshot.raft_term,
         snapshot.raft_is_leader,
-    );
+    )
+}
+
+/// Render Prometheus text exposition format (0.0.4) for the given snapshot.
+pub fn render_prometheus(snapshot: &MetricsSnapshot) -> String {
+    #[cfg(feature = "ebpf")]
+    {
+        render_prometheus_with_ebpf(snapshot, None)
+    }
+    #[cfg(not(feature = "ebpf"))]
+    {
+        render_base_prometheus(snapshot)
+    }
+}
+
+/// Render engine/Raft metrics plus optional eBPF-derived fsync histograms.
+#[cfg(feature = "ebpf")]
+pub fn render_prometheus_with_ebpf(
+    snapshot: &MetricsSnapshot,
+    ebpf: Option<&FsyncHistogram>,
+) -> String {
+    let mut body = render_base_prometheus(snapshot);
     if let Some(hist) = ebpf {
         body.push_str(&hist.render_prometheus());
     }
@@ -141,6 +154,7 @@ mod tests {
         assert_eq!(snapshot.raft_leader_id, Some(1));
     }
 
+    #[cfg(feature = "ebpf")]
     #[test]
     fn render_prometheus_includes_ebpf_fsync_histogram_when_present() {
         let snapshot = sample_snapshot();
