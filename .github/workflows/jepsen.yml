@@ -46,7 +46,7 @@ jobs:
           cargo test -p kaya-jepsen-test --test cluster_controller_smoke -- --test-threads=1
 
       - name: Chaos smoke (smoke_scenario registry entry)
-        run: cargo test -p kaya-jepsen-test --test smoke -- --nocapture --test-threads=1
+        run: cargo test -p kaya-jepsen-test --test scenario_smoke -- --nocapture --test-threads=1
 
   full-suite:
     if: >-
