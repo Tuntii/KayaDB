@@ -33,7 +33,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Pages
-        uses: actions/configure-pages@v4
+        uses: actions/configure-pages@v6
 
       - name: Prepare site artifact
         run: bash scripts/prepare_docs_site.sh /tmp/site
