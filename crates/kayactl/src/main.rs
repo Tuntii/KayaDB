@@ -83,14 +83,16 @@ fn run() -> Result<()> {
     if args.first().map(String::as_str) == Some("watch") {
         return watch::run_watch(
             args,
-            data_dir,
-            durability,
-            json,
-            latency_view,
-            server_addrs,
-            timeout,
-            watch_interval,
-            client_token,
+            watch::WatchContext {
+                data_dir,
+                durability,
+                json,
+                latency_view,
+                server_addrs,
+                timeout,
+                interval: watch_interval,
+                client_token,
+            },
         );
     }
 
@@ -101,7 +103,6 @@ fn run() -> Result<()> {
             server_addrs,
             json,
             timeout,
-            latency_view,
             operator_token,
             client_token,
         );

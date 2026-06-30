@@ -35,30 +35,36 @@ fn chrono_lite_now() -> String {
     format!("unix={secs}")
 }
 
-pub(crate) fn run_watch(
-    args: Vec<String>,
-    data_dir: String,
-    durability: DurabilityMode,
-    json: bool,
-    latency_view: bool,
-    server_addrs: Vec<SocketAddr>,
-    timeout: Option<Duration>,
-    interval: Duration,
-    client_token: Option<String>,
-) -> Result<()> {
+pub(crate) struct WatchContext {
+    pub data_dir: String,
+    pub durability: DurabilityMode,
+    pub json: bool,
+    pub latency_view: bool,
+    pub server_addrs: Vec<SocketAddr>,
+    pub timeout: Option<Duration>,
+    pub interval: Duration,
+    pub client_token: Option<String>,
+}
+
+pub(crate) fn run_watch(args: Vec<String>, ctx: WatchContext) -> Result<()> {
     match args.as_slice() {
         [cmd, sub] if cmd == "watch" && sub == "status" => {
-            if !server_addrs.is_empty() {
+            if !ctx.server_addrs.is_empty() {
                 run_watch_server(
-                    server_addrs,
-                    json,
-                    latency_view,
-                    timeout,
-                    interval,
-                    client_token,
+                    ctx.server_addrs,
+                    ctx.json,
+                    ctx.timeout,
+                    ctx.interval,
+                    ctx.client_token,
                 )
             } else {
-                run_watch_local(data_dir, durability, json, latency_view, interval)
+                run_watch_local(
+                    ctx.data_dir,
+                    ctx.durability,
+                    ctx.json,
+                    ctx.latency_view,
+                    ctx.interval,
+                )
             }
         }
         [cmd] if cmd == "watch" => Err(KayaError::invalid_argument(
@@ -92,7 +98,6 @@ fn run_watch_local(
 fn run_watch_server(
     endpoints: Vec<SocketAddr>,
     json: bool,
-    latency_view: bool,
     timeout: Option<Duration>,
     interval: Duration,
     client_token: Option<String>,
@@ -101,8 +106,7 @@ fn run_watch_server(
         loop {
             clear_screen();
             print_timestamp_header();
-            fetch_and_print_server_status(&endpoints, json, latency_view, timeout, &client_token)
-                .await?;
+            fetch_and_print_server_status(&endpoints, json, timeout, &client_token).await?;
             io::stdout().flush().ok();
             tokio::time::sleep(interval).await;
         }
@@ -112,7 +116,6 @@ fn run_watch_server(
 async fn fetch_and_print_server_status(
     endpoints: &[SocketAddr],
     json: bool,
-    latency_view: bool,
     timeout: Option<Duration>,
     client_token: &Option<String>,
 ) -> Result<()> {
@@ -173,8 +176,6 @@ async fn fetch_and_print_server_status(
                 String::from_utf8(body).map_err(|e| KayaError::corruption(e.to_string()))?;
             if json {
                 println!("{}", stats_str);
-            } else if latency_view {
-                stats_cmd::print_human_stats_from_json(&stats_str);
             } else {
                 stats_cmd::print_human_stats_from_json(&stats_str);
             }

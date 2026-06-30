@@ -42,6 +42,8 @@ struct ScanItemInput {
     value_hex: Option<String>,
 }
 
+type ScanItems = Vec<(Vec<u8>, Vec<u8>)>;
+
 fn vectors_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/clients/conformance/vectors.json")
 }
@@ -75,7 +77,7 @@ fn bytes_from_fields(
     }
 }
 
-fn scan_items_from_input(items: &[ScanItemInput]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+fn scan_items_from_input(items: &[ScanItemInput]) -> Result<ScanItems, String> {
     items
         .iter()
         .enumerate()
@@ -117,9 +119,7 @@ fn run_vector(vector: &ConformanceVector) {
 
 fn run_put_roundtrip(input: &VectorInput) -> Result<(), String> {
     if let Some(raw) = &input.raw_hex {
-        return decode_put_payload(&decode_hex(raw)?)
-            .map(|_| ())
-            .map_err(|e| e);
+        return decode_put_payload(&decode_hex(raw)?).map(|_| ());
     }
     let key = bytes_from_fields(input.key.as_deref(), input.key_hex.as_deref(), "key")?;
     let value = bytes_from_fields(input.value.as_deref(), input.value_hex.as_deref(), "value")?;
@@ -135,9 +135,7 @@ fn run_put_roundtrip(input: &VectorInput) -> Result<(), String> {
 
 fn run_key_roundtrip(input: &VectorInput) -> Result<(), String> {
     if let Some(raw) = &input.raw_hex {
-        return decode_key_payload(&decode_hex(raw)?)
-            .map(|_| ())
-            .map_err(|e| e);
+        return decode_key_payload(&decode_hex(raw)?).map(|_| ());
     }
     let key = bytes_from_fields(input.key.as_deref(), input.key_hex.as_deref(), "key")?;
     let encoded = encode_key_payload(&key);
@@ -198,9 +196,7 @@ fn run_client_roundtrip(input: &VectorInput) -> Result<(), String> {
 
 fn run_scan_roundtrip(input: &VectorInput) -> Result<(), String> {
     if let Some(raw) = &input.raw_hex {
-        return decode_scan_response(&decode_hex(raw)?)
-            .map(|_| ())
-            .map_err(|e| e);
+        return decode_scan_response(&decode_hex(raw)?).map(|_| ());
     }
     let items = scan_items_from_input(input.items.as_deref().unwrap_or(&[]))?;
     let encoded = encode_scan_response(&items);
@@ -213,9 +209,7 @@ fn run_scan_roundtrip(input: &VectorInput) -> Result<(), String> {
 
 fn run_error_roundtrip(input: &VectorInput) -> Result<(), String> {
     if let Some(raw) = &input.raw_hex {
-        return decode_error_payload(&decode_hex(raw)?)
-            .map(|_| ())
-            .map_err(|e| e);
+        return decode_error_payload(&decode_hex(raw)?).map(|_| ());
     }
     let message = input
         .message

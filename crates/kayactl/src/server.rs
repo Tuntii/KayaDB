@@ -22,21 +22,11 @@ pub(crate) fn run_server_mode(
     endpoints: Vec<SocketAddr>,
     json: bool,
     timeout: Option<Duration>,
-    latency_view: bool,
     operator_token: Option<String>,
     client_token: Option<String>,
 ) -> Result<()> {
     block_on(async move {
-        run_server_mode_async(
-            args,
-            endpoints,
-            json,
-            timeout,
-            latency_view,
-            operator_token,
-            client_token,
-        )
-        .await
+        run_server_mode_async(args, endpoints, json, timeout, operator_token, client_token).await
     })
 }
 
@@ -107,7 +97,6 @@ async fn run_server_mode_async(
     endpoints: Vec<SocketAddr>,
     json: bool,
     timeout: Option<Duration>,
-    latency_view: bool,
     operator_token: Option<String>,
     client_token: Option<String>,
 ) -> Result<()> {
@@ -272,11 +261,6 @@ async fn run_server_mode_async(
                     String::from_utf8(body).map_err(|e| KayaError::corruption(e.to_string()))?;
                 if json {
                     println!("{}", stats_str);
-                } else if latency_view {
-                    // Best-effort: the full human already includes latency fields now.
-                    // For a focused view we still go through the extractor (it prints everything relevant).
-                    stats_cmd::print_human_stats_from_json(&stats_str);
-                    // Future: could parse and call a pure latency printer, but enriched human is good.
                 } else {
                     stats_cmd::print_human_stats_from_json(&stats_str);
                 }
