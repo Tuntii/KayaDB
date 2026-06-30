@@ -1,13 +1,46 @@
 //! Kernel ring-buffer parsing and BPF object verification tests.
 
-use kaya_ebpf::backend::kernel::{parse_ringbuf_batch, RawFsyncEvent};
+use kaya_ebpf::backend::kernel::{
+    parse_raw_fsync_event_at, parse_ringbuf_batch, RawFsyncEvent,
+};
 use kaya_ebpf::{ProbeEvent, SyscallKind};
 
 #[test]
 fn bpf_source_declares_target_pid_filter() {
-    let src = include_str!("../bpf/fsync_latency.bpf.c");
-    assert!(src.contains("target_pid"), "bpf must declare target_pid map");
-    assert!(src.contains("pid_allowed"), "bpf must filter by target pid");
+    let bpf_src = include_str!("../bpf/fsync_latency.bpf.c");
+    assert!(bpf_src.contains("target_pid"), "bpf must declare target_pid map");
+    assert!(bpf_src.contains("pid_allowed"), "bpf must filter by target pid");
+
+    let rust_src = include_str!("../src/backend/kernel.rs");
+    assert!(
+        rust_src.contains("set_target_pid_map"),
+        "live attach must write target_pid map from userspace"
+    );
+    assert!(
+        rust_src.contains("parse_raw_fsync_event_at"),
+        "live ringbuf drain must stamp ts_ns at userspace drain time"
+    );
+}
+
+#[test]
+fn live_ringbuf_parse_stamps_nonzero_ts_ns() {
+    let raw = RawFsyncEvent {
+        latency_us: 512,
+        syscall_kind: 0,
+    };
+    let event = parse_raw_fsync_event_at(&raw, 1, 9_876_543_210);
+    match event {
+        ProbeEvent::FsyncLatency {
+            ts_ns,
+            latency_us,
+            syscall,
+            ..
+        } => {
+            assert_eq!(ts_ns, 9_876_543_210);
+            assert_eq!(latency_us, 512);
+            assert_eq!(syscall, SyscallKind::Fsync);
+        }
+    }
 }
 
 #[test]

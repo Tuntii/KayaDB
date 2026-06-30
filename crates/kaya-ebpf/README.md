@@ -12,8 +12,13 @@ Optional in-process observability for KayaDB: probe attach/detach, deterministic
 | **userspace-tap** | `ProbeConfig::for_tap` only | Explicit tap (not used by server) |
 | **simulated** | `ProbeConfig::for_tests` | Seeded test events |
 
-`kayadb-server --ebpf` selects **kernel-live** or **kernel-simulated** via
-`ProbeConfig::for_server`. Engine counters (`kaya_wal_fsync_*`) remain separate.
+`kayadb-server --ebpf` uses `ProbeConfig::for_server` (**KernelPreferred**):
+attempt **kernel-live** attach first, fall back to **kernel-simulated** when live
+is unavailable (non-Linux, missing bpf `.o`, or no `CAP_BPF`). Engine counters
+(`kaya_wal_fsync_*`) remain separate.
+
+Linux CI runs `scripts/linux_verify_ebpf_kernel.sh` (bpf compile + `bpf_object_loads`
+without `CAP_BPF`). Optional live attach: `KAYA_EBPF_LIVE_KERNEL=1 cargo test -p kaya-ebpf --features kernel-probes live_kernel_attach -- --ignored`.
 
 ## Features
 

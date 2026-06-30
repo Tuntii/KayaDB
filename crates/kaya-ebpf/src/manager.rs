@@ -247,6 +247,31 @@ mod tests {
         let mgr = ProbeManager::new(ProbeConfig::for_server(dir.path(), 1, "srv"));
         assert!(!mgr.is_attached());
         assert!(!mgr.kernel_streaming(), "KernelLive attach is deferred until attach()");
+        assert!(
+            mgr.backend_name().contains("kernel-live"),
+            "KernelPreferred must start as deferred live slot, got {}",
+            mgr.backend_name()
+        );
+    }
+
+    #[test]
+    fn server_config_kernel_preferred_falls_back_to_simulated() {
+        let dir = tempdir().unwrap();
+        let mut mgr = ProbeManager::new(ProbeConfig::for_server(dir.path(), 99, "fallback"));
+        assert!(
+            mgr.backend_name().contains("kernel-live"),
+            "expected deferred live slot before attach"
+        );
+        mgr.attach().expect("live unavailable must fall back to kernel-simulated");
+        assert!(
+            mgr.backend_name().contains("kernel-simulated")
+                || mgr.backend_name() == "kernel-live",
+            "after attach: live when CAP_BPF available, else kernel-simulated; got {}",
+            mgr.backend_name()
+        );
+        assert!(mgr.kernel_streaming());
+        mgr.pump_events();
+        assert!(mgr.histogram().has_nonzero_observations());
     }
 
     #[test]

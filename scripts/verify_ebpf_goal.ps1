@@ -14,6 +14,9 @@ $buildNotes = @(
     "timestamp=$(Get-Date -Format o)"
 )
 
+Write-Host "==> workspace tests (plan step 2)"
+cargo test --workspace --exclude kaya-jepsen-test -- --test-threads=1 2>&1 | Tee-Object -FilePath "$Scratch\workspace-test.log"
+
 Write-Host "==> kaya-ebpf unit + integration tests"
 cargo test -p kaya-ebpf 2>&1 | Tee-Object -FilePath "$Scratch\kaya-ebpf-test.log"
 
@@ -46,8 +49,9 @@ if ($IsLinux -or (Test-Path "/proc/version")) {
     $buildNotes += "kaya_ebpf_bpf_built=skipped-non-linux (aya+bpf compile require Linux target_os)"
     $buildNotes += "kernel-probes cargo=skipped (aya crate does not compile on Windows)"
     $buildNotes += "bpf_source_pid_filter=verified via cargo test -p kaya-ebpf --test kernel_ringbuf"
-    $buildNotes += "kernel_slot_runtime=kernel-simulated via ProbeConfig::for_server"
-    $buildNotes += "live_kernel_attach=requires-linux+CAP_BPF"
+    $buildNotes += "kernel_slot_runtime=KernelPreferred try-live-then-fallback-to-kernel-simulated"
+    $buildNotes += "live_kernel_attach=requires-linux+CAP_BPF (see scripts/linux_verify_ebpf_kernel.sh + .github/workflows/ci.yml)"
+    $buildNotes += "linux_bpf_object_load=CI ubuntu step runs bpf_object_loads_without_cap_bpf"
 }
 
 $buildNotes | Add-Content -Path "$Scratch\kernel-build-notes.log"
@@ -77,5 +81,15 @@ cargo run -p kayactl --features ebpf -- ebpf trace wal --data ./data 2>&1 | Tee-
 ) | ForEach-Object {
     if (Test-Path $_) { "ok $_" } else { "MISSING $_" }
 } | Set-Content -Path "$Scratch\docs-check.log"
+
+@(
+    "verification_tiers:"
+    "  tier_a_cross_platform=kaya-ebpf + kernel_pipeline + kernel_ringbuf + server bin launch (this host)"
+    "  tier_b_linux_bpf_compile=scripts/linux_verify_ebpf_kernel.sh + ci.yml ebpf step on ubuntu-latest"
+    "  tier_c_live_attach=KAYA_EBPF_LIVE_KERNEL=1 on Linux with CAP_BPF (optional, #[ignore])"
+    "kernel_preferred_path=try KernelLive attach, fallback KernelSimulated on failure"
+    "live_ts_ns=stamped at ringbuf drain via parse_raw_fsync_event_at (BPF wire has no ts field)"
+    "pid_filter=bpf target_pid map + set_target_pid_map at live attach"
+) | Set-Content -Path "$Scratch\ebpf-verification-tier.txt"
 
 Write-Host "Evidence written to $Scratch"

@@ -30,6 +30,9 @@ jobs:
           cargo test --workspace --exclude kaya-jepsen-test -- --test-threads=1
           cargo test -p kaya-raft --features disk-storage -- --test-threads=1
 
+      - name: eBPF kernel-probes gate (Linux bpf.o load + ringbuf tests)
+        run: bash scripts/linux_verify_ebpf_kernel.sh
+
       - name: Smoke benchmark (bounded)
         run: cargo bench -p kaya-bench --bench smoke -- --noplot
 

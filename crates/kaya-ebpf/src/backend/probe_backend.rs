@@ -24,7 +24,7 @@ pub struct KernelLiveSlot {
 
 #[cfg(all(target_os = "linux", feature = "kernel-probes"))]
 impl KernelLiveSlot {
-    fn new_deferred() -> Self {
+    pub fn new_deferred() -> Self {
         Self {
             inner: None,
             attach_error: None,
@@ -43,6 +43,13 @@ impl KernelLiveSlot {
 #[cfg(not(all(target_os = "linux", feature = "kernel-probes")))]
 pub struct KernelLiveSlot;
 
+#[cfg(not(all(target_os = "linux", feature = "kernel-probes")))]
+impl KernelLiveSlot {
+    pub fn new_deferred() -> Self {
+        Self
+    }
+}
+
 impl ProbeBackend {
     pub fn build(selection: BackendSelection, seed: u64) -> Self {
         match selection {
@@ -58,16 +65,10 @@ impl ProbeBackend {
         }
     }
 
-    fn build_kernel_preferred(seed: u64) -> Self {
-        #[cfg(all(target_os = "linux", feature = "kernel-probes"))]
-        {
-            return Self::KernelLive(KernelLiveSlot::new_deferred());
-        }
-        #[cfg(not(all(target_os = "linux", feature = "kernel-probes")))]
-        {
-            let _ = seed;
-            Self::KernelSimulated(KernelSimulatedBackend::new(seed))
-        }
+    fn build_kernel_preferred(_seed: u64) -> Self {
+        // Server `--ebpf`: always attempt live attach first; ProbeManager falls back to
+        // kernel-simulated when live is unavailable (non-Linux, missing bpf .o, or no CAP_BPF).
+        Self::KernelLive(KernelLiveSlot::new_deferred())
     }
 
     pub fn attach(&mut self) -> Result<(), String> {

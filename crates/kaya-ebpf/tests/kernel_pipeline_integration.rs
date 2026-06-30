@@ -59,3 +59,40 @@ fn kernel_backend_streams_through_pipeline() {
     mgr.detach();
     assert!(!mgr.is_attached());
 }
+
+#[test]
+fn kernel_preferred_server_slot_try_live_then_streams() {
+    let dir = tempdir().unwrap();
+    let seed = 5150;
+    let mut mgr = ProbeManager::new(ProbeConfig::for_server(
+        dir.path(),
+        seed,
+        "kernel-preferred-server",
+    ));
+
+    assert!(
+        mgr.backend_name().contains("kernel-live"),
+        "for_server must defer live attach before attach()"
+    );
+    mgr.attach().expect("KernelPreferred must attach via live or simulated fallback");
+    assert!(
+        mgr.backend_name().contains("kernel"),
+        "attached backend must remain kernel-family"
+    );
+    mgr.pump_events();
+    assert!(mgr.histogram().has_nonzero_observations());
+
+    mgr.sync_from_engine_stats(1_500, 280);
+    let events = mgr.events();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, kaya_ebpf::ProbeEvent::FsyncLatency { ts_ns, .. } if *ts_ns > 0)),
+        "server kernel slot must emit non-zero ts_ns events"
+    );
+
+    mgr.write_status().unwrap();
+    let status_raw = std::fs::read_to_string(dir.path().join("ebpf/status.json")).unwrap();
+    assert!(status_raw.contains("kernel"));
+    mgr.detach();
+}

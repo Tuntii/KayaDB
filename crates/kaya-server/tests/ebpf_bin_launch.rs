@@ -189,9 +189,10 @@ async fn kayadb_server_bin_ebpf_metrics_nonzero_after_put() {
 
     let fallback_note = format!(
         "host={} os={}\n\
-         backend_slot=kernel-simulated (ProbeConfig::for_server on non-Linux; KernelLive needs Linux+kernel-probes+CAP_BPF)\n\
+         backend_slot=KernelPreferred try-live-then-fallback (kernel-simulated on this host; kernel-live when Linux+kernel-probes+CAP_BPF)\n\
          metrics_help=kernel-slot (not userspace-tap)\n\
          evidence=bin-metrics-scrape-0.txt bin-metrics-scrape-1.txt ebpf-metrics-integration.log ebpf-status.json\n\
+         linux_bpf_gate=scripts/linux_verify_ebpf_kernel.sh + .github/workflows/ci.yml\n\
          server_bin={}\n",
         std::env::consts::ARCH,
         std::env::consts::OS,

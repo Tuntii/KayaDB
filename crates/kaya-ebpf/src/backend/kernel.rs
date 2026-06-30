@@ -8,8 +8,22 @@ pub struct RawFsyncEvent {
     pub syscall_kind: u8,
 }
 
+/// Wall-clock nanoseconds stamped at ringbuf drain (BPF wire format has no ts field).
+pub fn drain_timestamp_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1)
+        .max(1)
+}
+
 /// Parse a ring-buffer item into a probe event (shared by live drain + tests).
 pub fn parse_raw_fsync_event(raw: &RawFsyncEvent, seq: u64) -> ProbeEvent {
+    parse_raw_fsync_event_at(raw, seq, drain_timestamp_ns())
+}
+
+/// Parse with an explicit drain timestamp (deterministic tests + live drain).
+pub fn parse_raw_fsync_event_at(raw: &RawFsyncEvent, seq: u64, ts_ns: u64) -> ProbeEvent {
     let syscall = if raw.syscall_kind == 1 {
         SyscallKind::Fdatasync
     } else {
@@ -19,7 +33,7 @@ pub fn parse_raw_fsync_event(raw: &RawFsyncEvent, seq: u64) -> ProbeEvent {
         seq,
         syscall,
         latency_us: raw.latency_us.max(1),
-        ts_ns: 0,
+        ts_ns: ts_ns.max(1),
     }
 }
 
@@ -111,7 +125,9 @@ impl KernelBackend {
                 continue;
             }
             let raw = unsafe { *(item.as_ptr() as *const RawFsyncEvent) };
-            self.pending.push(parse_raw_fsync_event(&raw, self.next_seq));
+            let ts_ns = drain_timestamp_ns();
+            self.pending
+                .push(parse_raw_fsync_event_at(&raw, self.next_seq, ts_ns));
             self.next_seq += 1;
         }
         self.pending.drain(..).collect()
@@ -257,32 +273,51 @@ mod tests {
 
     #[test]
     fn parse_raw_fsync_event_maps_syscall_kinds() {
-        let fsync = parse_raw_fsync_event(
+        let fsync = parse_raw_fsync_event_at(
             &RawFsyncEvent {
                 latency_us: 120,
                 syscall_kind: 0,
             },
             1,
+            42,
         );
-        let fdatasync = parse_raw_fsync_event(
+        let fdatasync = parse_raw_fsync_event_at(
             &RawFsyncEvent {
                 latency_us: 80,
                 syscall_kind: 1,
             },
             2,
+            43,
         );
         match fsync {
-            ProbeEvent::FsyncLatency { syscall, latency_us, .. } => {
+            ProbeEvent::FsyncLatency {
+                syscall,
+                latency_us,
+                ts_ns,
+                ..
+            } => {
                 assert_eq!(syscall, SyscallKind::Fsync);
                 assert_eq!(latency_us, 120);
+                assert_eq!(ts_ns, 42);
             }
         }
         match fdatasync {
-            ProbeEvent::FsyncLatency { syscall, latency_us, .. } => {
+            ProbeEvent::FsyncLatency {
+                syscall,
+                latency_us,
+                ts_ns,
+                ..
+            } => {
                 assert_eq!(syscall, SyscallKind::Fdatasync);
                 assert_eq!(latency_us, 80);
+                assert_eq!(ts_ns, 43);
             }
         }
+    }
+
+    #[test]
+    fn drain_timestamp_ns_is_nonzero() {
+        assert!(drain_timestamp_ns() > 0);
     }
 
     #[test]
