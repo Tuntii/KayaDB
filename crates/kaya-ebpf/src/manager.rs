@@ -1,15 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use serde::Serialize;
 
-use crate::backend::{EventBackend, StubBackend};
-#[cfg(target_os = "linux")]
-use crate::backend::LinuxCompositeBackend;
+use crate::backend::{BackendSelection, KernelSimulatedBackend, ProbeBackend};
 use crate::event::{ProbeEvent, SyscallKind};
-use crate::histogram::FsyncHistogram;
+use crate::pipeline::EventPipeline;
 use crate::trace::{write_trace, TraceReplayError};
 
 /// Configuration for the in-process probe runtime.
@@ -19,32 +16,61 @@ pub struct ProbeConfig {
     pub config_hash: String,
     pub trace_path: PathBuf,
     pub status_path: PathBuf,
-    /// Seeded simulated events (tests / CAP_BPF-less CI only).
-    pub simulated_fallback: bool,
-    /// Attempt kernel kprobe attach on Linux when `kernel-probes` feature is enabled.
-    pub try_kernel_probes: bool,
+    pub backend_selection: BackendSelection,
 }
 
 impl ProbeConfig {
-    /// Production config: no simulated events; kernel attach attempted on Linux+feature.
-    pub fn for_data_dir(data_dir: impl AsRef<Path>, seed: u64, config_hash: impl Into<String>) -> Self {
+    /// Server `--ebpf`: kernel slot (live when available, else kernel-simulated).
+    pub fn for_server(data_dir: impl AsRef<Path>, seed: u64, config_hash: impl Into<String>) -> Self {
         let data_dir = data_dir.as_ref();
         Self {
             seed,
             config_hash: config_hash.into(),
             trace_path: data_dir.join("ebpf/trace.jsonl"),
             status_path: data_dir.join("ebpf/status.json"),
-            simulated_fallback: false,
-            try_kernel_probes: cfg!(all(target_os = "linux", feature = "kernel-probes")),
+            backend_selection: BackendSelection::KernelPreferred,
         }
     }
 
-    /// Test/CI config with deterministic simulated events.
+    /// Explicit kernel-simulated slot (integration tests, Windows harness).
+    pub fn for_kernel_slot(data_dir: impl AsRef<Path>, seed: u64, config_hash: impl Into<String>) -> Self {
+        let data_dir = data_dir.as_ref();
+        Self {
+            seed,
+            config_hash: config_hash.into(),
+            trace_path: data_dir.join("ebpf/trace.jsonl"),
+            status_path: data_dir.join("ebpf/status.json"),
+            backend_selection: BackendSelection::KernelSimulated,
+        }
+    }
+
+    /// Legacy name — routes to server kernel slot.
+    pub fn for_data_dir(data_dir: impl AsRef<Path>, seed: u64, config_hash: impl Into<String>) -> Self {
+        Self::for_server(data_dir, seed, config_hash)
+    }
+
+    /// Seeded test-simulated backend (non-kernel family).
     pub fn for_tests(data_dir: impl AsRef<Path>, seed: u64, config_hash: impl Into<String>) -> Self {
-        let mut cfg = Self::for_data_dir(data_dir, seed, config_hash);
-        cfg.simulated_fallback = true;
-        cfg.try_kernel_probes = false;
-        cfg
+        let data_dir = data_dir.as_ref();
+        Self {
+            seed,
+            config_hash: config_hash.into(),
+            trace_path: data_dir.join("ebpf/trace.jsonl"),
+            status_path: data_dir.join("ebpf/status.json"),
+            backend_selection: BackendSelection::TestSimulated,
+        }
+    }
+
+    /// Userspace tap backend (unit tests only).
+    pub fn for_tap(data_dir: impl AsRef<Path>, seed: u64, config_hash: impl Into<String>) -> Self {
+        let data_dir = data_dir.as_ref();
+        Self {
+            seed,
+            config_hash: config_hash.into(),
+            trace_path: data_dir.join("ebpf/trace.jsonl"),
+            status_path: data_dir.join("ebpf/status.json"),
+            backend_selection: BackendSelection::Tap,
+        }
     }
 }
 
@@ -58,75 +84,59 @@ pub struct ProbeStatus {
     pub trace_path: String,
 }
 
-enum BackendKind {
-    #[cfg(target_os = "linux")]
-    Linux(LinuxCompositeBackend),
-    #[cfg(not(target_os = "linux"))]
-    Stub(StubBackend),
-}
-
 pub struct ProbeManager {
     config: ProbeConfig,
-    backend: BackendKind,
-    histogram: FsyncHistogram,
-    collected: Vec<ProbeEvent>,
+    backend: ProbeBackend,
+    pipeline: EventPipeline,
     last_wal_fsync_total_us: u64,
     last_wal_fsync_max_us: u64,
 }
 
 impl ProbeManager {
     pub fn new(config: ProbeConfig) -> Self {
-        let seed = if config.simulated_fallback {
-            Some(config.seed)
-        } else {
-            None
-        };
-        let backend = {
-            #[cfg(target_os = "linux")]
-            {
-                BackendKind::Linux(LinuxCompositeBackend::new(
-                    seed,
-                    config.try_kernel_probes,
-                ))
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                BackendKind::Stub(StubBackend::new(seed))
-            }
-        };
+        let backend = ProbeBackend::build(config.backend_selection, config.seed);
         Self {
             config,
             backend,
-            histogram: FsyncHistogram::new(),
-            collected: Vec::new(),
+            pipeline: EventPipeline::new(),
             last_wal_fsync_total_us: 0,
             last_wal_fsync_max_us: 0,
         }
     }
 
     pub fn attach(&mut self) -> Result<(), String> {
-        self.with_backend_mut(|b| b.attach())
+        match self.backend.attach() {
+            Ok(()) => Ok(()),
+            Err(_)
+                if self.config.backend_selection == BackendSelection::KernelPreferred =>
+            {
+                self.backend =
+                    ProbeBackend::KernelSimulated(KernelSimulatedBackend::new(self.config.seed));
+                self.backend.attach()
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn detach(&mut self) -> bool {
         self.pump_events();
-        self.with_backend_mut(|b| b.detach())
+        self.backend.detach()
     }
 
     pub fn is_attached(&self) -> bool {
-        self.with_backend(|b| b.is_attached())
+        self.backend.is_attached()
     }
 
     pub fn streaming(&self) -> bool {
         self.is_attached()
     }
 
-    pub fn histogram(&self) -> &FsyncHistogram {
-        &self.histogram
+    pub fn histogram(&self) -> &crate::histogram::FsyncHistogram {
+        self.pipeline.histogram()
     }
 
     pub fn events(&self) -> &[ProbeEvent] {
-        &self.collected
+        self.pipeline.events()
     }
 
     pub fn status(&self) -> ProbeStatus {
@@ -134,58 +144,32 @@ impl ProbeManager {
             attached: self.is_attached(),
             streaming: self.streaming(),
             backend: self.backend_name().to_owned(),
-            events_collected: self.collected.len() as u64,
+            events_collected: self.pipeline.event_count(),
             seed: self.config.seed,
             trace_path: self.config.trace_path.display().to_string(),
         }
     }
 
     pub fn pump_events(&mut self) {
-        let drained = self.with_backend_mut(|b| b.drain_events());
-        for mut event in drained {
-            let seq = self.collected.len() as u64 + 1;
-            let ProbeEvent::FsyncLatency { seq: ref mut event_seq, .. } = &mut event;
-            *event_seq = seq;
-            self.histogram.ingest(&event);
-            self.collected.push(event);
-        }
+        let drained = self.backend.drain_events();
+        self.pipeline.ingest_batch(drained);
     }
 
+    /// Sync WAL activity into the active backend slot, then drain.
     pub fn sync_from_engine_stats(&mut self, wal_fsync_total_us: u64, wal_fsync_max_us: u64) {
         if !self.is_attached() {
             return;
         }
-        // Kernel ringbuf supplies per-op samples; skip synthetic engine-delta tap injection.
-        if self.kernel_streaming() {
-            self.pump_events();
-            self.last_wal_fsync_total_us = wal_fsync_total_us;
-            self.last_wal_fsync_max_us = wal_fsync_max_us;
-            return;
-        }
         let delta = wal_fsync_total_us.saturating_sub(self.last_wal_fsync_total_us);
-        if delta > 0 {
-            let ts_ns = now_ns();
-            self.tap_report(SyscallKind::Fsync, wal_fsync_max_us.max(1), ts_ns);
-            if delta > wal_fsync_max_us {
-                self.tap_report(
-                    SyscallKind::Fdatasync,
-                    (delta - wal_fsync_max_us).max(1),
-                    ts_ns.wrapping_add(1),
-                );
-            }
-        }
+        self.backend.sync_wal_activity(delta, wal_fsync_max_us);
         self.last_wal_fsync_total_us = wal_fsync_total_us;
         self.last_wal_fsync_max_us = wal_fsync_max_us;
         self.pump_events();
     }
 
     pub fn report_fsync(&mut self, syscall: SyscallKind, latency_us: u64) {
-        self.tap_report(syscall, latency_us, now_ns());
+        self.backend.report_fsync(syscall, latency_us, 0);
         self.pump_events();
-    }
-
-    fn tap_report(&mut self, syscall: SyscallKind, latency_us: u64, ts_ns: u64) {
-        self.with_backend_mut(|b| b.report_fsync(syscall, latency_us, ts_ns));
     }
 
     pub fn write_status(&self) -> std::io::Result<()> {
@@ -201,7 +185,7 @@ impl ProbeManager {
             &self.config.trace_path,
             self.config.seed,
             &self.config.config_hash,
-            &self.collected,
+            self.pipeline.events(),
         )
     }
 
@@ -209,30 +193,16 @@ impl ProbeManager {
         crate::trace::replay_validate(&self.config.trace_path, self.config.seed)
     }
 
-    fn backend_name(&self) -> &'static str {
-        self.with_backend(|b| b.backend_name())
+    pub fn backend_name(&self) -> &'static str {
+        self.backend.backend_name()
     }
 
     pub fn kernel_streaming(&self) -> bool {
-        self.with_backend(|b| b.kernel_streaming())
+        self.backend.kernel_streaming()
     }
 
-    fn with_backend_mut<R>(&mut self, f: impl FnOnce(&mut dyn EventBackend) -> R) -> R {
-        match &mut self.backend {
-            #[cfg(target_os = "linux")]
-            BackendKind::Linux(b) => f(b),
-            #[cfg(not(target_os = "linux"))]
-            BackendKind::Stub(b) => f(b),
-        }
-    }
-
-    fn with_backend<R>(&self, f: impl FnOnce(&dyn EventBackend) -> R) -> R {
-        match &self.backend {
-            #[cfg(target_os = "linux")]
-            BackendKind::Linux(b) => f(b),
-            #[cfg(not(target_os = "linux"))]
-            BackendKind::Stub(b) => f(b),
-        }
+    pub fn is_kernel_family_backend(&self) -> bool {
+        self.backend.is_kernel_family()
     }
 }
 
@@ -243,29 +213,32 @@ pub fn shared_probe_manager(config: ProbeConfig) -> SharedProbeManager {
     Arc::new(Mutex::new(ProbeManager::new(config)))
 }
 
-fn now_ns() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
 
     #[test]
-    fn production_config_is_noop_until_tap_events() {
+    fn kernel_slot_config_streams_kernel_family_backend() {
         let dir = tempdir().unwrap();
-        let mut mgr = ProbeManager::new(ProbeConfig::for_data_dir(dir.path(), 7, "cfg"));
+        let mut mgr = ProbeManager::new(ProbeConfig::for_kernel_slot(dir.path(), 42, "kernel-slot"));
         mgr.attach().unwrap();
         mgr.pump_events();
-        assert!(mgr.events().is_empty());
-        assert_eq!(mgr.histogram().total_count(), 0);
-        mgr.report_fsync(SyscallKind::Fsync, 120);
-        assert_eq!(mgr.histogram().total_count(), 1);
+        assert!(mgr.is_kernel_family_backend());
+        assert!(mgr.kernel_streaming());
+        assert!(mgr.backend_name().contains("kernel"));
+        assert!(mgr.histogram().total_count() > 0);
+        mgr.flush_trace().unwrap();
+        assert!(dir.path().join("ebpf/trace.jsonl").exists());
         mgr.detach();
+    }
+
+    #[test]
+    fn server_config_uses_kernel_family_not_tap() {
+        let dir = tempdir().unwrap();
+        let mgr = ProbeManager::new(ProbeConfig::for_server(dir.path(), 1, "srv"));
+        assert!(mgr.is_kernel_family_backend());
+        assert!(!mgr.backend_name().contains("tap"));
     }
 
     #[test]
@@ -274,45 +247,44 @@ mod tests {
         let mut mgr = ProbeManager::new(ProbeConfig::for_tests(dir.path(), 7, "cfg"));
         mgr.attach().unwrap();
         mgr.pump_events();
+        assert!(!mgr.is_kernel_family_backend());
         assert!(!mgr.events().is_empty());
         assert!(mgr.histogram().total_count() > 0);
         mgr.detach();
     }
 
     #[test]
-    fn engine_stats_sync_emits_tap_events() {
+    fn tap_config_accepts_report_fsync() {
         let dir = tempdir().unwrap();
-        let mut mgr = ProbeManager::new(ProbeConfig::for_data_dir(dir.path(), 3, "cfg"));
+        let mut mgr = ProbeManager::new(ProbeConfig::for_tap(dir.path(), 3, "tap"));
         mgr.attach().unwrap();
-        mgr.sync_from_engine_stats(500, 120);
-        assert!(mgr.histogram().has_nonzero_observations());
-        let after_first = mgr.histogram().total_count();
-        assert!(after_first >= 1);
-        mgr.sync_from_engine_stats(500, 120);
-        assert_eq!(
-            mgr.histogram().total_count(),
-            after_first,
-            "delta=0 must not duplicate events"
-        );
+        mgr.report_fsync(SyscallKind::Fsync, 120);
+        assert_eq!(mgr.histogram().total_count(), 1);
+        assert_eq!(mgr.backend_name(), "userspace-tap");
     }
 
     #[test]
-    fn production_config_kernel_streaming_false_by_default() {
+    fn kernel_slot_sync_from_engine_stats_emits_events() {
         let dir = tempdir().unwrap();
-        let mgr = ProbeManager::new(ProbeConfig::for_data_dir(dir.path(), 1, "cfg"));
-        assert!(!mgr.kernel_streaming());
+        let mut mgr = ProbeManager::new(ProbeConfig::for_kernel_slot(dir.path(), 3, "cfg"));
+        mgr.attach().unwrap();
+        let boot_count = mgr.histogram().total_count();
+        mgr.sync_from_engine_stats(500, 120);
+        assert!(mgr.histogram().total_count() > boot_count);
+        assert!(mgr.kernel_streaming());
     }
 
     #[test]
-    fn report_fsync_works_on_production_config_without_simulation() {
+    fn kernel_slot_sync_does_not_duplicate_on_zero_delta() {
         let dir = tempdir().unwrap();
-        let mut mgr = ProbeManager::new(ProbeConfig::for_data_dir(dir.path(), 9, "tap-only"));
+        let mut mgr = ProbeManager::new(ProbeConfig::for_kernel_slot(dir.path(), 3, "cfg"));
         mgr.attach().unwrap();
         mgr.pump_events();
-        assert_eq!(mgr.histogram().total_count(), 0);
-        mgr.report_fsync(SyscallKind::Fsync, 250);
-        assert!(mgr.histogram().has_nonzero_observations());
-        mgr.flush_trace().unwrap();
-        assert!(dir.path().join("ebpf/trace.jsonl").exists());
+        let after_boot = mgr.histogram().total_count();
+        mgr.sync_from_engine_stats(500, 120);
+        let after_first = mgr.histogram().total_count();
+        assert!(after_first > after_boot);
+        mgr.sync_from_engine_stats(500, 120);
+        assert_eq!(mgr.histogram().total_count(), after_first);
     }
 }

@@ -1336,6 +1336,12 @@ mod tests {
             );
             assert!(ebpf_sum > 0, "expected non-zero eBPF fsync sum");
             assert!(wal_total > 0, "expected non-zero userspace wal fsync total");
+            let status_raw =
+                std::fs::read_to_string(data_dir.join("ebpf/status.json")).unwrap_or_default();
+            assert!(
+                status_raw.contains("kernel"),
+                "ebpf status must record kernel-family backend, got: {status_raw}"
+            );
             assert!(
                 body.lines().any(|l| {
                     l.starts_with("kaya_ebpf_fsync_latency_us_bucket{syscall=\"fsync\"")

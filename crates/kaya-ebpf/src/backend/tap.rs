@@ -11,6 +11,29 @@ pub struct TapBackend {
 }
 
 impl TapBackend {
+    pub fn attach(&mut self) -> Result<(), String> {
+        self.attached = true;
+        Ok(())
+    }
+
+    pub fn detach(&mut self) -> bool {
+        let was = self.attached;
+        self.attached = false;
+        was
+    }
+
+    pub fn is_attached(&self) -> bool {
+        self.attached
+    }
+
+    pub fn backend_name(&self) -> &'static str {
+        "userspace-tap"
+    }
+
+    pub fn drain_events(&mut self) -> Vec<ProbeEvent> {
+        self.pending.drain(..).collect()
+    }
+
     pub fn new() -> Self {
         Self {
             attached: false,
@@ -60,25 +83,21 @@ impl Default for TapBackend {
 
 impl EventBackend for TapBackend {
     fn attach(&mut self) -> Result<(), String> {
-        self.attached = true;
-        Ok(())
+        TapBackend::attach(self)
     }
-
     fn detach(&mut self) -> bool {
-        let was = self.attached;
-        self.attached = false;
-        was
+        TapBackend::detach(self)
     }
-
     fn is_attached(&self) -> bool {
-        self.attached
+        TapBackend::is_attached(self)
     }
-
     fn backend_name(&self) -> &'static str {
-        "userspace-tap"
+        TapBackend::backend_name(self)
     }
-
     fn drain_events(&mut self) -> Vec<ProbeEvent> {
-        self.pending.drain(..).collect()
+        TapBackend::drain_events(self)
+    }
+    fn report_fsync(&mut self, syscall: SyscallKind, latency_us: u64, ts_ns: u64) {
+        TapBackend::report_fsync(self, syscall, latency_us, ts_ns);
     }
 }

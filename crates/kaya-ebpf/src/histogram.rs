@@ -4,7 +4,7 @@ use crate::event::{ProbeEvent, SyscallKind};
 pub const FSYNC_LATENCY_BUCKETS_US: &[u64] = &[50, 100, 250, 500, 1_000, 5_000, 10_000, 50_000];
 
 /// Aggregated fsync/fdatasync latency histogram for Prometheus exposition.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsyncHistogram {
     pub fsync_buckets: Vec<u64>,
     pub fdatasync_buckets: Vec<u64>,
@@ -20,7 +20,10 @@ impl FsyncHistogram {
         Self {
             fsync_buckets: vec![0; bucket_len],
             fdatasync_buckets: vec![0; bucket_len],
-            ..Default::default()
+            fsync_count: 0,
+            fdatasync_count: 0,
+            fsync_sum_us: 0,
+            fdatasync_sum_us: 0,
         }
     }
 

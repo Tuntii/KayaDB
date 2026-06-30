@@ -365,7 +365,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
             "node={}:durability=strict:ebpf_seed={}",
             config.node_id.0, config.ebpf_seed
         );
-        let probe_cfg = ProbeConfig::for_data_dir(&config.data_dir, config.ebpf_seed, config_hash);
+        let probe_cfg = ProbeConfig::for_server(&config.data_dir, config.ebpf_seed, config_hash);
         let mgr = shared_probe_manager(probe_cfg);
         {
             let mut guard = mgr.lock();

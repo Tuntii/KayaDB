@@ -1,22 +1,20 @@
 //! Bounded chaos-style workload producing a capturable eBPF trace artifact.
 
-use kaya_ebpf::{ProbeConfig, ProbeManager, SyscallKind};
+use kaya_ebpf::{ProbeConfig, ProbeManager};
 use tempfile::tempdir;
 
 #[test]
 fn bounded_chaos_workload_produces_trace_with_durability_events() {
     let dir = tempdir().unwrap();
     let seed = 2026;
-    let mut mgr = ProbeManager::new(ProbeConfig::for_data_dir(dir.path(), seed, "chaos-bounded"));
-    // report_fsync drives real tap path (not simulated prefill).
+    let mut mgr = ProbeManager::new(ProbeConfig::for_kernel_slot(dir.path(), seed, "chaos-bounded"));
     mgr.attach().unwrap();
-
-    // Simulate workload + crash-injection window via userspace tap (report_fsync).
-    for i in 0..5u64 {
-        mgr.report_fsync(SyscallKind::Fsync, 80 + i * 20);
-        mgr.report_fsync(SyscallKind::Fdatasync, 40 + i * 10);
-    }
     mgr.pump_events();
+
+    for step in 1..=5u64 {
+        mgr.sync_from_engine_stats(step * 200, 80 + step * 20);
+    }
+
     mgr.write_status().unwrap();
     mgr.flush_trace().unwrap();
 
@@ -24,6 +22,7 @@ fn bounded_chaos_workload_produces_trace_with_durability_events() {
     assert!(replayed.len() >= 5, "expected durability events in trace");
     assert!(dir.path().join("ebpf/trace.jsonl").exists());
     assert!(dir.path().join("ebpf/status.json").exists());
+    assert!(mgr.backend_name().contains("kernel"));
 
     mgr.detach();
 }

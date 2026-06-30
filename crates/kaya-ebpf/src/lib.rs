@@ -1,25 +1,22 @@
 //! Optional Linux eBPF observability for KayaDB.
 //!
-//! **Default path (all platforms):** userspace tap fed by engine WAL fsync stats or
-//! explicit `report_fsync` calls — no kernel privileges required.
-//!
-//! **Linux + `kernel-probes` feature:** attempts to compile `bpf/fsync_latency.bpf.c`
-//! (clang + vendored headers, optional bpftool vmlinux) and attach kprobes via aya.
-//! When kernel attach succeeds, per-op ring-buffer samples replace synthetic tap
-//! injection in `sync_from_engine_stats`. Falls back to userspace tap when BPF build
-//! or attach fails.
+//! **Server `--ebpf` path:** explicit kernel slot (`KernelLive` when attach succeeds on
+//! Linux + `kernel-probes`, else `KernelSimulated`). Userspace tap is **not** mixed into
+//! `kaya_ebpf_*` metrics/traces. Engine counters remain `kaya_wal_fsync_*`.
 
 pub mod backend;
 mod event;
 mod histogram;
 mod manager;
+mod pipeline;
 mod trace;
 
-pub use backend::{EventBackend, SimulatedBackend, TapBackend};
+pub use backend::{BackendSelection, EventBackend, KernelSimulatedBackend, ProbeBackend, SimulatedBackend, TapBackend};
 pub use backend::kernel::{parse_raw_fsync_event, parse_ringbuf_batch, RawFsyncEvent};
 pub use event::{ProbeEvent, SyscallKind};
 pub use histogram::{FsyncHistogram, FSYNC_LATENCY_BUCKETS_US};
 pub use manager::{shared_probe_manager, ProbeConfig, ProbeManager, ProbeStatus, SharedProbeManager};
+pub use pipeline::EventPipeline;
 pub use trace::{
     filter_wal_events, replay_validate, seeded_fsync_events, write_trace, TraceHeader,
     TraceReplayError,
@@ -48,11 +45,10 @@ pub mod linux {
         ("durability-syscalls", "scripts/ebpf/durability-syscalls.bt"),
     ];
 
-    /// Documented build prerequisites for kernel probes.
     pub const BUILD_NOTES: &str = concat!(
-        "Userspace tap is default. Kernel kprobes need linux + --features kernel-probes + clang/llvm; ",
-        "optional bpftool for accurate vmlinux.h; CAP_BPF for live attach. ",
-        "See bpf/include/ bundled headers and bpf/fsync_latency.bpf.c."
+        "Server --ebpf uses kernel slot (live or simulated). ",
+        "KernelLive needs linux + --features kernel-probes + clang + CAP_BPF. ",
+        "See bpf/include/ and bpf/fsync_latency.bpf.c."
     );
 
     pub fn available_scripts() -> Vec<&'static str> {
