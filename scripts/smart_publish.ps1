@@ -147,16 +147,23 @@ foreach ($Crate in $Crates) {
             Write-Host "   [DRY RUN] Would publish $Name at $LocalStr..." -ForegroundColor Cyan
         } else {
             Write-Host "   Publishing $LocalStr..." -ForegroundColor Cyan
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
             try {
-                # Publish the crate. Use --allow-dirty in case script modifies workspace Cargo.toml inside git tree.
-                cargo publish -p $Name --allow-dirty --no-verify
-                if ($LASTEXITCODE -ne 0) { 
-                    throw "Cargo publish failed"
-                }
-            } catch {
-                throw "Failed to publish $($Name): $($_)"
+                $publishLines = & cargo publish -p $Name --allow-dirty --no-verify 2>&1
+                $publishExit = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $prevEap
             }
-            
+            $publishOutput = ($publishLines | Out-String)
+            if ($publishExit -ne 0) {
+                if ($publishOutput -match 'already uploaded') {
+                    Write-Host " [SKIP] $LocalStr already on crates.io (race or stale index)" -ForegroundColor Yellow
+                } else {
+                    throw "Failed to publish ${Name}: $publishOutput"
+                }
+            }
+
             Write-Host "   Waiting 5s for propagation..." -ForegroundColor DarkGray
             Start-Sleep -Seconds 5
         }
