@@ -1,8 +1,8 @@
 # Productization north star
 
-**Last updated:** 2026-06-27
+**Last updated:** 2026-06-30
 
-KayaDB completed **M13 productization (2026-06-21)** and **M14 correctness + algorithms (2026-06-24)**. The project is deliberately evolved into a **trustworthy, deployable distributed database** — not a forever-demo.
+KayaDB completed **M13 productization (2026-06-21)**, **M14 correctness + algorithms (2026-06-24)**, and **M15 remaining tracks (2026-06-30)**. The project is deliberately evolved into a **trustworthy, deployable distributed database** — not a forever-demo.
 
 Correctness-first milestones (local engine, simulation, Raft, membership, snapshots, Jepsen full gate) are the foundation. Further work proceeds via parallel tracks in [ROADMAP.md](../ROADMAP.md).
 
@@ -14,7 +14,7 @@ Correctness-first milestones (local engine, simulation, Raft, membership, snapsh
 |---|---|
 | Strong LSM engine, sim harness, Raft cluster proven under chaos | Same core, wider workload envelopes |
 | TCP cluster, snapshots, dynamic membership, day-2 runbooks | Survives real restarts and operator workflows at scale |
-| TLS + operator token on admin path; mTLS sidecar documented | Full client authZ + data-at-rest encryption |
+| TLS + operator + client tokens; audit JSONL; Prometheus; Docker/K8s examples | Data-at-rest encryption + SIEM export + multi-tenant |
 | Correctness prototype badge | Documented deployment guide with explicit SLO/limit envelopes |
 
 **We do not claim production-ready until the exit gates below are met.**
@@ -36,6 +36,23 @@ All six gates complete. Experimental label dropped. Deployment hardening gaps do
 
 ---
 
+## M15 — Remaining tracks (2026-06-30)
+
+1. **Client token auth** — data-path opcodes 1–4, 6 when `--client-token` configured.
+2. **Structured audit logging** — `{data_dir}/audit.jsonl`.
+3. **Protocol conformance** — `docs/clients/conformance/vectors.json` + Rust runner.
+4. **Go client** — `clients/kaya-go/`.
+5. **Prometheus `/metrics`** — `--metrics-addr`.
+6. **`kaya-ebpf` stub** — Linux probe catalog.
+7. **Deployment** — `deploy/docker/`, `deploy/k8s/`.
+8. **HELLO handshake** — opcode 0.
+9. **`kayactl watch`** — remote status polling.
+10. **Docs** — security §7, deployment guide, CI/Actions reference.
+
+Accepted risks after M15: data-at-rest, multi-tenant, SIEM remote export — [security §7](security.md#7-accepted-risks-and-future-hardening-m15-exit).
+
+---
+
 ## Milestone sequence (reminder)
 
 ```text
@@ -43,6 +60,7 @@ M11 — Benchmarks, concurrent lin-check, snapshots, dynamic membership ✅
 M12 — Jepsen prep + Linux observability experiments ✅
 M13 — Productization (this document) ✅
 M14 — Correctness + algorithms ✅
+M15 — Remaining tracks ✅
 ```
 
 The living milestone checklist also lives in local `ROADMAP.md` (may be gitignored in some clones).

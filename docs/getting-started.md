@@ -12,7 +12,7 @@ This guide gets you from zero to a running KayaDB node (or embedded data directo
 | Requirement | Version |
 |---|---|
 | Rust toolchain | 1.85 or later (see `rust-toolchain.toml`) — only if building from source |
-| `kayactl` + `kayadb-server` | [v0.1.44](releases.md) or latest from crates.io |
+| `kayactl` + `kayadb-server` | [v0.1.46](releases.md) or latest from crates.io / `main` |
 | Platform | Linux, macOS, or Windows |
 
 Install Rust via [rustup](https://rustup.rs/) if you plan to build from source:
@@ -43,8 +43,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Build all crates
 cargo build --workspace
 
-# Run the full test suite
-cargo test --workspace
+# Run the full test suite (CI excludes kaya-jepsen-test on PR path)
+cargo test --workspace --exclude kaya-jepsen-test -- --test-threads=1
+```
+
+On Windows, if tests flake with port errors: `cargo test --workspace -j 1 -- --test-threads=1`. See [CI & Actions](ci-and-actions.md).
 ```
 
 ---

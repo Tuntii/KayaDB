@@ -3,7 +3,7 @@
 - [Introduction](README.md)
   - [What is KayaDB?](README.md#what-is-kayadb)
   - [KayaDB Explained](KayaDB_Explained.md)
-  - [Productization (M13)](productization.md)
+  - [Productization (M13–M15)](productization.md)
 
 - [Install & Run](installation.md)
   - [Installation](installation.md)
@@ -25,6 +25,9 @@
 - [Distributed](jepsen-design.md)
   - [Raft & Jepsen testing](jepsen-design.md)
 
+- [Deployment](deployment.md)
+  - [Docker Compose](../deploy/docker/README.md)
+  - [Kubernetes](../deploy/k8s/README.md)
 - [Runbooks](runbooks/rolling-restart.md)
   - [Add / Remove Node](runbooks/add-remove-node.md)
   - [Rolling Restart](runbooks/rolling-restart.md)
@@ -34,6 +37,7 @@
 
 - [Correctness & Dev](development.md)
   - [Development guide](development.md)
+  - [CI & GitHub Actions](ci-and-actions.md)
   - [Benchmarks](../BENCHMARKS.md)
 
 - [Reference](security.md)

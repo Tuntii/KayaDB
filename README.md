@@ -29,7 +29,7 @@ It includes:
 - Getting started, CLI reference, and runbooks
 - Architecture, specifications (WAL, LSM, recovery, Raft…)
 - Correctness testing (SimDisk, Jepsen, chaos-matrix CI)
-- Security, releases, contributing, and roadmap
+- Deployment (Docker, Kubernetes), CI/Actions setup, security, releases, roadmap
 
 Sources live in `docs/` (Docsify on GitHub Pages; `SUMMARY.md` kept for GitBook compatibility).
 

@@ -9,7 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-M15 remaining tracks closure: client auth, audit logging, conformance, Go client, Prometheus, deployment, HELLO handshake, kayactl watch.
+---
+
+## [0.1.46] — 2026-06-30
+
+M15 remaining tracks: client auth, audit logging, conformance, Go client, Prometheus, deployment, HELLO handshake, kayactl watch.
 
 ### Added
 - Client token auth for data-path ops (`CLIENT\x00` framing): opcodes 1–4 and 6 require matching token when `--client-token` / `KAYA_CLIENT_TOKEN` configured; HEALTH (op 5) stays open

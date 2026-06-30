@@ -17,6 +17,12 @@ Use embedded mode when inspecting or repairing a local data directory. Use serve
 | `--server <host:port>` | — | Connect to a server; all KV commands go over TCP |
 | `--durability <mode>` | `strict` | Durability mode: `strict` (fsync on every write) or `relaxed` |
 | `--json` | off | Emit machine-readable JSON output instead of human-readable text |
+| `--client-token <tok>` | env `KAYA_CLIENT_TOKEN` | Server mode: send `CLIENT\x00` auth on data ops (PUT/GET/DELETE/SCAN/STATS) |
+| `--operator-token <tok>` | env `KAYA_OPERATOR_TOKEN` | Server mode: auth for `add-node` / `remove-node` (admin opcodes 7/8) |
+| `--timeout <ms>` | — | Server mode: per-request TCP timeout |
+| `--interval <secs>` | `2` | `watch` subcommand: poll interval (minimum 1) |
+
+When the server is started with `--client-token`, all data-path commands over `--server` must pass the same token (via flag or env).
 
 ---
 
@@ -351,6 +357,7 @@ Print Raft and storage metrics for a node.
 ```bash
 kayactl --server 127.0.0.1:7379 status
 kayactl --server 127.0.0.1:7379 status --json
+kayactl --server 127.0.0.1:7379 --client-token "$KAYA_CLIENT_TOKEN" status
 ```
 
 The status payload includes:
@@ -363,8 +370,23 @@ The status payload includes:
 | `applied_index` | Highest committed entry applied to the local engine |
 | `peer_count` | Number of configured peers excluding the local node |
 | `engine.*` | Storage counters such as puts, gets, WAL bytes, fsync count, SSTable count |
+| `engine.block_cache_hits` / `block_cache_misses` | SSTable block cache (M15) |
+| `engine.recovery_duration_us` | Wall time to open/recover engine (M15) |
 
 Followers may return `NOT_LEADER` for some client operations. When a leader hint is available, `kayactl` retries a limited number of times against the hinted address.
+
+### `watch status`
+
+Poll remote `status` (STATS opcode) on an interval. Clears the screen on a TTY.
+
+```bash
+kayactl watch status                                    # local --data
+kayactl --data ./data watch status --interval 5
+kayactl --server 127.0.0.1:7379 watch status
+kayactl --server 127.0.0.1:7379 --json watch status --interval 3
+```
+
+Supports `--latency` and `--client-token` like other server-mode commands.
 
 ### `add-node` / `remove-node`
 

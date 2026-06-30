@@ -41,7 +41,7 @@ cargo test --workspace
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo test --workspace --exclude kaya-jepsen-test -- --test-threads=1
 ```
 
 On Windows (PowerShell):
@@ -49,8 +49,12 @@ On Windows (PowerShell):
 ```powershell
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo test --workspace --exclude kaya-jepsen-test -- --test-threads=1
 ```
+
+If tests flake with `AddrInUse`, add `-j 1` before `--`.
+
+**GitHub Actions:** Workflows live under `.github/workflows/`. If the Actions tab shows nothing, see [docs/ci-and-actions.md](docs/ci-and-actions.md). Use **squash merge** to `main` (merge commits are rejected by branch rules).
 
 ## Pull Request process
 

@@ -15,10 +15,23 @@ Goal: A production-usable basic client that correctly implements:
 
 ---
 
-## 1. Recommended Repository Structure (for github.com/Tuntii/kaya-go or similar)
+## 1. Location in this repository (M15)
+
+The reference Go client lives at **`clients/kaya-go/`** in the KayaDB monorepo:
+
+```bash
+cd clients/kaya-go
+go test ./...
+```
+
+Module path: `github.com/Tuntii/KayaDB/clients/kaya-go`
+
+A standalone repo fork is optional; keep wire behavior aligned with [conformance vectors](conformance/vectors.json).
+
+## 2. Package layout
 
 ```
-kaya-go/
+clients/kaya-go/
 ├── go.mod
 ├── go.sum
 ├── README.md
@@ -36,10 +49,10 @@ kaya-go/
 
 ---
 
-## 2. go.mod (start here)
+## 3. go.mod (start here)
 
 ```go
-module github.com/Tuntii/kaya-go
+module github.com/Tuntii/KayaDB/clients/kaya-go
 
 go 1.23
 
@@ -440,7 +453,7 @@ import (
     "fmt"
     "time"
 
-    kaya "github.com/Tuntii/kaya-go"
+    kaya "github.com/Tuntii/KayaDB/clients/kaya-go"
 )
 
 func main() {

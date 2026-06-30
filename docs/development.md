@@ -24,12 +24,17 @@ cargo fmt --all
 # Lint (CI gate — all warnings treated as errors)
 cargo clippy --workspace --all-targets -- -D warnings
 
-# Full test suite
-cargo test --workspace
+# Full test suite (matches CI PR path)
+cargo test --workspace --exclude kaya-jepsen-test -- --test-threads=1
+
+# Windows: avoid parallel crate port contention
+cargo test --workspace -j 1 -- --test-threads=1
 
 # Single crate test
 cargo test -p kaya-wal
 ```
+
+See [CI & GitHub Actions](ci-and-actions.md) for workflow list, Pages setup, and troubleshooting when the Actions tab is empty.
 
 ---
 

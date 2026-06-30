@@ -7,30 +7,52 @@ KayaDB uses [Semantic Versioning](https://semver.org/) while in `0.1.x` pre-1.0 
 
 ---
 
-## Current release — v0.1.45
+## Current release — v0.1.46
+
+| Item | Detail |
+|---|---|
+| **Tag** | `v0.1.46` (tag when published; `main` carries this version) |
+| **Date** | 2026-06-30 |
+| **Milestone** | M15 — remaining tracks (auth, ops, clients, deploy) ✅ |
+| **Workspace version** | `0.1.46` in root `Cargo.toml` |
+
+### Highlights
+
+- **Client token auth** — `--client-token` / `KAYA_CLIENT_TOKEN` for PUT/GET/DELETE/SCAN/STATS (opcodes 1–4, 6)
+- **Audit logging** — JSONL at `{data_dir}/audit.jsonl` (`--audit-log` / `--no-audit-log`)
+- **Prometheus** — HTTP `/metrics` via `--metrics-addr` (default `127.0.0.1:9090`)
+- **Go client** — `clients/kaya-go/` with leader redirect and client token
+- **Conformance** — `docs/clients/conformance/vectors.json` + Rust runner
+- **HELLO handshake** — opcode 0, `PROTO_VERSION = 1`
+- **`kayactl watch`** — poll remote `status` / STATS on an interval
+- **Deploy examples** — `deploy/docker/` (Compose) and `deploy/k8s/` (StatefulSet)
+- **`kaya-ebpf`** — workspace stub crate restored
+
+### Install this version
+
+```bash
+cargo install kayactl --version 0.1.46
+cargo install kaya-server --bin kayadb-server --version 0.1.46
+```
+
+Or build from `main` / download binaries from the latest [GitHub Release](https://github.com/Tuntii/KayaDB/releases) when tagged.
+
+---
+
+## Previous release — v0.1.45
 
 | Item | Detail |
 |---|---|
 | **Tag** | [`v0.1.45`](https://github.com/Tuntii/KayaDB/releases/tag/v0.1.45) |
 | **Date** | 2026-06-27 |
 | **Milestone** | Post-M14 tracks A/B/C — storage codecs + correctness artifacts ✅ |
-| **Workspace version** | `0.1.45` in root `Cargo.toml` |
 
-### Highlights
-
-- **SSTable v3 codecs** — LZ4 + ZSTD data-block compression; prefix compression with restart points; decoded block LRU cache with public hit/miss stats
-- **Rich Jepsen nemesis** — `ClockSkew` and `DiskLatency` injection; `rich_nemesis_scenario` in scenario registry
-- **eBPF stub + scripts** — `kaya-ebpf` workspace crate; `scripts/ebpf/durability-syscalls.bt` for durability syscall tracing
-- **TLA+ manifest model** — `spec/specs/manifest/ManifestCompaction.tla` compaction visibility invariants
-
-### Install this version
+Highlights: SSTable v3 codecs (LZ4/ZSTD/prefix), block cache stats, rich Jepsen nemesis, manifest TLA+.
 
 ```bash
 cargo install kayactl --version 0.1.45
 cargo install kaya-server --bin kayadb-server --version 0.1.45
 ```
-
-Or download binaries from the [v0.1.45 GitHub Release](https://github.com/Tuntii/KayaDB/releases/tag/v0.1.45).
 
 See [Installation](installation.md) for full options.
 

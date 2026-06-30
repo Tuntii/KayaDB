@@ -2,7 +2,7 @@
 
 KayaDB ships as Rust crates on [crates.io](https://crates.io) and as pre-built binaries on [GitHub Releases](https://github.com/Tuntii/KayaDB/releases). You can also build everything from source.
 
-**Current stable tag:** `v0.1.45` — see [Releases](releases.md) for notes.
+**Current workspace version:** `v0.1.46` (M15) — see [Releases](releases.md) for notes. crates.io may lag until the next tagged publish.
 
 ---
 
@@ -43,9 +43,9 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-kaya-engine = "0.1.44"
-kaya-io = "0.1.44"
-kaya-core = "0.1.44"
+kaya-engine = "0.1.46"
+kaya-io = "0.1.46"
+kaya-core = "0.1.46"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 

@@ -4,7 +4,7 @@
 
 **Live site:** [https://tuntii.github.io/KayaDB/](https://tuntii.github.io/KayaDB/)
 
-**Current release:** [v0.1.44](releases.md) (M14 — correctness + algorithms ✅)
+**Current release:** [v0.1.46](releases.md) (M15 — remaining tracks ✅)
 
 ---
 
@@ -26,7 +26,7 @@ Core properties:
 - **Raft cluster** with leader redirection, dynamic membership, and day-2 runbooks
 - **Correctness culture** — simulation, Jepsen-style harness, fuzz targets, chaos-matrix CI
 
-KayaDB completed **M13 productization** (TLS, operator token, runbooks) and is in **M14** (compaction policies, bloom filters, WAL batching). It is a deployable correctness prototype — not a fully hardened multi-tenant SaaS database. Read [security](security.md) before any production-like deployment.
+KayaDB completed **M13–M15** (TLS, tokens, audit, Prometheus, Go client, Docker/K8s examples). It is a deployable correctness prototype — not a fully hardened multi-tenant SaaS database. Read [security](security.md) before any production-like deployment.
 
 ---
 
@@ -39,7 +39,9 @@ KayaDB completed **M13 productization** (TLS, operator token, runbooks) and is i
 | See practical workflows (TR) | [Kullanım senaryoları](usage.md) |
 | Look up every `kayactl` flag | [CLI reference](cli-reference.md) |
 | Understand the storage stack | [Architecture](architecture.md) |
+| Deploy with Docker/K8s | [Deployment](deployment.md) |
 | Operate a cluster safely | [Security](security.md) + [Runbooks](runbooks/rolling-restart.md) |
+| CI / GitHub Actions | [CI & Actions](ci-and-actions.md) |
 | See version history | [Releases](releases.md) + [CHANGELOG](../CHANGELOG.md) |
 | Understand the full picture | [KayaDB Explained](KayaDB_Explained.md) |
 
@@ -54,7 +56,8 @@ KayaDB completed **M13 productization** (TLS, operator token, runbooks) and is i
 - [Usage scenarios](usage.md) — embedded, cluster, recovery, inspection, automation
 - [CLI reference](cli-reference.md) — `kayactl` commands, flags, JSON output, exit codes
 - [Client library](getting-started.md#using-the-kaya-client-library) — async Rust client with leader redirection
-- [Client protocol](clients/client-protocol-spec.md) · [Wire format](clients/client-wire-protocol.md) · [Go client](clients/go-client.md)
+- [Client protocol](clients/client-protocol-spec.md) · [Wire format](clients/client-wire-protocol.md) · [Conformance vectors](clients/conformance/vectors.json) · [Go client](clients/go-client.md)
+- [Deployment](deployment.md) — Docker Compose + Kubernetes examples
 
 ### Architecture & internals
 

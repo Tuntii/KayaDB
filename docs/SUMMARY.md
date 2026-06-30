@@ -10,7 +10,8 @@
 
 * [Installation](installation.md) — crates.io, release binaries, build from source
 * [Getting Started](getting-started.md) — first server, first commands, cluster quick-start
-* [Releases & Versioning](releases.md) — tags, v0.1.44, upgrade notes
+* [Releases & Versioning](releases.md) — tags, v0.1.46, upgrade notes
+* [Deployment](deployment.md) — Docker Compose + Kubernetes
 
 ## Using KayaDB
 
@@ -63,6 +64,7 @@
 * [Fuzz testing](development.md#fuzzing)
 * [Linearizability](jepsen-design.md)
 * [Development workflow](development.md)
+* [CI & GitHub Actions](ci-and-actions.md)
 * [Benchmarks](../BENCHMARKS.md)
 
 ## Reference
