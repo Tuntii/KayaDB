@@ -18,6 +18,7 @@ kaya-engine.workspace = true
 kaya-io.workspace = true
 kaya-net.workspace = true
 kaya-raft = { workspace = true, features = ["disk-storage"] }
+kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.46" }
 tokio.workspace = true
 
 [features]

@@ -1232,4 +1232,59 @@ mod tests {
         restart_handle.abort();
         let _ = std::fs::remove_dir_all(&data_dir);
     }
+
+    #[serial]
+    #[tokio::test]
+    async fn ebpf_enabled_metrics_expose_fsync_histogram() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_ebpf_metrics_{test_id}"));
+        let client_port = get_free_port().await;
+        let raft_port = get_free_port().await;
+        let metrics_port = get_free_port().await;
+        let client_addr: SocketAddr = format!("127.0.0.1:{client_port}").parse().unwrap();
+        let raft_addr: SocketAddr = format!("127.0.0.1:{raft_port}").parse().unwrap();
+        let metrics_addr: SocketAddr = format!("127.0.0.1:{metrics_port}").parse().unwrap();
+
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![])
+            .with_ebpf(42)
+            .with_metrics_addr(metrics_addr);
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "node did not become leader");
+
+        let put = encode_put_payload(b"ebpf-key", b"ebpf-val");
+        let (status, _) = roundtrip(client_addr, 1, &put).await.unwrap();
+        assert_eq!(status, 0);
+
+        for _ in 0..2 {
+            let mut stream = tokio::net::TcpStream::connect(metrics_addr).await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            stream
+                .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .unwrap();
+            let mut buf = vec![0u8; 16_384];
+            let n = stream.read(&mut buf).await.unwrap();
+            let body = String::from_utf8_lossy(&buf[..n]);
+            assert!(body.contains("kaya_ebpf_fsync_latency_us_bucket"));
+            assert!(body.contains("kaya_wal_fsync_total_us"));
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
 }

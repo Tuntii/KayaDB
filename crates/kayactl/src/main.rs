@@ -1,4 +1,5 @@
 mod cli;
+mod ebpf;
 mod inspect;
 mod local;
 mod server;
@@ -79,6 +80,28 @@ fn run() -> Result<()> {
         ));
     }
     let watch_interval = Duration::from_secs(interval_secs);
+
+    if !args.is_empty() && args[0] == "ebpf" {
+        let sub = if args.len() > 1 {
+            args[1].clone()
+        } else {
+            "help".to_owned()
+        };
+        args.drain(0..2.min(args.len()));
+        if sub == "trace" {
+            let trace_sub = if args.is_empty() {
+                return Err(KayaError::invalid_argument(
+                    "usage: kayactl ebpf trace wal [--data <dir>]",
+                ));
+            } else {
+                args.remove(0)
+            };
+            return ebpf::handle_ebpf_trace(&trace_sub, &data_dir, json);
+        }
+        let pid: Option<u32> = remove_value_flag(&mut args, "--pid")
+            .and_then(|s| s.parse().ok());
+        return ebpf::handle_ebpf(&sub, &data_dir, pid, json);
+    }
 
     if args.first().map(String::as_str) == Some("watch") {
         return watch::run_watch(

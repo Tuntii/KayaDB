@@ -41,6 +41,8 @@ pub(crate) fn print_usage() {
     println!("  kayactl [--data <dir>] [--durability strict|relaxed] [--json] flush   (force memtable -> SSTable for observability)");
     println!();
     println!("OBSERVABILITY COMMANDS");
+    println!("  kayactl ebpf status [--data <dir>] [--pid <pid>]");
+    println!("  kayactl ebpf trace wal [--data <dir>]");
     println!("  kayactl [--data <dir>] [--json] [--latency] stats   (add --latency for focused durability + flush/compaction timers)");
     println!("  kayactl [--interval <secs>] [--data <dir>] [--json] [--latency] watch status   (poll local stats every N seconds; default 2)");
     println!("  kayactl [--data <dir>] [--durability ...] [--json] flush   (force publish to see latency numbers move; pairs with --latency)");

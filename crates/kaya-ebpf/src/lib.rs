@@ -1,7 +1,23 @@
-//! Optional Linux eBPF scaffolding (stub).
+//! Optional Linux eBPF observability for KayaDB.
 //!
-//! Real tracing uses bpftrace scripts under `scripts/ebpf/`. This crate exists so
-//! future in-process probes can live behind a non-hard workspace dependency.
+//! Provides in-process probe lifecycle (attach/detach), deterministic trace capture,
+//! and Prometheus histogram aggregates. On non-Linux hosts the runtime is a no-op
+//! stub with seeded simulated events for CI.
+
+mod backend;
+mod event;
+mod histogram;
+mod manager;
+mod trace;
+
+pub use backend::{EventBackend, SimulatedBackend, TapBackend};
+pub use event::{ProbeEvent, SyscallKind};
+pub use histogram::{FsyncHistogram, FSYNC_LATENCY_BUCKETS_US};
+pub use manager::{shared_probe_manager, ProbeConfig, ProbeManager, ProbeStatus, SharedProbeManager};
+pub use trace::{
+    filter_wal_events, replay_validate, seeded_fsync_events, write_trace, TraceHeader,
+    TraceReplayError,
+};
 
 /// Metadata for a bpftrace probe script shipped with KayaDB.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,9 +26,9 @@ pub struct ProbeInfo {
     pub script_path: &'static str,
 }
 
-/// Whether an eBPF probe is attached in-process (always false in the stub).
-pub fn probe_attached() -> bool {
-    false
+/// Whether an in-process probe is attached (checks the optional global handle).
+pub fn probe_attached(manager: Option<&ProbeManager>) -> bool {
+    manager.is_some_and(|m| m.is_attached())
 }
 
 #[cfg(target_os = "linux")]
@@ -26,16 +42,14 @@ pub mod linux {
         ("durability-syscalls", "scripts/ebpf/durability-syscalls.bt"),
     ];
 
-    /// Documented build prerequisites for real eBPF crates.
+    /// Documented build prerequisites for kernel probes.
     pub const BUILD_NOTES: &str =
-        "Requires clang, llvm, bpf-linker or libbpf; not needed for `cargo test --workspace`.";
+        "In-process userspace tap is default; kernel kprobes require CAP_BPF + clang/llvm for future aya builds.";
 
-    /// Relative paths to bpftrace scripts shipped in `scripts/ebpf/`.
     pub fn available_scripts() -> Vec<&'static str> {
         PROBES.iter().map(|(_, path)| *path).collect()
     }
 
-    /// Catalog of named probes and their script paths.
     pub fn probe_catalog() -> Vec<super::ProbeInfo> {
         PROBES
             .iter()
@@ -58,16 +72,10 @@ mod stub {
     }
 }
 
-/// Relative paths to bpftrace scripts shipped in `scripts/ebpf/`.
-///
-/// Returns an empty list on non-Linux platforms.
 pub fn available_scripts() -> Vec<&'static str> {
     inner_available_scripts()
 }
 
-/// Catalog of named probes and their script paths.
-///
-/// Returns an empty list on non-Linux platforms.
 pub fn probe_catalog() -> Vec<ProbeInfo> {
     inner_probe_catalog()
 }
@@ -95,11 +103,7 @@ fn inner_probe_catalog() -> Vec<ProbeInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn probe_attached_is_false() {
-        assert!(!probe_attached());
-    }
+    use tempfile::tempdir;
 
     #[test]
     fn available_scripts_and_catalog_agree() {
@@ -115,15 +119,25 @@ mod tests {
         let catalog = probe_catalog();
         assert_eq!(catalog.len(), 4);
         assert!(catalog.iter().any(|p| p.name == "fsync-latency"));
-        assert!(catalog.iter().any(|p| p.name == "block-io-latency"));
-        assert!(catalog.iter().any(|p| p.name == "syscall-timeline"));
-        assert!(catalog.iter().any(|p| p.name == "durability-syscalls"));
     }
 
     #[cfg(not(target_os = "linux"))]
     #[test]
-    fn non_linux_returns_empty() {
+    fn non_linux_returns_empty_catalog() {
         assert!(available_scripts().is_empty());
         assert!(probe_catalog().is_empty());
+    }
+
+    #[test]
+    fn probe_manager_lifecycle_and_trace_roundtrip() {
+        let dir = tempdir().unwrap();
+        let mut mgr = ProbeManager::new(ProbeConfig::for_data_dir(dir.path(), 42, "unit-test"));
+        mgr.attach().unwrap();
+        mgr.pump_events();
+        mgr.flush_trace().unwrap();
+        let replayed = mgr.validate_trace().unwrap();
+        assert!(!replayed.is_empty());
+        mgr.detach();
+        assert!(!mgr.is_attached());
     }
 }

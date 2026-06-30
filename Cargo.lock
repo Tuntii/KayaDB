@@ -399,6 +399,13 @@ dependencies = [
 [[package]]
 name = "kaya-ebpf"
 version = "0.1.46"
+dependencies = [
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "kaya-engine"
@@ -472,6 +479,7 @@ version = "0.1.46"
 dependencies = [
  "kaya-client",
  "kaya-core",
+ "kaya-ebpf",
  "kaya-engine",
  "kaya-io",
  "kaya-net",
@@ -508,11 +516,13 @@ name = "kayactl"
 version = "0.1.46"
 dependencies = [
  "kaya-core",
+ "kaya-ebpf",
  "kaya-engine",
  "kaya-io",
  "kaya-lsm",
  "kaya-net",
  "kaya-wal",
+ "serde_json",
  "tokio",
 ]
 

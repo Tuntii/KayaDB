@@ -1,5 +1,6 @@
 //! Prometheus text exposition for engine and Raft observability.
 
+use kaya_ebpf::FsyncHistogram;
 use kaya_engine::EngineStats;
 use kaya_raft::{RaftStatus, Role};
 
@@ -40,7 +41,15 @@ fn role_label(role: Role) -> String {
 
 /// Render Prometheus text exposition format (0.0.4) for the given snapshot.
 pub fn render_prometheus(snapshot: &MetricsSnapshot) -> String {
-    format!(
+    render_prometheus_with_ebpf(snapshot, None)
+}
+
+/// Render engine/Raft metrics plus optional eBPF-derived fsync histograms.
+pub fn render_prometheus_with_ebpf(
+    snapshot: &MetricsSnapshot,
+    ebpf: Option<&FsyncHistogram>,
+) -> String {
+    let mut body = format!(
         concat!(
             "# HELP kaya_wal_fsync_total_us Cumulative microseconds spent in WAL fsync calls.\n",
             "# TYPE kaya_wal_fsync_total_us counter\n",
@@ -63,7 +72,11 @@ pub fn render_prometheus(snapshot: &MetricsSnapshot) -> String {
         snapshot.live_sstables,
         snapshot.raft_term,
         snapshot.raft_is_leader,
-    )
+    );
+    if let Some(hist) = ebpf {
+        body.push_str(&hist.render_prometheus());
+    }
+    body
 }
 
 #[cfg(test)]
@@ -126,5 +139,16 @@ mod tests {
         let snapshot = sample_snapshot();
         assert_eq!(snapshot.raft_role, "leader");
         assert_eq!(snapshot.raft_leader_id, Some(1));
+    }
+
+    #[test]
+    fn render_prometheus_includes_ebpf_fsync_histogram_when_present() {
+        let snapshot = sample_snapshot();
+        let mut hist = FsyncHistogram::new();
+        hist.observe(kaya_ebpf::SyscallKind::Fsync, 120);
+        let body = render_prometheus_with_ebpf(&snapshot, Some(&hist));
+        assert!(body.contains("kaya_ebpf_fsync_latency_us_bucket"));
+        assert!(body.contains("kaya_ebpf_fsync_latency_us_count{syscall=\"fsync\"} 1"));
+        assert!(body.contains("kaya_wal_fsync_total_us 12345"));
     }
 }

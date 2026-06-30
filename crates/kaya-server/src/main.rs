@@ -84,6 +84,20 @@ fn run() -> Result<(), String> {
         None
     };
 
+    let ebpf_enabled = args.iter().any(|a| a == "--ebpf");
+    if ebpf_enabled {
+        args.retain(|a| a != "--ebpf");
+    }
+
+    let ebpf_seed: u64 = if ebpf_enabled {
+        take_value(&mut args, "--ebpf-seed")
+            .map(|s| s.parse::<u64>().map_err(|e| format!("--ebpf-seed: {e}")))
+            .transpose()?
+            .unwrap_or(42)
+    } else {
+        0
+    };
+
     let no_metrics = args.iter().any(|a| a == "--no-metrics");
     if no_metrics {
         args.retain(|a| a != "--no-metrics");
@@ -179,6 +193,10 @@ fn run() -> Result<(), String> {
     }
     if join_cluster {
         config = config.with_join_cluster();
+    }
+
+    if ebpf_enabled {
+        config = config.with_ebpf(ebpf_seed);
     }
 
     tokio::runtime::Builder::new_multi_thread()

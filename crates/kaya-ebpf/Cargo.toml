@@ -1,6 +1,6 @@
 [package]
 name = "kaya-ebpf"
-description = "Optional Linux eBPF scaffolding for KayaDB observability (stub; non-hard dependency)"
+description = "Optional Linux eBPF observability for KayaDB: in-process probe lifecycle, trace capture, and Prometheus aggregates"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,18 @@ rust-version.workspace = true
 keywords = ["kaya", "ebpf", "observability"]
 categories = ["development-tools::debugging"]
 publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []
 
 [lib]
 path = "src/lib.rs"

@@ -16,6 +16,8 @@ kaya-io.workspace = true
 kaya-lsm.workspace = true
 kaya-wal.workspace = true
 kaya-net.workspace = true
+kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.46" }
+serde_json = "1"
 tokio.workspace = true
 
 [features]

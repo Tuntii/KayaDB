@@ -145,9 +145,13 @@ Trace files are correctness artifacts, not performance logs.
 
 ## 7. Linux eBPF experiments (M12)
 
-**Status (2026-06):** Initial delivery. bpftrace-based probes shipped; `kayactl ebpf` subcommand added; no hard dependency.
+**Status (2026-06):** bpftrace scripts + in-process `kaya-ebpf` runtime. Optional `--ebpf` on `kayadb-server`; no hard dependency.
 
-Implemented (scripts + CLI + userspace metrics) — Track A updates:
+Implemented (scripts + in-process runtime + CLI + userspace metrics) — Track A updates:
+
+- `crates/kaya-ebpf` — attach/detach probe manager, userspace tap + seeded simulated fallback, `trace.jsonl` replay validation, Prometheus `kaya_ebpf_*` histograms.
+- `kayadb-server --ebpf [--ebpf-seed N]` — starts probe runtime on Linux; default-off elsewhere.
+- `kayactl ebpf status` / `kayactl ebpf trace wal` — read `{data_dir}/ebpf/status.json` and WAL lines from `trace.jsonl`; graceful non-Linux guidance.
 
 - `scripts/ebpf/fsync-latency.bt` — syscall-level fsync/fdatasync latency histograms (µs).
 - `scripts/ebpf/block-io-latency.bt` — block layer I/O latency histograms (reads vs writes).

@@ -42,6 +42,8 @@ use crate::audit::AuditLog;
 use crate::membership::{load_persisted_roster, persist_roster, shared_roster, SharedRoster};
 use crate::raft_persister::RaftPersister;
 
+use kaya_ebpf::{shared_probe_manager, ProbeConfig, SharedProbeManager};
+
 use client_ops::{ProposeReq, ReadIndexReq};
 
 // ── public API ────────────────────────────────────────────────────────────────
@@ -83,6 +85,10 @@ pub struct ClusterConfig {
     pub audit_log: bool,
     /// When `Some`, expose Prometheus metrics at this listen address (`GET /metrics`).
     pub metrics_addr: Option<SocketAddr>,
+    /// When true, start the in-process eBPF probe runtime (Linux userspace tap + optional simulated fallback).
+    pub ebpf_enabled: bool,
+    /// Deterministic seed for eBPF trace artifacts.
+    pub ebpf_seed: u64,
 }
 
 impl ClusterConfig {
@@ -121,6 +127,8 @@ impl ClusterConfig {
             network_partitioned: None,
             audit_log: false,
             metrics_addr: None,
+            ebpf_enabled: false,
+            ebpf_seed: 0,
         }
     }
 
@@ -171,6 +179,13 @@ impl ClusterConfig {
     /// Disable the Prometheus `/metrics` HTTP listener.
     pub fn without_metrics(mut self) -> Self {
         self.metrics_addr = None;
+        self
+    }
+
+    /// Enable in-process eBPF observability with a deterministic trace seed.
+    pub fn with_ebpf(mut self, seed: u64) -> Self {
+        self.ebpf_enabled = true;
+        self.ebpf_seed = seed;
         self
     }
 }
@@ -329,6 +344,33 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         config.node_id.0
     );
 
+    let shared_ebpf: Option<SharedProbeManager> = if config.ebpf_enabled {
+        let config_hash = format!(
+            "node={}:durability=strict:ebpf_seed={}",
+            config.node_id.0, config.ebpf_seed
+        );
+        let probe_cfg = ProbeConfig::for_data_dir(&config.data_dir, config.ebpf_seed, config_hash);
+        let mgr = shared_probe_manager(probe_cfg);
+        {
+            let mut guard = mgr.lock();
+            if let Err(e) = guard.attach() {
+                eprintln!(
+                    "[node {}] warning: eBPF attach failed: {e}",
+                    config.node_id.0
+                );
+            } else {
+                eprintln!(
+                    "[node {}] eBPF probes attached (seed={})",
+                    config.node_id.0, config.ebpf_seed
+                );
+                let _ = guard.write_status();
+            }
+        }
+        Some(mgr)
+    } else {
+        None
+    };
+
     let metrics_fut = if let Some(metrics_addr) = config.metrics_addr {
         let metrics_listener = TcpListener::bind(metrics_addr).await?;
         let metrics_bound = metrics_listener.local_addr()?;
@@ -338,7 +380,8 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         );
         let r = shared_raft.clone();
         let e = shared_engine.clone();
-        Some(metrics_accept_loop(metrics_listener, r, e))
+        let ebpf = shared_ebpf.clone();
+        Some(metrics_accept_loop(metrics_listener, r, e, ebpf))
     } else {
         None
     };
@@ -454,6 +497,19 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         }
     }
 
+    if let Some(ebpf) = shared_ebpf {
+        let mut guard = ebpf.lock();
+        guard.pump_events();
+        let _ = guard.flush_trace();
+        let _ = guard.write_status();
+        guard.detach();
+        eprintln!(
+            "[node {}] eBPF probes detached ({} events)",
+            config.node_id.0,
+            guard.events().len()
+        );
+    }
+
     Ok(())
 }
 
@@ -461,13 +517,15 @@ async fn metrics_accept_loop(
     listener: TcpListener,
     raft: SharedRaft,
     engine: SharedEngine,
+    ebpf: Option<SharedProbeManager>,
 ) -> std::io::Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         let raft = raft.clone();
         let engine = engine.clone();
+        let ebpf = ebpf.clone();
         tokio::spawn(async move {
-            let _ = handle_metrics_connection(stream, raft, engine).await;
+            let _ = handle_metrics_connection(stream, raft, engine, ebpf).await;
         });
     }
 }
@@ -476,6 +534,7 @@ async fn handle_metrics_connection(
     mut stream: TcpStream,
     raft: SharedRaft,
     engine: SharedEngine,
+    ebpf: Option<SharedProbeManager>,
 ) -> std::io::Result<()> {
     let mut buf = [0u8; 1024];
     let n = stream.read(&mut buf).await?;
@@ -488,9 +547,18 @@ async fn handle_metrics_connection(
                 (guard.status(), guard.is_leader())
             };
             let engine_stats = engine.lock().await.stats();
+            if let Some(ref mgr) = ebpf {
+                let mut guard = mgr.lock();
+                guard.sync_from_engine_stats(
+                    engine_stats.wal_fsync_total_us,
+                    engine_stats.wal_fsync_max_us,
+                );
+                let _ = guard.write_status();
+            }
             crate::metrics::MetricsSnapshot::from_engine_and_raft(engine_stats, &status, is_leader)
         };
-        let body = crate::metrics::render_prometheus(&snapshot);
+        let ebpf_hist = ebpf.as_ref().map(|mgr| mgr.lock().histogram().clone());
+        let body = crate::metrics::render_prometheus_with_ebpf(&snapshot, ebpf_hist.as_ref());
         let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n{body}");
         stream.write_all(response.as_bytes()).await?;
     } else {
