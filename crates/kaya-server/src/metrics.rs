@@ -161,8 +161,15 @@ mod tests {
         let mut hist = FsyncHistogram::new();
         hist.observe(kaya_ebpf::SyscallKind::Fsync, 120);
         let body = render_prometheus_with_ebpf(&snapshot, Some(&hist));
-        assert!(body.contains("kaya_ebpf_fsync_latency_us_bucket"));
         assert!(body.contains("kaya_ebpf_fsync_latency_us_count{syscall=\"fsync\"} 1"));
+        assert!(body.contains("kaya_ebpf_fsync_latency_us_sum{syscall=\"fsync\"} 120"));
+        assert!(
+            body.lines().any(|l| {
+                l.starts_with("kaya_ebpf_fsync_latency_us_bucket{syscall=\"fsync\"")
+                    && l.contains("le=\"250\"")
+                    && l.ends_with("} 1")
+            })
+        );
         assert!(body.contains("kaya_wal_fsync_total_us 12345"));
     }
 }

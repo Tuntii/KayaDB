@@ -274,6 +274,27 @@ mod tests {
         let mut mgr = ProbeManager::new(ProbeConfig::for_data_dir(dir.path(), 3, "cfg"));
         mgr.attach().unwrap();
         mgr.sync_from_engine_stats(500, 120);
-        assert!(mgr.histogram().total_count() > 0);
+        assert!(mgr.histogram().has_nonzero_observations());
+        let after_first = mgr.histogram().total_count();
+        assert!(after_first >= 1);
+        mgr.sync_from_engine_stats(500, 120);
+        assert_eq!(
+            mgr.histogram().total_count(),
+            after_first,
+            "delta=0 must not duplicate events"
+        );
+    }
+
+    #[test]
+    fn report_fsync_works_on_production_config_without_simulation() {
+        let dir = tempdir().unwrap();
+        let mut mgr = ProbeManager::new(ProbeConfig::for_data_dir(dir.path(), 9, "tap-only"));
+        mgr.attach().unwrap();
+        mgr.pump_events();
+        assert_eq!(mgr.histogram().total_count(), 0);
+        mgr.report_fsync(SyscallKind::Fsync, 250);
+        assert!(mgr.histogram().has_nonzero_observations());
+        mgr.flush_trace().unwrap();
+        assert!(dir.path().join("ebpf/trace.jsonl").exists());
     }
 }

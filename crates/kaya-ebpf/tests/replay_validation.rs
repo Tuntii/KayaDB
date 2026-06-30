@@ -28,9 +28,8 @@ fn replay_rejects_sequence_gap_in_committed_fixture() {
     let dir = tempdir().unwrap();
     let path: PathBuf = dir.path().join("perturbed.jsonl");
     let mut events = seeded_fsync_events(11, 3);
-    if let kaya_ebpf::ProbeEvent::FsyncLatency { seq, .. } = &mut events[1] {
-        *seq = 5;
-    }
+    let kaya_ebpf::ProbeEvent::FsyncLatency { seq, .. } = &mut events[1];
+    *seq = 5;
     write_trace(&path, 11, "perturbed", &events).unwrap();
     assert!(matches!(
         replay_validate(&path, 11),

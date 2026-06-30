@@ -1307,8 +1307,16 @@ mod tests {
         }
         assert!(saw_nonzero, "timed out waiting for non-zero eBPF/WAL fsync metrics");
 
-        for _run in 0..2 {
+        let scratch = std::path::PathBuf::from(
+            std::env::var("KAYA_GOAL_SCRATCH").unwrap_or_else(|_| {
+                r"C:\Users\tunay\AppData\Local\Temp\grok-goal-e9b62b239508\implementer".to_owned()
+            }),
+        );
+        let _ = std::fs::create_dir_all(&scratch);
+
+        for run in 0..2 {
             let body = scrape_metrics_body(metrics_addr).await;
+            let _ = std::fs::write(scratch.join(format!("metrics-scrape-{run}.txt")), &body);
 
             let ebpf_count = prometheus_sample_value(
                 &body,
@@ -1328,7 +1336,13 @@ mod tests {
             );
             assert!(ebpf_sum > 0, "expected non-zero eBPF fsync sum");
             assert!(wal_total > 0, "expected non-zero userspace wal fsync total");
-            assert!(body.contains("kaya_ebpf_fsync_latency_us_bucket"));
+            assert!(
+                body.lines().any(|l| {
+                    l.starts_with("kaya_ebpf_fsync_latency_us_bucket{syscall=\"fsync\"")
+                        && !l.ends_with("} 0")
+                }),
+                "expected non-zero eBPF bucket after PUT; body:\n{body}"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 

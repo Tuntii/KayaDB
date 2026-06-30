@@ -136,9 +136,8 @@ mod tests {
 
         let perturbed = dir.path().join("bad.jsonl");
         let mut bad = events.clone();
-        if let ProbeEvent::FsyncLatency { seq, .. } = &mut bad[2] {
-            *seq = 99;
-        }
+        let ProbeEvent::FsyncLatency { seq, .. } = &mut bad[2];
+        *seq = 99;
         write_trace(&perturbed, 42, "test-config", &bad).unwrap();
         assert_eq!(
             replay_validate(&perturbed, 42),

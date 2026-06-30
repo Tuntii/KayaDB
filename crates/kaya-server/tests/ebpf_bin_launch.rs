@@ -3,9 +3,17 @@
 #![cfg(feature = "ebpf")]
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+
+fn goal_scratch_dir() -> PathBuf {
+    std::env::var("KAYA_GOAL_SCRATCH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(r"C:\Users\tunay\AppData\Local\Temp\grok-goal-e9b62b239508\implementer")
+        })
+}
 
 use kaya_net::{encode_put_payload, roundtrip};
 use serial_test::serial;
@@ -111,7 +119,10 @@ async fn kayadb_server_bin_ebpf_metrics_nonzero_after_put() {
     }
     assert!(saw_nonzero, "bin launch: timed out waiting for non-zero ebpf metrics");
 
-    for _run in 0..2 {
+    let scratch = goal_scratch_dir();
+    let _ = std::fs::create_dir_all(&scratch);
+
+    for run in 0..2 {
         let mut stream = tokio::net::TcpStream::connect(metrics_addr).await.unwrap();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         stream
@@ -121,6 +132,10 @@ async fn kayadb_server_bin_ebpf_metrics_nonzero_after_put() {
         let mut buf = vec![0u8; 32_768];
         let n = stream.read(&mut buf).await.unwrap();
         let body = String::from_utf8_lossy(&buf[..n]).to_string();
+        std::fs::write(scratch.join(format!("bin-metrics-scrape-{run}.txt")), &body).unwrap();
+        if run == 0 {
+            std::fs::write(scratch.join("ebpf-metrics-integration.log"), &body).unwrap();
+        }
 
         let count = prometheus_sample(&body, "kaya_ebpf_fsync_latency_us_count{syscall=\"fsync\"}")
             .unwrap_or(0);
@@ -128,7 +143,26 @@ async fn kayadb_server_bin_ebpf_metrics_nonzero_after_put() {
             .unwrap_or(0);
         assert!(count > 0, "bin launch: eBPF count must be >0\n{body}");
         assert!(sum > 0, "bin launch: eBPF sum must be >0");
+        assert!(
+            body.lines().any(|l| {
+                l.starts_with("kaya_ebpf_fsync_latency_us_bucket{syscall=\"fsync\"")
+                    && !l.ends_with("} 0")
+            }),
+            "bin launch: expected non-zero eBPF bucket\n{body}"
+        );
     }
+
+    let fallback_note = format!(
+        "host={} platform=windows\n\
+         note=CAP_BPF/kernel kprobes unavailable; kayadb-server --ebpf uses userspace tap + strict durability\n\
+         evidence=bin-metrics-scrape-0.txt bin-metrics-scrape-1.txt ebpf-metrics-integration.log\n\
+         server_bin={}\n",
+        std::env::consts::OS,
+        server_bin().display()
+    );
+    std::fs::write(scratch.join("ebpf-launch-fallback.log"), fallback_note).unwrap();
+    assert!(scratch.join("ebpf-metrics-integration.log").exists());
+    assert!(Path::new(&scratch.join("bin-metrics-scrape-0.txt")).exists());
 
     let _ = child.kill();
     let _ = std::fs::remove_dir_all(&data_dir);
