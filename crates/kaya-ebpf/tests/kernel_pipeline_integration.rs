@@ -26,6 +26,15 @@ fn kernel_backend_streams_through_pipeline() {
         mgr.histogram().has_nonzero_observations(),
         "kernel slot must produce non-zero histogram after first drain"
     );
+    let prom = mgr.histogram().render_prometheus();
+    assert!(
+        prom.contains("kernel-slot fsync latency"),
+        "prometheus HELP must say kernel-slot: {prom}"
+    );
+    assert!(
+        !prom.contains("userspace-tap"),
+        "prometheus must not reference legacy userspace-tap HELP"
+    );
 
     mgr.sync_from_engine_stats(2_000, 350);
     assert!(

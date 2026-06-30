@@ -4,6 +4,13 @@ use kaya_ebpf::backend::kernel::{parse_ringbuf_batch, RawFsyncEvent};
 use kaya_ebpf::{ProbeEvent, SyscallKind};
 
 #[test]
+fn bpf_source_declares_target_pid_filter() {
+    let src = include_str!("../bpf/fsync_latency.bpf.c");
+    assert!(src.contains("target_pid"), "bpf must declare target_pid map");
+    assert!(src.contains("pid_allowed"), "bpf must filter by target pid");
+}
+
+#[test]
 fn ringbuf_batch_produces_kernel_shaped_probe_events() {
     let events = parse_ringbuf_batch(
         &[

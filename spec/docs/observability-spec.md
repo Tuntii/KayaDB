@@ -145,11 +145,11 @@ Trace files are correctness artifacts, not performance logs.
 
 ## 7. Linux eBPF experiments (M12)
 
-**Status (2026-06):** bpftrace scripts + in-process `kaya-ebpf` runtime. Optional `--ebpf` on `kayadb-server`; no hard dependency. Default event path is **userspace tap** (engine WAL fsync stats). Linux `kernel-probes` feature compiles `bpf/fsync_latency.bpf.c` (clang + `bpf/include/` headers) and attaches kprobes when CAP_BPF is available; otherwise falls back to tap.
+**Status (2026-06):** bpftrace scripts + in-process `kaya-ebpf` runtime. Optional `--ebpf` on `kayadb-server`; no hard dependency. Default event path is **kernel-simulated** (ringbuf-shaped deterministic WAL activity on non-Linux / no CAP_BPF). Linux `kernel-probes` feature compiles `bpf/fsync_latency.bpf.c` (clang + `bpf/include/` headers) and attaches kprobes when CAP_BPF is available; otherwise uses kernel-simulated slot. Engine counters (`kaya_wal_fsync_*`) remain separate.
 
-Implemented (scripts + in-process runtime + CLI + userspace metrics) — Track A updates:
+Implemented (scripts + in-process runtime + CLI + kernel-slot metrics) — Track A updates:
 
-- `crates/kaya-ebpf` — attach/detach probe manager, userspace tap + seeded simulated fallback, `trace.jsonl` replay validation, Prometheus `kaya_ebpf_*` histograms.
+- `crates/kaya-ebpf` — attach/detach probe manager, explicit backend slots (kernel-live / kernel-simulated / tap / test), `trace.jsonl` replay validation, Prometheus `kaya_ebpf_*` histograms.
 - `kayadb-server --ebpf [--ebpf-seed N]` — starts probe runtime on Linux; default-off elsewhere.
 - `kayactl ebpf status` / `kayactl ebpf trace wal` — read `{data_dir}/ebpf/status.json` and WAL lines from `trace.jsonl`; graceful non-Linux guidance.
 

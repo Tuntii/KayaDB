@@ -10,6 +10,9 @@
 #ifndef BPF_MAP_TYPE_HASH
 #define BPF_MAP_TYPE_HASH 1
 #endif
+#ifndef BPF_MAP_TYPE_ARRAY
+#define BPF_MAP_TYPE_ARRAY 2
+#endif
 #ifndef BPF_MAP_TYPE_RINGBUF
 #define BPF_MAP_TYPE_RINGBUF 27
 #endif

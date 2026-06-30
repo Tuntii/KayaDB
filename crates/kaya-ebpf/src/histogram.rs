@@ -61,7 +61,7 @@ impl FsyncHistogram {
         render_syscall_histogram(
             &mut out,
             "kaya_ebpf_fsync_latency_us",
-            "Kernel/userspace-tap fsync latency (microseconds)",
+            "kernel-slot fsync latency (microseconds)",
             SyscallKind::Fsync,
             &self.fsync_buckets,
             self.fsync_count,
@@ -70,7 +70,7 @@ impl FsyncHistogram {
         render_syscall_histogram(
             &mut out,
             "kaya_ebpf_fdatasync_latency_us",
-            "Kernel/userspace-tap fdatasync latency (microseconds)",
+            "kernel-slot fdatasync latency (microseconds)",
             SyscallKind::Fdatasync,
             &self.fdatasync_buckets,
             self.fdatasync_count,

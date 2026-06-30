@@ -20,7 +20,7 @@ fn main() {
 
     if !clang_available() {
         eprintln!(
-            "cargo:warning=kaya-ebpf: clang not found; kernel bpf object not built (userspace tap fallback)"
+            "cargo:warning=kaya-ebpf: clang not found; kernel bpf object not built (kernel-simulated fallback)"
         );
         return;
     }
@@ -58,7 +58,7 @@ fn main() {
         }
         Ok(status) => {
             eprintln!(
-                "cargo:warning=kaya-ebpf: clang bpf compile failed (exit={}); userspace tap fallback",
+                "cargo:warning=kaya-ebpf: clang bpf compile failed (exit={}); kernel-simulated fallback",
                 status.code().unwrap_or(-1)
             );
         }

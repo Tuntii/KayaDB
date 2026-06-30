@@ -1343,6 +1343,14 @@ mod tests {
                 "ebpf status must record kernel-family backend, got: {status_raw}"
             );
             assert!(
+                body.contains("kernel-slot fsync latency"),
+                "metrics HELP must describe kernel-slot backend"
+            );
+            assert!(
+                !body.contains("userspace-tap"),
+                "metrics must not use legacy userspace-tap HELP"
+            );
+            assert!(
                 body.lines().any(|l| {
                     l.starts_with("kaya_ebpf_fsync_latency_us_bucket{syscall=\"fsync\"")
                         && !l.ends_with("} 0")

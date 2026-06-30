@@ -242,6 +242,14 @@ mod tests {
     }
 
     #[test]
+    fn server_config_not_streaming_before_attach() {
+        let dir = tempdir().unwrap();
+        let mgr = ProbeManager::new(ProbeConfig::for_server(dir.path(), 1, "srv"));
+        assert!(!mgr.is_attached());
+        assert!(!mgr.kernel_streaming(), "KernelLive attach is deferred until attach()");
+    }
+
+    #[test]
     fn test_config_streams_simulated_events() {
         let dir = tempdir().unwrap();
         let mut mgr = ProbeManager::new(ProbeConfig::for_tests(dir.path(), 7, "cfg"));

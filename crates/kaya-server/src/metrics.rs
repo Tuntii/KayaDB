@@ -163,6 +163,8 @@ mod tests {
         let body = render_prometheus_with_ebpf(&snapshot, Some(&hist));
         assert!(body.contains("kaya_ebpf_fsync_latency_us_count{syscall=\"fsync\"} 1"));
         assert!(body.contains("kaya_ebpf_fsync_latency_us_sum{syscall=\"fsync\"} 120"));
+        assert!(body.contains("kernel-slot fsync latency"));
+        assert!(!body.contains("userspace-tap"));
         assert!(
             body.lines().any(|l| {
                 l.starts_with("kaya_ebpf_fsync_latency_us_bucket{syscall=\"fsync\"")

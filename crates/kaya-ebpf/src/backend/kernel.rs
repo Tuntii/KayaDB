@@ -60,6 +60,7 @@ impl KernelBackend {
 
         let mut bpf = Ebpf::load(bytes).map_err(|e| format!("bpf load: {e}"))?;
         verify_programs_present(&bpf)?;
+        set_target_pid_map(&mut bpf)?;
         attach_kprobe_pair(&mut bpf, "fsync_enter", "fsync_exit", "__x64_sys_fsync")?;
         attach_kprobe_pair(
             &mut bpf,
@@ -145,6 +146,22 @@ fn verify_programs_present(bpf: &aya::Ebpf) -> Result<(), String> {
     if bpf.map("start_ns").is_none() {
         return Err("missing bpf map start_ns".into());
     }
+    if bpf.map("target_pid").is_none() {
+        return Err("missing bpf map target_pid".into());
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "kernel-probes"))]
+fn set_target_pid_map(bpf: &mut aya::Ebpf) -> Result<(), String> {
+    use aya::maps::Array;
+    let pid = std::process::id();
+    let map = bpf
+        .map_mut("target_pid")
+        .ok_or("missing target_pid map for write")?;
+    let mut arr: Array<_, u32> = Array::try_from(map).map_err(|e| format!("target_pid map: {e}"))?;
+    arr.set(0, pid, 0)
+        .map_err(|e| format!("target_pid set: {e}"))?;
     Ok(())
 }
 

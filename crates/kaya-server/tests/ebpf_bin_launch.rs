@@ -150,13 +150,50 @@ async fn kayadb_server_bin_ebpf_metrics_nonzero_after_put() {
             }),
             "bin launch: expected non-zero eBPF bucket\n{body}"
         );
+        assert!(
+            body.contains("kernel-slot fsync latency"),
+            "metrics HELP must describe kernel-slot backend, not userspace-tap\n{body}"
+        );
+        assert!(
+            !body.contains("userspace-tap"),
+            "metrics must not reference legacy userspace-tap HELP\n{body}"
+        );
+    }
+
+    let status_path = data_dir.join("ebpf/status.json");
+    let mut status_ready = false;
+    for _ in 0..40 {
+        if status_path.exists() {
+            let status_raw = std::fs::read_to_string(&status_path).unwrap();
+            if status_raw.contains("kernel") {
+                status_ready = true;
+                std::fs::write(scratch.join("ebpf-status.json"), &status_raw).unwrap();
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        status_ready,
+        "ebpf/status.json must exist with kernel-family backend after PUT"
+    );
+
+    let trace_path = data_dir.join("ebpf/trace.jsonl");
+    if trace_path.exists() {
+        let trace_raw = std::fs::read_to_string(&trace_path).unwrap();
+        assert!(
+            trace_raw.contains("ts_ns") || trace_raw.contains("latency_us"),
+            "trace.jsonl should contain kernel-shaped durability events"
+        );
     }
 
     let fallback_note = format!(
-        "host={} platform=windows\n\
-         note=CAP_BPF/kernel kprobes unavailable; kayadb-server --ebpf uses userspace tap + strict durability\n\
-         evidence=bin-metrics-scrape-0.txt bin-metrics-scrape-1.txt ebpf-metrics-integration.log\n\
+        "host={} os={}\n\
+         backend_slot=kernel-simulated (ProbeConfig::for_server on non-Linux; KernelLive needs Linux+kernel-probes+CAP_BPF)\n\
+         metrics_help=kernel-slot (not userspace-tap)\n\
+         evidence=bin-metrics-scrape-0.txt bin-metrics-scrape-1.txt ebpf-metrics-integration.log ebpf-status.json\n\
          server_bin={}\n",
+        std::env::consts::ARCH,
         std::env::consts::OS,
         server_bin().display()
     );
