@@ -150,6 +150,7 @@ fn acquire_directory_lock(config: &EngineConfig) -> Result<Option<std::fs::File>
 
 impl<D: Disk> Engine<D> {
     pub async fn open(config: EngineConfig, disk: Arc<D>) -> Result<Self> {
+        let recovery_started = std::time::Instant::now();
         let lock_file = acquire_directory_lock(&config)?;
         let temp_files = recovery::scan_temp_files(&disk).await?;
         let tmp_files_removed = temp_files.len();
@@ -189,10 +190,12 @@ impl<D: Disk> Engine<D> {
             .unwrap_or(1);
         let next_manifest_edit_seq = manifest_state.last_edit_seq + 1;
 
+        let recovery_duration_us = recovery_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
         let stats = EngineStats {
             memtable_entries: memtable.len() as u64,
             sstable_count: live_sstables.len() as u64,
             last_sequence: next_sequence.get().saturating_sub(1),
+            recovery_duration_us,
             ..EngineStats::default()
         };
 

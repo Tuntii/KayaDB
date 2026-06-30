@@ -19,6 +19,9 @@ docs/KayaDB_Explained_TR.md
 /memory/
 /mcps/
 
+# Git worktrees (local isolated workspaces)
+.worktrees/
+
 # OS / editor
 .DS_Store
 Thumbs.db

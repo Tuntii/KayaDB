@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::SstEntry;
 
@@ -15,8 +16,8 @@ pub(crate) struct BlockCache {
     capacity: usize,
     order: Vec<u64>,
     map: HashMap<u64, Vec<SstEntry>>,
-    hits: u64,
-    misses: u64,
+    hits: AtomicU64,
+    misses: AtomicU64,
 }
 
 impl BlockCache {
@@ -25,24 +26,32 @@ impl BlockCache {
             capacity,
             order: Vec::new(),
             map: HashMap::new(),
-            hits: 0,
-            misses: 0,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
         }
+    }
+
+    pub(crate) fn hits(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn misses(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
     }
 
     pub(crate) fn stats(&self) -> BlockCacheStats {
         BlockCacheStats {
-            hits: self.hits,
-            misses: self.misses,
+            hits: self.hits(),
+            misses: self.misses(),
         }
     }
 
     pub(crate) fn get(&mut self, block_offset: u64) -> Option<Vec<SstEntry>> {
         if !self.map.contains_key(&block_offset) {
-            self.misses += 1;
+            self.misses.fetch_add(1, Ordering::Relaxed);
             return None;
         }
-        self.hits += 1;
+        self.hits.fetch_add(1, Ordering::Relaxed);
         if let Some(pos) = self.order.iter().position(|k| *k == block_offset) {
             self.order.remove(pos);
         }
@@ -98,10 +107,13 @@ mod tests {
     fn stats_track_hits_and_misses() {
         let mut cache = BlockCache::new(4);
         cache.insert(1, vec![entry(b"a")]);
+        assert_eq!(cache.misses(), 0);
         assert_eq!(cache.stats().misses, 0);
         assert!(cache.get(1).is_some());
+        assert_eq!(cache.hits(), 1);
         assert_eq!(cache.stats().hits, 1);
         assert!(cache.get(99).is_none());
+        assert_eq!(cache.misses(), 1);
         assert_eq!(cache.stats().misses, 1);
     }
 }

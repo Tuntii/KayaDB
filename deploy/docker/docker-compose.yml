@@ -1,0 +1,114 @@
+# 3-node KayaDB cluster for local development and integration testing.
+#
+#   cd deploy/docker
+#   docker compose up --build -d
+#
+# Client endpoints on the host:
+#   node1  127.0.0.1:7379
+#   node2  127.0.0.1:7380
+#   node3  127.0.0.1:7381
+
+services:
+  kayadb-node1:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: kayadb:latest
+    container_name: kayadb-node1
+    hostname: kayadb-node1
+    restart: unless-stopped
+    networks:
+      - kayadb
+    ports:
+      - "7379:7379"
+      - "7481:7481"
+    volumes:
+      - kayadb-node1-data:/data
+    entrypoint: ["kayadb-server"]
+    command:
+      - --node-id
+      - "1"
+      - --raft-addr
+      - 0.0.0.0:7481
+      - --client-addr
+      - 0.0.0.0:7379
+      - --peer
+      - 2=kayadb-node2:7482,kayadb-node2:7380
+      - --peer
+      - 3=kayadb-node3:7483,kayadb-node3:7381
+      - --data
+      - /data
+      - --allow-public-bind
+      - --no-metrics
+
+  kayadb-node2:
+    image: kayadb:latest
+    container_name: kayadb-node2
+    hostname: kayadb-node2
+    restart: unless-stopped
+    depends_on:
+      - kayadb-node1
+    networks:
+      - kayadb
+    ports:
+      - "7380:7380"
+      - "7482:7482"
+    volumes:
+      - kayadb-node2-data:/data
+    entrypoint: ["kayadb-server"]
+    command:
+      - --node-id
+      - "2"
+      - --raft-addr
+      - 0.0.0.0:7482
+      - --client-addr
+      - 0.0.0.0:7380
+      - --peer
+      - 1=kayadb-node1:7481,kayadb-node1:7379
+      - --peer
+      - 3=kayadb-node3:7483,kayadb-node3:7381
+      - --data
+      - /data
+      - --allow-public-bind
+      - --no-metrics
+
+  kayadb-node3:
+    image: kayadb:latest
+    container_name: kayadb-node3
+    hostname: kayadb-node3
+    restart: unless-stopped
+    depends_on:
+      - kayadb-node1
+      - kayadb-node2
+    networks:
+      - kayadb
+    ports:
+      - "7381:7381"
+      - "7483:7483"
+    volumes:
+      - kayadb-node3-data:/data
+    entrypoint: ["kayadb-server"]
+    command:
+      - --node-id
+      - "3"
+      - --raft-addr
+      - 0.0.0.0:7483
+      - --client-addr
+      - 0.0.0.0:7381
+      - --peer
+      - 1=kayadb-node1:7481,kayadb-node1:7379
+      - --peer
+      - 2=kayadb-node2:7482,kayadb-node2:7380
+      - --data
+      - /data
+      - --allow-public-bind
+      - --no-metrics
+
+networks:
+  kayadb:
+    name: kayadb-cluster
+
+volumes:
+  kayadb-node1-data:
+  kayadb-node2-data:
+  kayadb-node3-data:

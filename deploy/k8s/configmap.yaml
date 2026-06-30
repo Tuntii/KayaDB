@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kayadb-config
+  namespace: kayadb
+  labels:
+    app: kayadb
+data:
+  # Example environment variables (optional; startup script reads these).
+  KAYADB_REPLICAS: "3"
+  KAYADB_HEADLESS_SERVICE: "kayadb-headless"
+  KAYADB_CLIENT_PORT: "7379"
+  KAYADB_RAFT_PORT: "7481"
+  KAYADB_DATA_DIR: "/data"
+
+  # Peer roster hints for the 3-node StatefulSet (raft_addr,client_addr per node).
+  # Short cluster DNS: <pod>.<headless-service>.<namespace>.svc.cluster.local
+  KAYADB_PEER_NODE_1: "kayadb-0.kayadb-headless:7481,kayadb-0.kayadb-headless:7379"
+  KAYADB_PEER_NODE_2: "kayadb-1.kayadb-headless:7481,kayadb-1.kayadb-headless:7379"
+  KAYADB_PEER_NODE_3: "kayadb-2.kayadb-headless:7481,kayadb-2.kayadb-headless:7379"
+
+  # Derives --node-id from the StatefulSet pod ordinal and wires --peer flags.
+  start.sh: |
+    #!/bin/sh
+    set -eu
+
+    ordinal="${HOSTNAME##*-}"
+    node_id=$((ordinal + 1))
+
+    replicas="${KAYADB_REPLICAS:-3}"
+    headless="${KAYADB_HEADLESS_SERVICE:-kayadb-headless}"
+    client_port="${KAYADB_CLIENT_PORT:-7379}"
+    raft_port="${KAYADB_RAFT_PORT:-7481}"
+    data_dir="${KAYADB_DATA_DIR:-/data}"
+
+    set -- kayadb-server \
+      --node-id "${node_id}" \
+      --raft-addr "0.0.0.0:${raft_port}" \
+      --client-addr "0.0.0.0:${client_port}" \
+      --data "${data_dir}" \
+      --allow-public-bind \
+      --no-metrics
+
+    i=0
+    while [ "${i}" -lt "${replicas}" ]; do
+      if [ "${i}" -ne "${ordinal}" ]; then
+        peer_id=$((i + 1))
+        peer_host="kayadb-${i}.${headless}"
+        set -- "$@" --peer "${peer_id}=${peer_host}:${raft_port},${peer_host}:${client_port}"
+      fi
+      i=$((i + 1))
+    done
+
+    exec "$@"

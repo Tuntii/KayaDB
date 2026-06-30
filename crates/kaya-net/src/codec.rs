@@ -31,6 +31,13 @@ const MSG_INSTALL_SNAPSHOT_RESPONSE: u8 = 6;
 const MSG_CONFIG_CHANGE_REQUEST: u8 = 7;
 const MSG_CONFIG_CHANGE_RESPONSE: u8 = 8;
 
+/// Current client wire protocol version negotiated via HELLO (opcode 0).
+pub const PROTO_VERSION: u16 = 1;
+
+/// Protocol version handshake opcode. Optional on connect; clients that skip
+/// HELLO remain compatible with servers that support it.
+pub const HELLO_OPCODE: u8 = 0;
+
 /// Opcode constants for admin (membership) operations. These match the
 /// client protocol opcodes and Opcode enum values.
 pub const ADD_MEMBER_OPCODE: u8 = 7;
@@ -39,6 +46,10 @@ pub const REMOVE_MEMBER_OPCODE: u8 = 8;
 /// Prefix used to optionally frame an operator token before admin opcode+payload.
 /// Format when present: ADMIN\x00 | token_len(u16 LE) | token_bytes | opcode(u8) | inner
 pub const ADMIN_AUTH_PREFIX: &[u8] = b"ADMIN\x00";
+
+/// Prefix used to optionally frame a client token before data-path payloads.
+/// Format when present: CLIENT\x00 | token_len(u16 LE) | token_bytes | inner (unchanged)
+pub const CLIENT_AUTH_PREFIX: &[u8] = b"CLIENT\x00";
 
 /// Max snapshot payload bytes on the wire (frame budget minus headers).
 pub const MAX_SNAPSHOT_DATA_LEN: u32 = DEFAULT_MAX_FRAME_LEN.saturating_sub(64);
@@ -302,6 +313,32 @@ pub fn decode_envelope(data: &[u8]) -> Result<Envelope, String> {
 
 // ── client protocol payload helpers ──────────────────────────────────────────
 
+/// Encode a HELLO request payload: `proto_version(u16 LE)`.
+pub fn encode_hello_request(version: u16) -> Vec<u8> {
+    version.to_le_bytes().to_vec()
+}
+
+/// Decode a HELLO request payload.
+pub fn decode_hello_request(data: &[u8]) -> Result<u16, String> {
+    if data.len() < 2 {
+        return Err("truncated HELLO request payload".to_owned());
+    }
+    Ok(u16::from_le_bytes([data[0], data[1]]))
+}
+
+/// Encode a HELLO OK response payload: `server_version(u16 LE)`.
+pub fn encode_hello_response(version: u16) -> Vec<u8> {
+    version.to_le_bytes().to_vec()
+}
+
+/// Decode a HELLO OK response payload.
+pub fn decode_hello_response(data: &[u8]) -> Result<u16, String> {
+    if data.len() < 2 {
+        return Err("truncated HELLO response payload".to_owned());
+    }
+    Ok(u16::from_le_bytes([data[0], data[1]]))
+}
+
 /// Encode a PUT request payload: `key_len(u32) | value_len(u32) | key | value`.
 pub fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(8 + key.len() + value.len());
@@ -425,6 +462,45 @@ pub fn decode_admin_payload(data: &[u8]) -> Result<(u8, Vec<u8>, Option<String>)
     let opcode = take_u8(&mut cur)?;
     let inner = cur.to_vec();
     Ok((opcode, inner, token))
+}
+
+/// Encode a data-path payload, optionally prefixing a client token.
+/// Wire for the returned bytes: [CLIENT\x00 | u16(len) | token | ] inner
+pub fn encode_client_auth_payload(inner: &[u8], client_token: Option<&str>) -> Vec<u8> {
+    let mut out = Vec::new();
+    if let Some(tok) = client_token {
+        out.extend_from_slice(CLIENT_AUTH_PREFIX);
+        out.extend_from_slice(&(tok.len() as u16).to_le_bytes());
+        out.extend_from_slice(tok.as_bytes());
+    }
+    out.extend_from_slice(inner);
+    out
+}
+
+/// Decode an (optionally) client-auth-prefixed payload.
+/// Returns (inner, Some(token)) when prefix was present.
+pub fn decode_client_auth_payload(data: &[u8]) -> Result<(Vec<u8>, Option<String>), String> {
+    let mut cur = data;
+
+    let token = if cur.len() >= CLIENT_AUTH_PREFIX.len() && cur.starts_with(CLIENT_AUTH_PREFIX) {
+        cur = &cur[CLIENT_AUTH_PREFIX.len()..];
+        if cur.len() < 2 {
+            return Err("truncated client auth token length".to_owned());
+        }
+        let tlen = u16::from_le_bytes([cur[0], cur[1]]) as usize;
+        cur = &cur[2..];
+        if cur.len() < tlen {
+            return Err("truncated client auth token".to_owned());
+        }
+        let tok_bytes = take_bytes(&mut cur, tlen)?;
+        let tok = String::from_utf8(tok_bytes)
+            .map_err(|e| format!("invalid utf-8 in client token: {e}"))?;
+        Some(tok)
+    } else {
+        None
+    };
+
+    Ok((cur.to_vec(), token))
 }
 
 /// Encode a SCAN request payload: `prefix_len(u32) | prefix`.
@@ -710,6 +786,27 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_hello_payloads() {
+        let request = encode_hello_request(PROTO_VERSION);
+        assert_eq!(decode_hello_request(&request).unwrap(), PROTO_VERSION);
+
+        let response = encode_hello_response(PROTO_VERSION);
+        assert_eq!(decode_hello_response(&response).unwrap(), PROTO_VERSION);
+    }
+
+    #[test]
+    fn decode_hello_request_truncated() {
+        assert!(decode_hello_request(&[]).is_err());
+        assert!(decode_hello_request(&[0x01]).is_err());
+    }
+
+    #[test]
+    fn decode_hello_response_truncated() {
+        assert!(decode_hello_response(&[]).is_err());
+        assert!(decode_hello_response(&[0x01]).is_err());
+    }
+
+    #[test]
     fn round_trip_put_payload() {
         let payload = encode_put_payload(b"mykey", b"myvalue");
         let (k, v) = decode_put_payload(&payload).unwrap();
@@ -978,6 +1075,27 @@ mod tests {
         let payload = encode_admin_payload(REMOVE_MEMBER_OPCODE, &inner, None);
         let (opcode, decoded_inner, presented) = decode_admin_payload(&payload).unwrap();
         assert_eq!(opcode, REMOVE_MEMBER_OPCODE);
+        assert_eq!(decoded_inner, inner);
+        assert!(presented.is_none());
+    }
+
+    // ── client credential / client auth framing (TDD) ────────────────────────
+
+    #[test]
+    fn client_token_roundtrips() {
+        let token = "super-secret-client-token-456";
+        let inner = encode_put_payload(b"my-key", b"my-val");
+        let payload = encode_client_auth_payload(&inner, Some(token));
+        let (decoded_inner, presented) = decode_client_auth_payload(&payload).unwrap();
+        assert_eq!(decoded_inner, inner);
+        assert_eq!(presented.as_deref(), Some(token));
+    }
+
+    #[test]
+    fn client_payload_no_token_roundtrips() {
+        let inner = encode_key_payload(b"lookup-key");
+        let payload = encode_client_auth_payload(&inner, None);
+        let (decoded_inner, presented) = decode_client_auth_payload(&payload).unwrap();
         assert_eq!(decoded_inner, inner);
         assert!(presented.is_none());
     }

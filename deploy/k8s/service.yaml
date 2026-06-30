@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kayadb-headless
+  namespace: kayadb
+  labels:
+    app: kayadb
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: kayadb
+  ports:
+    - name: client
+      port: 7379
+      targetPort: client
+      protocol: TCP
+    - name: raft
+      port: 7481
+      targetPort: raft
+      protocol: TCP

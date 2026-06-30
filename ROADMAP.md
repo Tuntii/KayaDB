@@ -1,11 +1,11 @@
 # KayaDB Development Roadmap
 
 **Status:** Living roadmap  
-**Last updated:** 2026-06-24
+**Last updated:** 2026-06-30
 
 > **"Geniş ve yaşayan yol haritası"** — Bu belge hem tarihi başarıları arşivler, hem şu anki odak noktalarını gösterir, hem de uzun vadeli vizyonu (birden fazla paralel track ile) detaylandırır. Tasarım-öncelikli ve correctness-öncelikli felsefe korunur.
 
-**Not (2026-06-16):** M0–M11'in çok detaylı listeleri ve eski "Current snapshot" bölümü bu belgenin okunabilirliğini bozduğu için büyük ölçüde arşivlenmiştir (yukarıdaki "Completed Work — Historical Archive" bölümüne bakın). M14 tamamlandı (2026-06-24); roadmap artık **geniş gelecek vizyonu** + paralel track'lere odaklanıyor.
+**Not (2026-06-30):** M0–M11'in çok detaylı listeleri ve eski "Current snapshot" bölümü bu belgenin okunabilirliğini bozduğu için büyük ölçüde arşivlenmiştir (yukarıdaki "Completed Work — Historical Archive" bölümüne bakın). M15 tamamlandı (2026-06-30); roadmap artık **geniş gelecek vizyonu** + paralel track'lere odaklanıyor.
 
 KayaDB is developed design-first and correctness-first. The roadmap intentionally prioritizes crash consistency, deterministic failure testing and inspectable storage formats before performance or distributed features.
 
@@ -54,6 +54,23 @@ Goal: deepen LSM algorithm choices and distributed correctness proof while keepi
 9. **io_uring backend** ✅ — `IoUringDisk` in `kaya-io` behind `io_uring` feature flag (Linux-only); shared `contract` helpers + `tests/disk_contract.rs` for FileDisk/SimDisk/IoUringDisk parity.
 
 **M14 exit (2026-06-24):** Jepsen full gate T1–T7 pass with WGL concurrent verify; `io_uring` prototype compiles and satisfies Disk contract tests on Linux with `--features io_uring`. Rust-native `kaya-jepsen-test` is the sole CI correctness gate; external Clojure Jepsen is out-of-band only (no in-repo harness).
+
+### M15 — Remaining tracks ✅
+
+Goal: close post-M14 parallel-track gaps across security, client ecosystem, observability, and deployment. Completed in v0.1.46 (2026-06-30).
+
+1. **Client token auth** ✅ — `CLIENT\x00` framing for data-path ops (opcodes 1–4, 6); `--client-token` / `KAYA_CLIENT_TOKEN` on server, `kayactl`, and `kaya-client`; integration test `data_ops_require_client_token`.
+2. **Structured audit logging** ✅ — Append-only JSONL at `{data_dir}/audit.jsonl`; `--audit-log` / `--no-audit-log` (default on when any token configured); hooks in `client_ops::dispatch`.
+3. **Protocol conformance suite** ✅ — `docs/clients/conformance/vectors.json` (20+ cases) + `crates/kaya-net/tests/conformance_vectors.rs` runner.
+4. **Go client** ✅ — `clients/kaya-go/` with Put/Get/Delete/Scan/Health/Stats, leader redirect, client token support.
+5. **Prometheus metrics** ✅ — `--metrics-addr` (default `127.0.0.1:9090`) HTTP `/metrics` exposition (`kaya_wal_fsync_*`, `kaya_engine_live_sstables`, `kaya_raft_*`).
+6. **kaya-ebpf crate** ✅ — Linux-gated stub with `probe_catalog()` / `available_scripts()`; non-hard workspace dependency.
+7. **Docker deployment** ✅ — `deploy/docker/` multi-stage Dockerfile + 3-node `docker-compose.yml`.
+8. **Kubernetes manifests** ✅ — `deploy/k8s/` StatefulSet (3 replicas), headless service, ConfigMap roster template.
+9. **Protocol version handshake** ✅ — HELLO opcode 0 (`PROTO_VERSION = 1`); optional client negotiation; backward compatible when skipped.
+10. **kayactl watch + EngineStats v2** ✅ — `kayactl watch [--interval 2] status`; `block_cache_hits/misses` and `recovery_duration_us` in stats JSON.
+
+**M15 exit (2026-06-30):** Client authZ, local audit logging, conformance vectors, Go client, Prometheus exporter, deployment manifests, HELLO handshake, and watch mode land. Remaining accepted risks: data-at-rest encryption, multi-tenant isolation, SIEM audit export — see `docs/security.md` §7.
 
 ---
 
@@ -565,6 +582,7 @@ M11 — Benchmark discipline, concurrent linearizability, Raft snapshots, dynami
 M12 — Jepsen prep + Linux observability experiments ✅
 M13 — Productization ✅
 M14 — Correctness + algorithms (compaction, bloom, WAL batching, CI gates, Jepsen full, io_uring) ✅
+M15 — Remaining tracks (client auth, audit, conformance, Go client, Prometheus, deploy, HELLO, watch) ✅
 ```
 
 ---
@@ -613,14 +631,14 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 - eBPF + userspace verilerini birleştiren basit korelasyon yardımcıları (script veya Rust tool)
 
 **Orta vadeli:**
-- Opsiyonel `crates/kaya-ebpf` (veya `kaya-observe`) crate:
+- Opsiyonel `crates/kaya-ebpf` (veya `kaya-observe`) crate — ✅ M15 stub (`probe_catalog()`, non-hard dep)
   - `ebpf` Cargo feature
   - `cfg(target_os = "linux")` + build.rs notları (clang, bpf-linker, libbpf)
   - Aya veya libbpf-rs tabanlı örnek probe'lar (USDT marker'lar, custom maps)
   - Hala **non-hard-dependency** — normal `cargo test` çalışmalı
 - USDT (User Statically-Defined Tracing) marker'lar Rust koduna ekle (WAL fsync, flush entry/exit noktaları)
 - Flamegraph + stack collapse entegrasyonu
-- Prometheus / OpenTelemetry exporter (basit metrik + span'ler)
+- Prometheus / OpenTelemetry exporter — ✅ M15 Prometheus `/metrics`; OpenTelemetry spans ⬜
 - `scripts/ebpf/` altına BCC / bpftrace helper script'leri + Makefile
 
 **Uzun vadeli / İleri seviye:**
@@ -653,19 +671,21 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 
 ### Track D: Client & Language Ecosystem
 
-- Go client gerçek implementasyon + conformance
-- Python, TypeScript/JavaScript, Zig native client'lar
-- Ortak conformance test harness
-- Yüksek seviye özellikler: retry policy'leri, observability hook'lar, connection pooling
+- Go client gerçek implementasyon + conformance — ✅ M15 (`clients/kaya-go/`)
+- Protocol conformance vectors + Rust runner — ✅ M15 (`docs/clients/conformance/vectors.json`)
+- HELLO protocol version handshake (opcode 0) — ✅ M15
+- Python, TypeScript/JavaScript, Zig native client'lar — ⬜ planned
+- Yüksek seviye özellikler: retry policy'leri, observability hook'lar, connection pooling — 🟡 partial (Rust + Go)
 
 ### Track E: Operations, Security & Production
 
-- Backup/restore (snapshot + incremental)
-- TLS + auth her yerde (Raft, client, admin RPC)
-- Day-2 operasyon dokümanları + kayactl komutları
-- Deployment (systemd, Docker, Kubernetes örnekleri)
-- Monitoring stack (Prometheus + eBPF + custom exporter)
-- SLO / error budget / limit envelope tanımları
+- Backup/restore (snapshot + incremental) — 🟡 runbook exists; incremental TBD
+- TLS + auth her yerde (Raft, client, admin RPC) — ✅ M13 TLS + M13 operator token + M15 client token
+- Day-2 operasyon dokümanları + kayactl komutları — ✅ M13 runbooks + M15 `kayactl watch`
+- Deployment (systemd, Docker, Kubernetes örnekleri) — ✅ M15 `deploy/docker/` + `deploy/k8s/`
+- Monitoring stack (Prometheus + eBPF + custom exporter) — ✅ M15 Prometheus `/metrics`; 🟡 eBPF stub (`kaya-ebpf`)
+- Structured audit logging — ✅ M15 local JSONL; SIEM export remains operator responsibility
+- SLO / error budget / limit envelope tanımları — ⬜ planned
 
 ### Track F: Performance & Benchmarking
 
@@ -676,7 +696,7 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 
 ### Track G: DX, Tooling & Documentation
 
-- `kayactl` interactive / watch modları
+- `kayactl` interactive / watch modları — ✅ M15 `kayactl watch status`
 - Trace + cluster görselleştirme (dashboard)
 - Daha iyi hata mesajları ve recovery rehberliği
 - Katkı deneyimini iyileştirme (eBPF "good first issue" etiketleri vs.)

@@ -9,7 +9,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](Cargo.toml)
 [![crates.io: kaya-engine](https://img.shields.io/crates/v/kaya-engine.svg?label=kaya-engine)](https://crates.io/crates/kaya-engine)
 [![crates.io: kayactl](https://img.shields.io/crates/v/kayactl.svg?label=kayactl)](https://crates.io/crates/kayactl)
-[![Status](https://img.shields.io/badge/status-M14%20complete-brightgreen.svg)](ROADMAP.md)
+[![Status](https://img.shields.io/badge/status-M15%20complete-brightgreen.svg)](ROADMAP.md)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://tuntii.github.io/KayaDB/)
 
 **A correctness-first, embeddable distributed key-value database built in Rust.**
@@ -68,8 +68,8 @@ cargo install kayactl
 cargo install kaya-server --bin kayadb-server
 ```
 
-Pre-built binaries: [GitHub Releases](https://github.com/Tuntii/KayaDB/releases) (`v0.1.45` and later).  
-Rust library: `kaya-engine = "0.1.45"` — see [installation guide](docs/installation.md).
+Pre-built binaries: [GitHub Releases](https://github.com/Tuntii/KayaDB/releases) (`v0.1.46` and later).  
+Rust library: `kaya-engine = "0.1.46"` — see [installation guide](docs/installation.md).
 
 ---
 
@@ -288,7 +288,7 @@ Detailed numbers and methodology live in [BENCHMARKS.md](BENCHMARKS.md).
 
 See the **[full status and roadmap](ROADMAP.md)** and the tracked **[productization north star](docs/productization.md)** (M13 exit gates — prototype → deployable product).
 
-M13 productization is complete (durable Raft state, TLS, operator token, day-2 runbooks). **M14** (v0.1.44) adds compaction policy, bloom filters, WAL batching, Jepsen full gate T1–T7 with partition observability, and Linux `io_uring` Disk prototype (`kaya-io` `io_uring` feature). Remaining deployment hardening (data-at-rest, multi-tenant, audit logging) is documented as accepted risk in [security.md §7](docs/security.md#7-accepted-risks-and-future-hardening-m13-exit). See [ROADMAP.md](ROADMAP.md) for parallel tracks (observability, client ecosystem, deployment).
+**M15** (v0.1.46) closes remaining parallel tracks: client token auth for data ops, structured audit logging, protocol conformance vectors, Go client, Prometheus `/metrics`, Docker/K8s deployment, HELLO handshake, and `kayactl watch`. **M14** adds compaction policy, bloom filters, WAL batching, Jepsen full gate T1–T7, and Linux `io_uring` Disk prototype. Remaining deployment hardening (data-at-rest, multi-tenant, SIEM audit export) is documented as accepted risk in [security.md §7](docs/security.md#7-accepted-risks-and-future-hardening-m15-exit). See [ROADMAP.md](ROADMAP.md) for parallel tracks.
 
 For the complete picture, use the **[official documentation](https://tuntii.github.io/KayaDB/)** or [docs/README.md](docs/README.md).
 

@@ -74,8 +74,37 @@ fn run() -> Result<(), String> {
         args.retain(|a| a != "--join-cluster");
     }
 
+    let audit_log_flag = if args.iter().any(|a| a == "--audit-log") {
+        args.retain(|a| a != "--audit-log");
+        Some(true)
+    } else if args.iter().any(|a| a == "--no-audit-log") {
+        args.retain(|a| a != "--no-audit-log");
+        Some(false)
+    } else {
+        None
+    };
+
+    let no_metrics = args.iter().any(|a| a == "--no-metrics");
+    if no_metrics {
+        args.retain(|a| a != "--no-metrics");
+    }
+
+    let metrics_addr: Option<SocketAddr> = if no_metrics {
+        None
+    } else {
+        Some(
+            take_value(&mut args, "--metrics-addr")
+                .unwrap_or_else(|| "127.0.0.1:9090".to_owned())
+                .parse()
+                .map_err(|e| format!("--metrics-addr: {e}"))?,
+        )
+    };
+
     validate_bind_addr(raft_addr, allow_public_bind)?;
     validate_bind_addr(client_addr, allow_public_bind)?;
+    if let Some(addr) = metrics_addr {
+        validate_bind_addr(addr, allow_public_bind)?;
+    }
     eprintln!("{}", security_banner(allow_public_bind));
 
     // --peer <id>=<raft_addr>,<client_addr>  (may appear multiple times)
@@ -96,6 +125,9 @@ fn run() -> Result<(), String> {
 
     let operator_token =
         take_value(&mut args, "--operator-token").or_else(|| env::var("KAYA_OPERATOR_TOKEN").ok());
+
+    let client_token =
+        take_value(&mut args, "--client-token").or_else(|| env::var("KAYA_CLIENT_TOKEN").ok());
 
     let tls_cert = take_value(&mut args, "--tls-cert").or_else(|| env::var("KAYA_TLS_CERT").ok());
     let tls_key = take_value(&mut args, "--tls-key").or_else(|| env::var("KAYA_TLS_KEY").ok());
@@ -119,6 +151,21 @@ fn run() -> Result<(), String> {
             config = config.with_operator_token(tok);
         }
     }
+    if let Some(tok) = client_token {
+        if !tok.trim().is_empty() {
+            config = config.with_client_token(tok);
+        }
+    }
+
+    let audit_log = audit_log_flag.unwrap_or_else(|| {
+        config.operator_token.is_some() || config.client_token.is_some()
+    });
+    config = config.with_audit_log(audit_log);
+
+    config = match metrics_addr {
+        Some(addr) => config.with_metrics_addr(addr),
+        None => config.without_metrics(),
+    };
 
     if enable_tls {
         if let (Some(cert), Some(key)) = (tls_cert, tls_key) {

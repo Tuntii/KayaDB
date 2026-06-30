@@ -1,12 +1,15 @@
 #[cfg(test)]
 mod tests {
     use crate::cluster::{ClusterConfig, ClusterNode};
+    use crate::client_auth::encode_client_auth_payload;
     use crate::operator_auth::encode_admin_payload;
     use kaya_net::{
-        decode_value_payload, encode_key_payload, encode_member_payload, encode_put_payload,
-        encode_remove_member_payload, roundtrip,
+        decode_hello_response, decode_value_payload, encode_hello_request, encode_key_payload,
+        encode_member_payload, encode_put_payload, encode_remove_member_payload, roundtrip,
+        HELLO_OPCODE, PROTO_VERSION, STATUS_INVALID_ARGUMENT, STATUS_OK,
     };
     use kaya_sim::{LinearizabilityChecker, Op, OpResult};
+    use serial_test::serial;
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
 
@@ -34,6 +37,7 @@ mod tests {
         rest[..end].parse().ok()
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_real_cluster_correctness() {
         let test_id = std::time::SystemTime::now()
@@ -206,6 +210,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir3);
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_cluster_linearizability_history() {
         eprintln!("[test] Starting linearizability integration test");
@@ -511,6 +516,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir3);
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_install_snapshot_over_tcp() {
         let test_id = std::time::SystemTime::now()
@@ -670,6 +676,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir3);
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_join_cluster_membership_over_tcp() {
         let test_id = std::time::SystemTime::now()
@@ -813,6 +820,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir4);
     }
 
+    #[serial]
     #[tokio::test]
     async fn add_member_requires_correct_operator_token() {
         // TDD test for Task 2: servers started with operator token must reject
@@ -931,7 +939,131 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir3);
     }
 
+    #[serial]
+    #[tokio::test]
+    async fn data_ops_require_client_token() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir1 = std::env::temp_dir().join(format!("kayadb_ctok_n1_{}", test_id));
+        let data_dir2 = std::env::temp_dir().join(format!("kayadb_ctok_n2_{}", test_id));
+        let data_dir3 = std::env::temp_dir().join(format!("kayadb_ctok_n3_{}", test_id));
+
+        let r1 = get_free_port().await;
+        let c1 = get_free_port().await;
+        let r2 = get_free_port().await;
+        let c2 = get_free_port().await;
+        let r3 = get_free_port().await;
+        let c3 = get_free_port().await;
+
+        let raft_addr1: SocketAddr = format!("127.0.0.1:{}", r1).parse().unwrap();
+        let client_addr1: SocketAddr = format!("127.0.0.1:{}", c1).parse().unwrap();
+        let raft_addr2: SocketAddr = format!("127.0.0.1:{}", r2).parse().unwrap();
+        let client_addr2: SocketAddr = format!("127.0.0.1:{}", c2).parse().unwrap();
+        let raft_addr3: SocketAddr = format!("127.0.0.1:{}", r3).parse().unwrap();
+        let client_addr3: SocketAddr = format!("127.0.0.1:{}", c3).parse().unwrap();
+
+        let peers1 = vec![(2, raft_addr2, client_addr2), (3, raft_addr3, client_addr3)];
+        let peers2 = vec![(1, raft_addr1, client_addr1), (3, raft_addr3, client_addr3)];
+        let peers3 = vec![(1, raft_addr1, client_addr1), (2, raft_addr2, client_addr2)];
+
+        let token = "test-client-token-99".to_string();
+        let config1 = ClusterConfig::new(1, &data_dir1, raft_addr1, client_addr1, peers1)
+            .with_client_token(token.clone());
+        let config2 = ClusterConfig::new(2, &data_dir2, raft_addr2, client_addr2, peers2)
+            .with_client_token(token.clone());
+        let config3 = ClusterConfig::new(3, &data_dir3, raft_addr3, client_addr3, peers3)
+            .with_client_token(token.clone());
+
+        let handle1 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config1).run().await;
+        });
+        let handle2 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config2).run().await;
+        });
+        let handle3 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config3).run().await;
+        });
+
+        let mut leader_addr = None;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr1).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr1);
+                break;
+            }
+            if check_health(client_addr2).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr2);
+                break;
+            }
+            if check_health(client_addr3).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr3);
+                break;
+            }
+        }
+        let leader_addr = leader_addr.expect("no leader elected in client-token-protected cluster");
+
+        let put_payload = encode_put_payload(b"client-tok-key", b"client-tok-val");
+
+        // 1) put without token -> rejected
+        let (status, _body) = roundtrip(leader_addr, 1, &put_payload).await.unwrap();
+        assert_ne!(
+            status, 0,
+            "put without client token should be rejected when client_token is configured"
+        );
+
+        // 2) put with wrong token -> rejected
+        let wrong = encode_client_auth_payload(&put_payload, Some("wrong-client-token"));
+        let (status, _body) = roundtrip(leader_addr, 1, &wrong).await.unwrap();
+        assert_ne!(status, 0, "put with wrong client token should be rejected");
+
+        // 3) put with correct token -> succeeds
+        let correct = encode_client_auth_payload(&put_payload, Some(&token));
+        let (status, _body) = roundtrip(leader_addr, 1, &correct).await.unwrap();
+        assert_eq!(
+            status,
+            0,
+            "put with correct client token should succeed: {:?}",
+            String::from_utf8_lossy(&_body)
+        );
+
+        // 4) get without token -> rejected
+        let get_payload = encode_key_payload(b"client-tok-key");
+        let (status, _body) = roundtrip(leader_addr, 2, &get_payload).await.unwrap();
+        assert_ne!(status, 0, "get without client token should be rejected");
+
+        // 5) get with correct token -> succeeds
+        let correct_get = encode_client_auth_payload(&get_payload, Some(&token));
+        let (status, body) = roundtrip(leader_addr, 2, &correct_get).await.unwrap();
+        assert_eq!(status, 0, "get with correct client token should succeed");
+        let val = decode_value_payload(&body).expect("decode get value");
+        assert_eq!(val, b"client-tok-val".to_vec());
+
+        // 6) stats without token -> rejected
+        let (status, _body) = roundtrip(leader_addr, 6, &[]).await.unwrap();
+        assert_ne!(status, 0, "stats without client token should be rejected");
+
+        // 7) stats with correct token -> succeeds
+        let correct_stats = encode_client_auth_payload(&[], Some(&token));
+        let (status, _body) = roundtrip(leader_addr, 6, &correct_stats).await.unwrap();
+        assert_eq!(status, 0, "stats with correct client token should succeed");
+
+        // 8) health stays open (no token required)
+        let (status, body) = roundtrip(leader_addr, 5, &[]).await.unwrap();
+        assert_eq!(status, 0, "health should succeed without client token");
+        assert_eq!(body, b"leader");
+
+        handle1.abort();
+        handle2.abort();
+        handle3.abort();
+        let _ = std::fs::remove_dir_all(&data_dir1);
+        let _ = std::fs::remove_dir_all(&data_dir2);
+        let _ = std::fs::remove_dir_all(&data_dir3);
+    }
+
     #[cfg(feature = "tls")]
+    #[serial]
     #[tokio::test]
     async fn tls_3node_cluster_smoke_linearizability() {
         // 3-node TLS cluster scaffolding.
@@ -957,6 +1089,58 @@ mod tests {
         assert!(true, "TLS cluster scaffolding ready");
     }
 
+    #[serial]
+    #[tokio::test]
+    async fn test_hello_handshake() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_hello_{test_id}"));
+
+        let r1 = get_free_port().await;
+        let c1 = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{r1}").parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{c1}").parse().unwrap();
+
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![]);
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "single-node leader not ready for HELLO test");
+
+        let hello_payload = encode_hello_request(PROTO_VERSION);
+        let (status, body) = roundtrip(client_addr, HELLO_OPCODE, &hello_payload)
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(decode_hello_response(&body).unwrap(), PROTO_VERSION);
+
+        let future_payload = encode_hello_request(PROTO_VERSION + 1);
+        let (status, _body) = roundtrip(client_addr, HELLO_OPCODE, &future_payload)
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_INVALID_ARGUMENT);
+
+        // Backward compat: clients that skip HELLO still work.
+        let put_payload = encode_put_payload(b"no-hello", b"still-works");
+        let (status, _) = roundtrip(client_addr, 1, &put_payload).await.unwrap();
+        assert_eq!(status, STATUS_OK);
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[serial]
     #[tokio::test]
     async fn test_node_restart_preserves_raft_term() {
         use kaya_raft::{decode_hard_state, Term, RAFT_HARD_STATE_LEN};

@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+M15 remaining tracks closure: client auth, audit logging, conformance, Go client, Prometheus, deployment, HELLO handshake, kayactl watch.
+
+### Added
+- Client token auth for data-path ops (`CLIENT\x00` framing): opcodes 1–4 and 6 require matching token when `--client-token` / `KAYA_CLIENT_TOKEN` configured; HEALTH (op 5) stays open
+- Structured JSONL audit log at `{data_dir}/audit.jsonl` with `--audit-log` / `--no-audit-log` (default on when any token configured)
+- Protocol conformance vectors (`docs/clients/conformance/vectors.json`) and Rust runner (`crates/kaya-net/tests/conformance_vectors.rs`)
+- Go client (`clients/kaya-go/`): Put/Get/Delete/Scan/Health/Stats with leader redirect and client token support
+- Prometheus `/metrics` HTTP endpoint via `--metrics-addr` (default `127.0.0.1:9090`)
+- `kaya-ebpf` workspace crate (Linux-gated stub, `probe_catalog()` / `available_scripts()`)
+- Docker 3-node cluster (`deploy/docker/`) and Kubernetes StatefulSet manifests (`deploy/k8s/`)
+- HELLO protocol version handshake (opcode 0, `PROTO_VERSION = 1`)
+- `kayactl watch [--interval <secs>] status` for polling remote STATS
+- EngineStats v2 fields: `block_cache_hits`, `block_cache_misses`, `recovery_duration_us`
+
+### Changed
+- `docs/security.md` §7: client token auth and local audit logging marked implemented; remaining gaps documented (data-at-rest, multi-tenant, SIEM export)
+- ROADMAP M15 section and parallel tracks (D, E, A, G) status updated
+
+### Security
+- Data-path authZ available via `--client-token`; compliance SIEM export and data-at-rest encryption remain accepted deployment risks — see `docs/security.md` §7
+
 ---
 
 ## [0.1.45] — 2026-06-27

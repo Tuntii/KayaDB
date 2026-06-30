@@ -1,0 +1,43 @@
+[
+  {"name": "put_basic", "fn": "put_roundtrip", "input": {"key": "a", "value": "b"}, "expect_ok": true},
+  {"name": "put_empty_key", "fn": "put_roundtrip", "input": {"key": "", "value": "value"}, "expect_ok": true},
+  {"name": "put_empty_value", "fn": "put_roundtrip", "input": {"key": "key", "value": ""}, "expect_ok": true},
+  {"name": "put_empty_both", "fn": "put_roundtrip", "input": {"key": "", "value": ""}, "expect_ok": true},
+  {"name": "put_unicode", "fn": "put_roundtrip", "input": {"key": "キー", "value": "値"}, "expect_ok": true},
+  {"name": "put_binary_hex", "fn": "put_roundtrip", "input": {"key_hex": "00ff01", "value_hex": "deadbeef"}, "expect_ok": true},
+  {"name": "put_long_strings", "fn": "put_roundtrip", "input": {"key": "long-key-with-many-characters-0123456789", "value": "long-value-with-many-characters-abcdefghijklmnopqrstuvwxyz"}, "expect_ok": true},
+
+  {"name": "key_basic", "fn": "key_roundtrip", "input": {"key": "mykey"}, "expect_ok": true},
+  {"name": "key_empty", "fn": "key_roundtrip", "input": {"key": ""}, "expect_ok": true},
+  {"name": "key_unicode", "fn": "key_roundtrip", "input": {"key": "プレフィックス"}, "expect_ok": true},
+  {"name": "key_binary_hex", "fn": "key_roundtrip", "input": {"key_hex": "cafebabe"}, "expect_ok": true},
+  {"name": "key_single_byte", "fn": "key_roundtrip", "input": {"key_hex": "7a"}, "expect_ok": true},
+
+  {"name": "admin_with_token_add_member", "fn": "admin_roundtrip", "input": {"opcode": 7, "inner": "member-inner", "token": "operator-secret"}, "expect_ok": true},
+  {"name": "admin_no_token_remove", "fn": "admin_roundtrip", "input": {"opcode": 8, "inner_hex": "2a00000000000000"}, "expect_ok": true},
+  {"name": "admin_empty_inner", "fn": "admin_roundtrip", "input": {"opcode": 8, "inner": "", "token": "tok"}, "expect_ok": true},
+  {"name": "admin_long_token", "fn": "admin_roundtrip", "input": {"opcode": 7, "inner_hex": "01020304", "token": "super-secret-operator-token-1234567890"}, "expect_ok": true},
+  {"name": "admin_unicode_token", "fn": "admin_roundtrip", "input": {"opcode": 7, "inner": "addr", "token": "運営者"}, "expect_ok": true},
+
+  {"name": "client_with_token", "fn": "client_roundtrip", "input": {"inner": "put-payload-bytes", "token": "client-secret"}, "expect_ok": true},
+  {"name": "client_no_token", "fn": "client_roundtrip", "input": {"inner_hex": "030000000061"}, "expect_ok": true},
+  {"name": "client_empty_inner", "fn": "client_roundtrip", "input": {"inner": "", "token": "tok"}, "expect_ok": true},
+  {"name": "client_empty_inner_no_token", "fn": "client_roundtrip", "input": {"inner": ""}, "expect_ok": true},
+  {"name": "client_unicode_token", "fn": "client_roundtrip", "input": {"inner_hex": "010203", "token": "クライアント"}, "expect_ok": true},
+
+  {"name": "scan_empty", "fn": "scan_roundtrip", "input": {"items": []}, "expect_ok": true},
+  {"name": "scan_single", "fn": "scan_roundtrip", "input": {"items": [{"key": "a", "value": "1"}]}, "expect_ok": true},
+  {"name": "scan_multi", "fn": "scan_roundtrip", "input": {"items": [{"key": "a", "value": "1"}, {"key": "b", "value": "2"}, {"key": "c", "value": "3"}]}, "expect_ok": true},
+  {"name": "scan_unicode_items", "fn": "scan_roundtrip", "input": {"items": [{"key": "キー", "value": "値"}, {"key": "🔑", "value": "📦"}]}, "expect_ok": true},
+  {"name": "scan_binary_hex_items", "fn": "scan_roundtrip", "input": {"items": [{"key_hex": "00ff", "value_hex": "baad"}, {"key_hex": "01", "value_hex": "02"}]}, "expect_ok": true},
+
+  {"name": "error_basic", "fn": "error_roundtrip", "input": {"message": "not found"}, "expect_ok": true},
+  {"name": "error_empty", "fn": "error_roundtrip", "input": {"message": ""}, "expect_ok": true},
+  {"name": "error_unicode", "fn": "error_roundtrip", "input": {"message": "見つかりません"}, "expect_ok": true},
+  {"name": "error_with_spaces", "fn": "error_roundtrip", "input": {"message": "invalid argument: key too long"}, "expect_ok": true},
+
+  {"name": "put_decode_truncated", "fn": "put_roundtrip", "input": {"raw_hex": "0500"}, "expect_ok": false},
+  {"name": "key_decode_truncated", "fn": "key_roundtrip", "input": {"raw_hex": "64000000"}, "expect_ok": false},
+  {"name": "scan_decode_oversized_count", "fn": "scan_roundtrip", "input": {"raw_hex": "00842e45"}, "expect_ok": false},
+  {"name": "error_decode_invalid_utf8", "fn": "error_roundtrip", "input": {"raw_hex": "03000000fffefd"}, "expect_ok": false}
+]

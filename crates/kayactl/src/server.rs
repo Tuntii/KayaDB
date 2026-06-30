@@ -4,13 +4,18 @@ use std::time::Duration;
 use kaya_core::{KayaError, Result};
 use kaya_net::{
     decode_error_payload, decode_scan_response, decode_value_payload, encode_admin_payload,
-    encode_key_payload, encode_member_payload, encode_put_payload, encode_remove_member_payload,
-    encode_scan_payload, roundtrip, ADD_MEMBER_OPCODE, REMOVE_MEMBER_OPCODE, STATUS_ERROR,
-    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
+    encode_client_auth_payload, encode_key_payload, encode_member_payload, encode_put_payload,
+    encode_remove_member_payload, encode_scan_payload, roundtrip, ADD_MEMBER_OPCODE,
+    REMOVE_MEMBER_OPCODE, STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND,
+    STATUS_NOT_LEADER, STATUS_OK,
 };
 
 use crate::cli::{block_on, json_string, print_usage};
 use crate::stats_cmd;
+
+fn with_client_auth(inner: &[u8], client_token: &Option<String>) -> Vec<u8> {
+    encode_client_auth_payload(inner, client_token.as_deref())
+}
 
 pub(crate) fn run_server_mode(
     args: Vec<String>,
@@ -19,9 +24,19 @@ pub(crate) fn run_server_mode(
     timeout: Option<Duration>,
     latency_view: bool,
     operator_token: Option<String>,
+    client_token: Option<String>,
 ) -> Result<()> {
     block_on(async move {
-        run_server_mode_async(args, endpoints, json, timeout, latency_view, operator_token).await
+        run_server_mode_async(
+            args,
+            endpoints,
+            json,
+            timeout,
+            latency_view,
+            operator_token,
+            client_token,
+        )
+        .await
     })
 }
 
@@ -94,8 +109,9 @@ async fn run_server_mode_async(
     timeout: Option<Duration>,
     latency_view: bool,
     operator_token: Option<String>,
+    client_token: Option<String>,
 ) -> Result<()> {
-    // operator_token already parsed from flag/env at top level (global)
+    // operator_token / client_token already parsed from flag/env at top level (global)
 
     match args.as_slice() {
         [] => {
@@ -106,7 +122,8 @@ async fn run_server_mode_async(
             "usage: kayactl --server <addr> put <key> <value>",
         )),
         [cmd, key, value] if cmd == "put" => {
-            let payload = encode_put_payload(key.as_bytes(), value.as_bytes());
+            let inner = encode_put_payload(key.as_bytes(), value.as_bytes());
+            let payload = with_client_auth(&inner, &client_token);
             let (status, body) = roundtrip_with_retry(&endpoints, 1, &payload, timeout).await?;
             match status {
                 STATUS_OK => {
@@ -131,7 +148,8 @@ async fn run_server_mode_async(
             "usage: kayactl --server <addr> get <key>",
         )),
         [cmd, key] if cmd == "get" => {
-            let payload = encode_key_payload(key.as_bytes());
+            let inner = encode_key_payload(key.as_bytes());
+            let payload = with_client_auth(&inner, &client_token);
             let (status, body) = roundtrip_with_retry(&endpoints, 2, &payload, timeout).await?;
             match status {
                 STATUS_OK => {
@@ -166,7 +184,8 @@ async fn run_server_mode_async(
             "usage: kayactl --server <addr> delete <key>",
         )),
         [cmd, key] if cmd == "delete" => {
-            let payload = encode_key_payload(key.as_bytes());
+            let inner = encode_key_payload(key.as_bytes());
+            let payload = with_client_auth(&inner, &client_token);
             let (status, body) = roundtrip_with_retry(&endpoints, 3, &payload, timeout).await?;
             match status {
                 STATUS_OK => {
@@ -191,7 +210,8 @@ async fn run_server_mode_async(
             "usage: kayactl --server <addr> scan <prefix>",
         )),
         [cmd, prefix] if cmd == "scan" => {
-            let payload = encode_scan_payload(prefix.as_bytes());
+            let inner = encode_scan_payload(prefix.as_bytes());
+            let payload = with_client_auth(&inner, &client_token);
             let (status, body) = roundtrip_with_retry(&endpoints, 4, &payload, timeout).await?;
             match status {
                 STATUS_OK => {
@@ -245,7 +265,8 @@ async fn run_server_mode_async(
             }
         }
         [cmd] if cmd == "status" => {
-            let (status, body) = roundtrip_with_retry(&endpoints, 6, &[], timeout).await?;
+            let payload = with_client_auth(&[], &client_token);
+            let (status, body) = roundtrip_with_retry(&endpoints, 6, &payload, timeout).await?;
             if status == STATUS_OK {
                 let stats_str =
                     String::from_utf8(body).map_err(|e| KayaError::corruption(e.to_string()))?;

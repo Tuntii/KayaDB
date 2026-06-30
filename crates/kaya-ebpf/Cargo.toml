@@ -1,0 +1,17 @@
+[package]
+name = "kaya-ebpf"
+description = "Optional Linux eBPF scaffolding for KayaDB observability (stub; non-hard dependency)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+rust-version.workspace = true
+keywords = ["kaya", "ebpf", "observability"]
+categories = ["development-tools::debugging"]
+publish = false
+
+[lib]
+path = "src/lib.rs"

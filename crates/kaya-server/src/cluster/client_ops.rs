@@ -6,15 +6,18 @@ use std::sync::Arc;
 
 use kaya_engine::{ReadOptions, ScanOptions};
 use kaya_net::{
-    decode_key_payload, decode_member_payload, decode_put_payload, decode_remove_member_payload,
-    decode_scan_payload, encode_error_payload, encode_scan_response, encode_value_payload,
-    read_client_frame, send_envelopes, write_client_response, NodeRoster, STATUS_ERROR,
-    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
+    decode_hello_request, decode_key_payload, decode_member_payload, decode_put_payload,
+    decode_remove_member_payload, decode_scan_payload, encode_error_payload, encode_hello_response,
+    encode_scan_response, encode_value_payload, read_client_frame, send_envelopes,
+    write_client_response, NodeRoster, PROTO_VERSION, STATUS_ERROR, STATUS_INVALID_ARGUMENT,
+    STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
 };
 use kaya_raft::{ClusterMember, NodeId};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::audit::AuditLog;
+use crate::client_auth::{decode_client_auth_payload, CLIENT_AUTH_PREFIX};
 use crate::command::RaftCommand;
 use crate::membership::{members_for_add, members_for_remove, SharedRoster};
 use crate::operator_auth::{
@@ -23,6 +26,29 @@ use crate::operator_auth::{
 
 use super::stats::build_stats_response;
 use super::{SharedEngine, SharedPending, SharedPendingReads, SharedRaft};
+
+type SharedAuditLog = Option<Arc<AuditLog>>;
+
+struct DispatchOutcome {
+    status: u16,
+    body: Vec<u8>,
+    auth_kind: &'static str,
+    key_len: Option<usize>,
+}
+
+fn outcome(
+    status: u16,
+    body: Vec<u8>,
+    auth_kind: &'static str,
+    key_len: Option<usize>,
+) -> DispatchOutcome {
+    DispatchOutcome {
+        status,
+        body,
+        auth_kind,
+        key_len,
+    }
+}
 
 /// Message sent from a client handler to the Raft loop to propose a write.
 pub struct ProposeReq {
@@ -50,9 +76,11 @@ pub(crate) async fn client_accept_loop(
     self_raft: SocketAddr,
     self_client: SocketAddr,
     operator_token: Option<String>,
+    client_token: Option<String>,
+    audit_log: SharedAuditLog,
     network_partitioned: Option<Arc<AtomicBool>>,
 ) {
-    while let Ok((stream, _peer)) = listener.accept().await {
+    while let Ok((stream, peer)) = listener.accept().await {
         if network_partitioned
             .as_ref()
             .is_some_and(|f| f.load(Ordering::SeqCst))
@@ -68,10 +96,13 @@ pub(crate) async fn client_accept_loop(
         let rtx = read_propose_tx.clone();
         let next_id = next_read_req_id.clone();
         let ros = roster.clone();
-        let tok = operator_token.clone();
+        let op_tok = operator_token.clone();
+        let cli_tok = client_token.clone();
+        let audit = audit_log.clone();
         tokio::spawn(async move {
             handle_connection(
                 stream,
+                peer,
                 r,
                 e,
                 p,
@@ -83,7 +114,9 @@ pub(crate) async fn client_accept_loop(
                 self_id,
                 self_raft,
                 self_client,
-                tok,
+                op_tok,
+                cli_tok,
+                audit,
             )
             .await;
         });
@@ -93,6 +126,7 @@ pub(crate) async fn client_accept_loop(
 #[allow(clippy::too_many_arguments)]
 async fn handle_connection<S>(
     mut stream: S,
+    peer: SocketAddr,
     raft: SharedRaft,
     engine: SharedEngine,
     _pending: SharedPending,
@@ -105,6 +139,8 @@ async fn handle_connection<S>(
     self_raft: SocketAddr,
     self_client: SocketAddr,
     operator_token: Option<String>,
+    client_token: Option<String>,
+    audit_log: SharedAuditLog,
 ) where
     S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin,
 {
@@ -113,7 +149,7 @@ async fn handle_connection<S>(
             Ok(f) => f,
             Err(_) => break,
         };
-        let (status, body) = dispatch(
+        let result = dispatch(
             &raft,
             &engine,
             &roster,
@@ -126,9 +162,19 @@ async fn handle_connection<S>(
             self_raft,
             self_client,
             operator_token.clone(),
+            client_token.clone(),
         )
         .await;
-        if write_client_response(&mut stream, status, &body)
+        if let Some(audit) = audit_log.as_ref() {
+            audit.record(
+                peer,
+                opcode,
+                result.status,
+                result.auth_kind,
+                result.key_len,
+            );
+        }
+        if write_client_response(&mut stream, result.status, &result.body)
             .await
             .is_err()
         {
@@ -160,7 +206,45 @@ async fn dispatch(
     self_raft: SocketAddr,
     self_client: SocketAddr,
     operator_token: Option<String>,
-) -> (u16, Vec<u8>) {
+    client_token: Option<String>,
+) -> DispatchOutcome {
+    let operator_auth = if operator_token.is_some() {
+        "operator"
+    } else {
+        "none"
+    };
+    let client_auth = if client_token.is_some() {
+        "client"
+    } else {
+        "none"
+    };
+
+    // HELLO (0): optional protocol version handshake; no auth required.
+    if opcode == 0 {
+        return match decode_hello_request(&payload) {
+            Ok(client_version) if client_version > PROTO_VERSION => outcome(
+                STATUS_INVALID_ARGUMENT,
+                encode_error_payload(&format!(
+                    "unsupported protocol version {client_version} (max {PROTO_VERSION})"
+                )),
+                "none",
+                None,
+            ),
+            Ok(_) => outcome(
+                STATUS_OK,
+                encode_hello_response(PROTO_VERSION),
+                "none",
+                None,
+            ),
+            Err(e) => outcome(
+                STATUS_INVALID_ARGUMENT,
+                encode_error_payload(&e),
+                "none",
+                None,
+            ),
+        };
+    }
+
     // Handle admin opcodes 7/8 (ADD/REMOVE) with optional operator token enforcement.
     // Supports backward-compat raw payloads (no token configured) and ADMIN-prefixed
     // payloads when clients present the credential. If server has token set, must match.
@@ -171,15 +255,22 @@ async fn dispatch(
                 match decode_admin_payload(&payload) {
                     Ok((got_opcode, inner, tok)) => {
                         if got_opcode != opcode {
-                            return (
+                            return outcome(
                                 STATUS_INVALID_ARGUMENT,
                                 encode_error_payload("admin opcode mismatch"),
+                                operator_auth,
+                                None,
                             );
                         }
                         (inner, tok)
                     }
                     Err(e) => {
-                        return (STATUS_INVALID_ARGUMENT, encode_error_payload(&e));
+                        return outcome(
+                            STATUS_INVALID_ARGUMENT,
+                            encode_error_payload(&e),
+                            operator_auth,
+                            None,
+                        );
                     }
                 }
             } else {
@@ -188,9 +279,11 @@ async fn dispatch(
 
         if let Some(expected) = &operator_token {
             if presented.as_deref() != Some(expected.as_str()) {
-                return (
+                return outcome(
                     STATUS_ERROR,
                     encode_error_payload("operator credential required or invalid"),
+                    operator_auth,
+                    None,
                 );
             }
         }
@@ -198,7 +291,7 @@ async fn dispatch(
         if opcode == ADD_MEMBER_OPCODE {
             return match decode_member_payload(&clean_payload) {
                 Ok((node_id, raft_addr, client_addr)) => {
-                    propose_add_member(
+                    let (status, body) = propose_add_member(
                         raft,
                         roster,
                         self_id,
@@ -208,14 +301,20 @@ async fn dispatch(
                         raft_addr,
                         client_addr,
                     )
-                    .await
+                    .await;
+                    outcome(status, body, operator_auth, None)
                 }
-                Err(e) => (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
+                Err(e) => outcome(
+                    STATUS_INVALID_ARGUMENT,
+                    encode_error_payload(&e),
+                    operator_auth,
+                    None,
+                ),
             };
         } else {
             return match decode_remove_member_payload(&clean_payload) {
                 Ok(node_id) => {
-                    propose_remove_member(
+                    let (status, body) = propose_remove_member(
                         raft,
                         roster,
                         self_id,
@@ -223,22 +322,72 @@ async fn dispatch(
                         self_client,
                         NodeId(node_id),
                     )
-                    .await
+                    .await;
+                    outcome(status, body, operator_auth, None)
                 }
-                Err(e) => (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
+                Err(e) => outcome(
+                    STATUS_INVALID_ARGUMENT,
+                    encode_error_payload(&e),
+                    operator_auth,
+                    None,
+                ),
             };
         }
     }
+
+    // Data-path opcodes 1-4 and 6 (STATS) with optional client token enforcement.
+    // HEALTH (5) stays open for liveness probes.
+    let payload = if matches!(opcode, 1..=4 | 6) {
+        let (clean_payload, presented) =
+            if payload.len() >= CLIENT_AUTH_PREFIX.len() && payload.starts_with(CLIENT_AUTH_PREFIX)
+            {
+                match decode_client_auth_payload(&payload) {
+                    Ok((inner, tok)) => (inner, tok),
+                    Err(e) => {
+                        return outcome(
+                            STATUS_INVALID_ARGUMENT,
+                            encode_error_payload(&e),
+                            client_auth,
+                            None,
+                        );
+                    }
+                }
+            } else {
+                (payload, None)
+            };
+
+        if let Some(expected) = &client_token {
+            if presented.as_deref() != Some(expected.as_str()) {
+                return outcome(
+                    STATUS_ERROR,
+                    encode_error_payload("client credential required or invalid"),
+                    client_auth,
+                    None,
+                );
+            }
+        }
+        clean_payload
+    } else {
+        payload
+    };
 
     let roster_snapshot = roster.read().await.clone();
     match opcode {
         // PUT
         1 => match decode_put_payload(&payload) {
             Ok((key, value)) => {
+                let key_len = key.len();
                 let cmd = RaftCommand::Put { key, value }.encode();
-                propose_and_wait(raft, &roster_snapshot, propose_tx, cmd).await
+                let (status, body) =
+                    propose_and_wait(raft, &roster_snapshot, propose_tx, cmd).await;
+                outcome(status, body, client_auth, Some(key_len))
             }
-            Err(e) => (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
+            Err(e) => outcome(
+                STATUS_INVALID_ARGUMENT,
+                encode_error_payload(&e),
+                client_auth,
+                None,
+            ),
         },
 
         // GET
@@ -247,27 +396,45 @@ async fn dispatch(
             match propose_read_and_wait(raft, read_propose_tx, req_id).await {
                 Ok(()) => match decode_key_payload(&payload) {
                     Ok(key) => match engine.lock().await.get(&key, ReadOptions::default()).await {
-                        Ok(Some(v)) => (STATUS_OK, encode_value_payload(&v)),
-                        Ok(None) => (STATUS_NOT_FOUND, vec![]),
-                        Err(e) => (STATUS_ERROR, encode_error_payload(&e.to_string())),
+                        Ok(Some(v)) => outcome(STATUS_OK, encode_value_payload(&v), client_auth, None),
+                        Ok(None) => outcome(STATUS_NOT_FOUND, vec![], client_auth, None),
+                        Err(e) => outcome(
+                            STATUS_ERROR,
+                            encode_error_payload(&e.to_string()),
+                            client_auth,
+                            None,
+                        ),
                     },
-                    Err(e) => (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
+                    Err(e) => outcome(
+                        STATUS_INVALID_ARGUMENT,
+                        encode_error_payload(&e),
+                        client_auth,
+                        None,
+                    ),
                 },
                 Err(e) if e == "not_leader" => {
                     let hint = get_leader_hint(raft, &roster_snapshot);
-                    (STATUS_NOT_LEADER, hint)
+                    outcome(STATUS_NOT_LEADER, hint, client_auth, None)
                 }
-                Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
+                Err(e) => outcome(STATUS_ERROR, encode_error_payload(&e), client_auth, None),
             }
         }
 
         // DELETE
         3 => match decode_key_payload(&payload) {
             Ok(key) => {
+                let key_len = key.len();
                 let cmd = RaftCommand::Delete { key }.encode();
-                propose_and_wait(raft, &roster_snapshot, propose_tx, cmd).await
+                let (status, body) =
+                    propose_and_wait(raft, &roster_snapshot, propose_tx, cmd).await;
+                outcome(status, body, client_auth, Some(key_len))
             }
-            Err(e) => (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
+            Err(e) => outcome(
+                STATUS_INVALID_ARGUMENT,
+                encode_error_payload(&e),
+                client_auth,
+                None,
+            ),
         },
 
         // SCAN
@@ -285,18 +452,28 @@ async fn dispatch(
                             Ok(kvs) => {
                                 let items: Vec<(Vec<u8>, Vec<u8>)> =
                                     kvs.into_iter().map(|kv| (kv.key, kv.value)).collect();
-                                (STATUS_OK, encode_scan_response(&items))
+                                outcome(STATUS_OK, encode_scan_response(&items), client_auth, None)
                             }
-                            Err(e) => (STATUS_ERROR, encode_error_payload(&e.to_string())),
+                            Err(e) => outcome(
+                                STATUS_ERROR,
+                                encode_error_payload(&e.to_string()),
+                                client_auth,
+                                None,
+                            ),
                         }
                     }
-                    Err(e) => (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
+                    Err(e) => outcome(
+                        STATUS_INVALID_ARGUMENT,
+                        encode_error_payload(&e),
+                        client_auth,
+                        None,
+                    ),
                 },
                 Err(e) if e == "not_leader" => {
                     let hint = get_leader_hint(raft, &roster_snapshot);
-                    (STATUS_NOT_LEADER, hint)
+                    outcome(STATUS_NOT_LEADER, hint, client_auth, None)
                 }
-                Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
+                Err(e) => outcome(STATUS_ERROR, encode_error_payload(&e), client_auth, None),
             }
         }
 
@@ -308,15 +485,20 @@ async fn dispatch(
             } else {
                 b"follower".to_vec()
             };
-            (STATUS_OK, body)
+            outcome(STATUS_OK, body, "none", None)
         }
 
         // STATS
-        6 => build_stats_response(raft, engine, &roster_snapshot).await,
+        6 => {
+            let (status, body) = build_stats_response(raft, engine, &roster_snapshot).await;
+            outcome(status, body, client_auth, None)
+        }
 
-        other => (
+        other => outcome(
             STATUS_ERROR,
             encode_error_payload(&format!("unknown opcode: {other}")),
+            "none",
+            None,
         ),
     }
 }

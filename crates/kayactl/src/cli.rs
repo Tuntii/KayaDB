@@ -42,22 +42,24 @@ pub(crate) fn print_usage() {
     println!();
     println!("OBSERVABILITY COMMANDS");
     println!("  kayactl [--data <dir>] [--json] [--latency] stats   (add --latency for focused durability + flush/compaction timers)");
+    println!("  kayactl [--interval <secs>] [--data <dir>] [--json] [--latency] watch status   (poll local stats every N seconds; default 2)");
     println!("  kayactl [--data <dir>] [--durability ...] [--json] flush   (force publish to see latency numbers move; pairs with --latency)");
     println!("  kayactl [--data <dir>] [--json] recover --dry-run");
     println!();
     println!("CLUSTER MODE (via running kayadb-server)");
-    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--operator-token <tok>] [--json] put <key> <value>");
+    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--client-token <tok>] [--operator-token <tok>] [--json] put <key> <value>");
     println!(
-        "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--operator-token <tok>] [--json] get <key>"
+        "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--client-token <tok>] [--operator-token <tok>] [--json] get <key>"
     );
     println!(
-        "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--operator-token <tok>] [--json] delete <key>"
+        "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--client-token <tok>] [--operator-token <tok>] [--json] delete <key>"
     );
     println!(
-        "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--operator-token <tok>] [--json] scan <prefix>"
+        "  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--client-token <tok>] [--operator-token <tok>] [--json] scan <prefix>"
     );
-    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--operator-token <tok>] [--json] health");
-    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--operator-token <tok>] [--json] [--latency] status");
+    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--client-token <tok>] [--operator-token <tok>] [--json] health");
+    println!("  kayactl --server <addr> [--server <addr2> ...] [--timeout <ms>] [--client-token <tok>] [--operator-token <tok>] [--json] [--latency] status");
+    println!("  kayactl --interval <secs> --server <addr> [--timeout <ms>] [--client-token <tok>] [--json] [--latency] watch status   (poll remote STATS opcode 6)");
     println!("  kayactl --server <addr> [--operator-token <tok>] add-node <id> <raft-addr> <client-addr>");
     println!("  kayactl --server <addr> [--operator-token <tok>] remove-node <id>");
     println!();
@@ -69,8 +71,10 @@ pub(crate) fn print_usage() {
     println!("DEFAULTS");
     println!("  --data ./data");
     println!("  --durability strict");
+    println!("  --interval 2");
     println!("  --timeout (none)");
     println!("  --operator-token (none, or KAYA_OPERATOR_TOKEN env var)");
+    println!("  --client-token (none, or KAYA_CLIENT_TOKEN env var)");
 }
 
 pub(crate) fn option_usize_json(value: Option<usize>) -> String {

@@ -24,7 +24,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use kaya_core::{DurabilityConfig, DurabilityMode, EngineConfig};
@@ -37,6 +38,7 @@ use kaya_raft::{LogIndex, NodeId, RaftConfig, RaftNode};
 use kaya_net::start_raft_listener_tls;
 
 use crate::apply_index::RaftApplyIndex;
+use crate::audit::AuditLog;
 use crate::membership::{load_persisted_roster, persist_roster, shared_roster, SharedRoster};
 use crate::raft_persister::RaftPersister;
 
@@ -69,11 +71,18 @@ pub struct ClusterConfig {
     /// presented credential (via ADMIN auth prefix) to match exactly. If None, any
     /// caller may perform membership changes (backward compat for dev).
     pub operator_token: Option<String>,
+    /// Optional client token. If set, PUT/GET/DELETE/SCAN/STATS (opcodes 1-4, 6) require the
+    /// presented credential (via CLIENT auth prefix) to match exactly. HEALTH (5) stays open.
+    pub client_token: Option<String>,
     /// TLS configuration. If Some, both Raft and client listeners (and outbound peer connections)
     /// will use TLS. See kaya_net::TlsConfig.
     pub tls: Option<kaya_net::TlsConfig>,
     /// When set and true, inbound client/raft connections are dropped (Jepsen partition fallback).
     pub network_partitioned: Option<Arc<AtomicBool>>,
+    /// When true, append structured JSONL audit events to `{data_dir}/audit.jsonl`.
+    pub audit_log: bool,
+    /// When `Some`, expose Prometheus metrics at this listen address (`GET /metrics`).
+    pub metrics_addr: Option<SocketAddr>,
 }
 
 impl ClusterConfig {
@@ -107,8 +116,11 @@ impl ClusterConfig {
             heartbeat_interval_ticks: 3,
             join_cluster: false,
             operator_token: None,
+            client_token: None,
             tls: None,
             network_partitioned: None,
+            audit_log: false,
+            metrics_addr: None,
         }
     }
 
@@ -131,9 +143,34 @@ impl ClusterConfig {
         self
     }
 
+    /// Require the given client token for PUT/GET/DELETE/SCAN/STATS operations.
+    /// Callers must present it using the CLIENT auth framing.
+    pub fn with_client_token(mut self, token: String) -> Self {
+        self.client_token = Some(token);
+        self
+    }
+
     /// Enable TLS for both Raft and client listeners (and peer connections).
     pub fn with_tls(mut self, tls: kaya_net::TlsConfig) -> Self {
         self.tls = Some(tls);
+        self
+    }
+
+    /// Enable or disable structured audit logging to `{data_dir}/audit.jsonl`.
+    pub fn with_audit_log(mut self, enabled: bool) -> Self {
+        self.audit_log = enabled;
+        self
+    }
+
+    /// Enable the Prometheus `/metrics` HTTP listener on `addr`.
+    pub fn with_metrics_addr(mut self, addr: SocketAddr) -> Self {
+        self.metrics_addr = Some(addr);
+        self
+    }
+
+    /// Disable the Prometheus `/metrics` HTTP listener.
+    pub fn without_metrics(mut self) -> Self {
+        self.metrics_addr = None;
         self
     }
 }
@@ -292,6 +329,20 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         config.node_id.0
     );
 
+    let metrics_fut = if let Some(metrics_addr) = config.metrics_addr {
+        let metrics_listener = TcpListener::bind(metrics_addr).await?;
+        let metrics_bound = metrics_listener.local_addr()?;
+        eprintln!(
+            "[node {}] metrics listening on {metrics_bound}",
+            config.node_id.0
+        );
+        let r = shared_raft.clone();
+        let e = shared_engine.clone();
+        Some(metrics_accept_loop(metrics_listener, r, e))
+    } else {
+        None
+    };
+
     // TLS for client listener: accept Tcp, handshake with TlsAcceptor (built from tls_config),
     // pass resulting stream (which implements AsyncRead/Write) to generic handle_connection.
     // (Scaffolding complete; symmetric to raft TLS listener.)
@@ -314,6 +365,26 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     let self_raft = config.raft_addr;
     let self_client = config.client_addr;
     let operator_token = config.operator_token.clone();
+    let client_token = config.client_token.clone();
+
+    let shared_audit = if config.audit_log {
+        match AuditLog::open(&config.data_dir, config.node_id) {
+            Ok(log) => {
+                eprintln!(
+                    "[node {}] audit log enabled at {}",
+                    config.node_id.0,
+                    config.data_dir.join("audit.jsonl").display()
+                );
+                Some(Arc::new(log))
+            }
+            Err(e) => {
+                eprintln!("[node {}] warning: audit log disabled: {e}", config.node_id.0);
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let accept_fut = client_ops::client_accept_loop(
         client_listener,
@@ -329,6 +400,8 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         self_raft,
         self_client,
         operator_token,
+        client_token,
+        shared_audit,
         config.network_partitioned.clone(),
     );
     // Load persisted Raft snapshot once at startup (before the event loop applies entries).
@@ -362,10 +435,69 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         config.tls.clone(),
     );
 
-    tokio::select! {
-        _ = accept_fut => {}
-        _ = raft_fut => {}
+    match metrics_fut {
+        Some(metrics_fut) => {
+            tokio::select! {
+                _ = accept_fut => {}
+                _ = raft_fut => {}
+                _ = metrics_fut => {}
+            }
+        }
+        None => {
+            tokio::select! {
+                _ = accept_fut => {}
+                _ = raft_fut => {}
+            }
+        }
     }
 
+    Ok(())
+}
+
+async fn metrics_accept_loop(
+    listener: TcpListener,
+    raft: SharedRaft,
+    engine: SharedEngine,
+) -> std::io::Result<()> {
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let raft = raft.clone();
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            let _ = handle_metrics_connection(stream, raft, engine).await;
+        });
+    }
+}
+
+async fn handle_metrics_connection(
+    mut stream: TcpStream,
+    raft: SharedRaft,
+    engine: SharedEngine,
+) -> std::io::Result<()> {
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf).await?;
+    let request = std::str::from_utf8(&buf[..n]).unwrap_or("");
+
+    if request.starts_with("GET /metrics") {
+        let snapshot = {
+            let (status, is_leader) = {
+                let guard = raft.lock().unwrap();
+                (guard.status(), guard.is_leader())
+            };
+            let engine_stats = engine.lock().await.stats();
+            crate::metrics::MetricsSnapshot::from_engine_and_raft(
+                engine_stats,
+                &status,
+                is_leader,
+            )
+        };
+        let body = crate::metrics::render_prometheus(&snapshot);
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n{body}");
+        stream.write_all(response.as_bytes()).await?;
+    } else {
+        let response = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\n";
+        stream.write_all(response.as_bytes()).await?;
+    }
+    stream.shutdown().await?;
     Ok(())
 }

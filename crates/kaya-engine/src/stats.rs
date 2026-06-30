@@ -52,6 +52,8 @@ pub struct EngineStats {
     pub block_cache_hits: u64,
     /// Aggregate decoded block-cache misses across open SSTable readers.
     pub block_cache_misses: u64,
+    /// Wall-clock microseconds spent in the last engine open/recovery path.
+    pub recovery_duration_us: u64,
 }
 
 use kaya_io::Disk;

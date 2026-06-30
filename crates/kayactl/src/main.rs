@@ -3,6 +3,7 @@ mod inspect;
 mod local;
 mod server;
 mod stats_cmd;
+mod watch;
 
 use std::env;
 use std::net::SocketAddr;
@@ -26,6 +27,10 @@ fn run() -> Result<()> {
 
     let operator_token = remove_value_flag(&mut args, "--operator-token")
         .or_else(|| env::var("KAYA_OPERATOR_TOKEN").ok())
+        .filter(|t| !t.trim().is_empty());
+
+    let client_token = remove_value_flag(&mut args, "--client-token")
+        .or_else(|| env::var("KAYA_CLIENT_TOKEN").ok())
         .filter(|t| !t.trim().is_empty());
 
     let _use_tls = remove_flag(&mut args, "--tls");
@@ -60,6 +65,35 @@ fn run() -> Result<()> {
 
     let latency_view = remove_flag(&mut args, "--latency");
 
+    let interval_secs: u64 = remove_value_flag(&mut args, "--interval")
+        .map(|s| {
+            s.parse::<u64>().map_err(|e| {
+                KayaError::invalid_argument(format!("--interval: {e}; expected positive integer"))
+            })
+        })
+        .transpose()?
+        .unwrap_or(2);
+    if interval_secs == 0 {
+        return Err(KayaError::invalid_argument(
+            "--interval must be at least 1 second",
+        ));
+    }
+    let watch_interval = Duration::from_secs(interval_secs);
+
+    if args.first().map(String::as_str) == Some("watch") {
+        return watch::run_watch(
+            args,
+            data_dir,
+            durability,
+            json,
+            latency_view,
+            server_addrs,
+            timeout,
+            watch_interval,
+            client_token,
+        );
+    }
+
     // ── server mode ───────────────────────────────────────────────────────────
     if !server_addrs.is_empty() {
         return server::run_server_mode(
@@ -69,6 +103,7 @@ fn run() -> Result<()> {
             timeout,
             latency_view,
             operator_token,
+            client_token,
         );
     }
 

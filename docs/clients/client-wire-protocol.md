@@ -44,6 +44,7 @@ After sending a request, the client **must** read exactly one response frame bef
 
 | Opcode | Name    | Description                  | Payload (request)          | Typical response status |
 |--------|---------|------------------------------|----------------------------|-------------------------|
+| 0      | HELLO   | Protocol version handshake   | hello_request              | 0 (OK + hello_response) or 1 |
 | 1      | PUT     | Store key → value            | put_payload                | 0 (OK) or 10 (NOT_LEADER) |
 | 2      | GET     | Read value for key           | key_payload                | 0 (OK + value), 2 (NOT_FOUND), 10 |
 | 3      | DELETE  | Remove key                   | key_payload                | 0 (OK) or 10            |
@@ -61,7 +62,17 @@ Unknown opcode → server replies with `STATUS_ERROR`.
 
 ## 3. Payload Formats (Request)
 
-All integers are **little-endian u32** unless noted.
+All integers are **little-endian u32** unless noted (HELLO uses **u16**).
+
+### HELLO (opcode 0)
+
+```
+proto_version : u16 LE
+```
+
+Client may send HELLO once after connect to negotiate the wire protocol version. Servers that do not implement HELLO treat opcode 0 as unknown; clients **must not** require HELLO for compatibility.
+
+**Reference:** `encode_hello_request` / `decode_hello_request`
 
 ### PUT (opcode 1)
 
@@ -116,6 +127,7 @@ node_id : u64 LE
 ### Status 0 (OK)
 
 - **PUT, DELETE:** usually empty payload (frame_len = 2).
+- **HELLO:** `server_version: u16 LE` (currently `1`).
 - **GET:** `value_len: u32 LE | value bytes`
 - **SCAN:** 
   ```
@@ -244,7 +256,9 @@ This shape is stable for v1 but may gain fields.
 
 ## 10. Versioning
 
-There is currently no protocol version byte in the client frames (v1 implicit). Future protocol evolution will introduce a version field. Until then, treat the formats in this document as the contract.
+Protocol version **1** is negotiated via optional **HELLO** (opcode 0). The client sends `proto_version(u16)`; the server responds with `server_version(u16)` on `STATUS_OK`. Versions greater than the server's supported maximum (`PROTO_VERSION`, currently `1`) receive `STATUS_INVALID_ARGUMENT`.
+
+Clients that skip HELLO remain compatible: all other opcodes are unchanged. Future breaking changes will bump `PROTO_VERSION` and may require HELLO before other operations.
 
 ---
 

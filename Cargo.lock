@@ -235,6 +235,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
+name = "futures-core"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
+
+[[package]]
+name = "futures-executor"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baf29c38818342a3b26b5b923639e7b1f4a61fc5e76102d4b1981c6dc7a7579d"
+dependencies = [
+ "futures-core",
+ "futures-task",
+ "futures-util",
+]
+
+[[package]]
+name = "futures-task"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393"
+
+[[package]]
+name = "futures-util"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
+dependencies = [
+ "futures-core",
+ "futures-task",
+ "pin-project-lite",
+ "slab",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -333,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-bench"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "criterion",
  "kaya-core",
@@ -346,7 +381,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-client"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "kaya-core",
  "kaya-net",
@@ -356,14 +391,18 @@ dependencies = [
 
 [[package]]
 name = "kaya-core"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
+name = "kaya-ebpf"
+version = "0.1.46"
+
+[[package]]
 name = "kaya-engine"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "kaya-core",
  "kaya-io",
@@ -375,7 +414,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-io"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "io-uring",
  "kaya-core",
@@ -385,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-jepsen-test"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "kaya-client",
  "kaya-net",
@@ -398,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-lsm"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "kaya-core",
  "lz4_flex",
@@ -407,19 +446,21 @@ dependencies = [
 
 [[package]]
 name = "kaya-net"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "kaya-core",
  "kaya-raft",
  "rustls",
  "rustls-pemfile",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-rustls",
 ]
 
 [[package]]
 name = "kaya-raft"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "kaya-core",
  "kaya-io",
@@ -427,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-server"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "kaya-client",
  "kaya-core",
@@ -436,12 +477,13 @@ dependencies = [
  "kaya-net",
  "kaya-raft",
  "kaya-sim",
+ "serial_test",
  "tokio",
 ]
 
 [[package]]
 name = "kaya-sim"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "kaya-core",
  "kaya-engine",
@@ -454,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "kaya-wal"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "kaya-core",
  "kaya-io",
@@ -463,7 +505,7 @@ dependencies = [
 
 [[package]]
 name = "kayactl"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "kaya-core",
  "kaya-engine",
@@ -485,6 +527,15 @@ name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
+name = "lock_api"
+version = "0.4.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
+dependencies = [
+ "scopeguard",
+]
 
 [[package]]
 name = "log"
@@ -538,6 +589,29 @@ name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
+
+[[package]]
+name = "parking_lot"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
+dependencies = [
+ "lock_api",
+ "parking_lot_core",
+]
+
+[[package]]
+name = "parking_lot_core"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "redox_syscall",
+ "smallvec",
+ "windows-link",
+]
 
 [[package]]
 name = "pin-project-lite"
@@ -618,6 +692,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom 0.2.17",
+]
+
+[[package]]
+name = "redox_syscall"
+version = "0.5.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
+dependencies = [
+ "bitflags 2.13.0",
 ]
 
 [[package]]
@@ -732,6 +815,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "scopeguard"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
 name = "serde"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -775,10 +864,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "serial_test"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "699f4197115b8a7e7ff19c9a315a4bd6fffec26cc4626ef45ecaea389e081c6d"
+dependencies = [
+ "futures-executor",
+ "futures-util",
+ "log",
+ "once_cell",
+ "parking_lot",
+ "serial_test_derive",
+]
+
+[[package]]
+name = "serial_test_derive"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94e153fc76e1c6a068703d6d29c508a0b15c061c4b7e43da59cc097bc342673c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "slab"
+version = "0.4.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "smallvec"
+version = "1.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "socket2"

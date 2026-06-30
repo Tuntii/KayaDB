@@ -279,15 +279,20 @@ Clients that deviate from the documented leader redirection, retry, or error han
 - Membership admin opcodes ADD_MEMBER (7) and REMOVE_MEMBER (8) on the wire (see [client-wire-protocol.md](client-wire-protocol.md)).
 - `kayactl add-node` / `remove-node` wrappers for operators.
 
+**Completed in M15 (2026-06-30):**
+- Conformance test suite: `docs/clients/conformance/vectors.json` + Rust runner (`crates/kaya-net/tests/conformance_vectors.rs`)
+- First non-Rust client: **Go** (`clients/kaya-go/`) with leader redirect, retry, and client token support
+- Protocol version handshake: optional HELLO (opcode 0, `PROTO_VERSION = 1`) — see [client-wire-protocol.md](client-wire-protocol.md)
+
 **Remaining for client ecosystem:**
-1. Create conformance test suite (language-agnostic where possible, e.g. using test vectors + a reference runner).
-2. Stand up the first non-Rust client repository (recommended order: **Go** → Python → TypeScript).
-3. Implement leader redirection + basic retry + tracing enablement in the first client.
-4. Add protocol version handshake (future minor version).
+1. **Python** and **TypeScript/JavaScript** native clients (recommended next)
+2. **Zig** native client (lower priority)
+3. Conformance runner ports for Go/Python/TS (reuse `vectors.json`)
+4. Higher-level features: connection pooling, OpenTelemetry hooks, shared retry policy libraries
 
 ---
 
 **This document is the single source of truth for client behavior.**  
 Any deviation in a language client should be discussed and either justified or fixed.
 
-Last updated: 2026-06-14 (error codes + operations added; review-ready)
+Last updated: 2026-06-30 (M15: Go client, conformance vectors, HELLO handshake)

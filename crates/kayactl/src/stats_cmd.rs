@@ -147,6 +147,15 @@ pub(crate) fn print_human_stats_from_json(json: &str) {
     if let Some(c_avg) = extract("compaction_avg_us") {
         println!("Compaction Avg Us:      {}", c_avg);
     }
+    if let Some(hits) = extract("block_cache_hits") {
+        println!("Block Cache Hits:       {}", hits);
+    }
+    if let Some(misses) = extract("block_cache_misses") {
+        println!("Block Cache Misses:     {}", misses);
+    }
+    if let Some(recovery_us) = extract("recovery_duration_us") {
+        println!("Recovery Duration Us:   {}", recovery_us);
+    }
     println!("==================================");
 }
 
@@ -181,6 +190,9 @@ fn print_stats_human(stats: &EngineStats, recovery: &RecoveryReport) {
     {
         println!("compaction_avg_us: {} (total/count)", avg);
     }
+    println!("block_cache_hits:  {}", stats.block_cache_hits);
+    println!("block_cache_misses:{}", stats.block_cache_misses);
+    println!("recovery_duration_us: {}", stats.recovery_duration_us);
     println!();
     println!(
         "recovery.manifest_records_replayed: {}",
@@ -225,10 +237,11 @@ fn print_stats_json(stats: &EngineStats, recovery: &RecoveryReport) {
         stats.put_count, stats.get_count, stats.delete_count, stats.scan_count
     );
     print!(
-        "\"wal_bytes_written\":{},\"wal_fsync_count\":{},\"wal_fsync_total_us\":{},\"wal_fsync_max_us\":{},\"memtable_entries\":{},\"sstable_count\":{},\"last_sequence\":{},\"flush_total_us\":{},\"flush_max_us\":{},\"flush_count\":{},\"compaction_total_us\":{},\"compaction_max_us\":{},\"compaction_count\":{},",
+        "\"wal_bytes_written\":{},\"wal_fsync_count\":{},\"wal_fsync_total_us\":{},\"wal_fsync_max_us\":{},\"memtable_entries\":{},\"sstable_count\":{},\"last_sequence\":{},\"flush_total_us\":{},\"flush_max_us\":{},\"flush_count\":{},\"compaction_total_us\":{},\"compaction_max_us\":{},\"compaction_count\":{},\"block_cache_hits\":{},\"block_cache_misses\":{},\"recovery_duration_us\":{},",
         stats.wal_bytes_written, stats.wal_fsync_count, stats.wal_fsync_total_us, stats.wal_fsync_max_us, stats.memtable_entries, stats.sstable_count, stats.last_sequence,
         stats.flush_total_us, stats.flush_max_us, stats.flush_count,
-        stats.compaction_total_us, stats.compaction_max_us, stats.compaction_count
+        stats.compaction_total_us, stats.compaction_max_us, stats.compaction_count,
+        stats.block_cache_hits, stats.block_cache_misses, stats.recovery_duration_us
     );
     print!(
         "\"recovery\":{{\"manifest_records_replayed\":{},\"live_sstable_count\":{},\"wal_records_replayed\":{},\"wal_truncated_bytes\":{},\"tmp_files_removed\":{},\"last_lsn\":{},\"last_sequence\":{},\"records_replayed\":{},\"warnings\":[",

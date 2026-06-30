@@ -3,12 +3,14 @@ pub mod roster;
 pub mod transport;
 
 pub use codec::{
-    decode_admin_payload, decode_envelope, decode_error_payload, decode_key_payload,
-    decode_member_payload, decode_put_payload, decode_remove_member_payload, decode_scan_payload,
-    decode_scan_response, decode_value_payload, encode_admin_payload, encode_envelope,
-    encode_error_payload, encode_key_payload, encode_member_payload, encode_put_payload,
-    encode_remove_member_payload, encode_scan_payload, encode_scan_response, encode_value_payload,
-    ADD_MEMBER_OPCODE, ADMIN_AUTH_PREFIX, REMOVE_MEMBER_OPCODE,
+    decode_admin_payload, decode_client_auth_payload, decode_envelope, decode_error_payload,
+    decode_hello_request, decode_hello_response, decode_key_payload, decode_member_payload,
+    decode_put_payload, decode_remove_member_payload, decode_scan_payload, decode_scan_response,
+    decode_value_payload, encode_admin_payload, encode_client_auth_payload, encode_envelope,
+    encode_error_payload, encode_hello_request, encode_hello_response, encode_key_payload,
+    encode_member_payload, encode_put_payload, encode_remove_member_payload, encode_scan_payload,
+    encode_scan_response, encode_value_payload, ADD_MEMBER_OPCODE, ADMIN_AUTH_PREFIX,
+    CLIENT_AUTH_PREFIX, HELLO_OPCODE, PROTO_VERSION, REMOVE_MEMBER_OPCODE,
 };
 pub use roster::NodeRoster;
 pub use transport::{
@@ -29,6 +31,7 @@ pub const DEFAULT_MAX_FRAME_LEN: u32 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Opcode {
+    Hello = 0,
     Put = 1,
     Get = 2,
     Delete = 3,
@@ -42,6 +45,7 @@ pub enum Opcode {
 impl Opcode {
     pub fn from_wire(value: u8) -> Result<Self> {
         match value {
+            0 => Ok(Self::Hello),
             1 => Ok(Self::Put),
             2 => Ok(Self::Get),
             3 => Ok(Self::Delete),
@@ -89,6 +93,8 @@ mod tests {
         ];
         for input in cases {
             let _ = decode_envelope(input);
+            let _ = decode_hello_request(input);
+            let _ = decode_hello_response(input);
             let _ = decode_put_payload(input);
             let _ = decode_key_payload(input);
             let _ = decode_scan_response(input);

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kayadb
+  labels:
+    app.kubernetes.io/name: kayadb
+    app.kubernetes.io/component: database

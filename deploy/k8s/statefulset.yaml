@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kayadb
+  namespace: kayadb
+  labels:
+    app: kayadb
+spec:
+  serviceName: kayadb-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: kayadb
+  template:
+    metadata:
+      labels:
+        app: kayadb
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: kayadb-server
+          image: kayadb:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/config/start.sh"]
+          envFrom:
+            - configMapRef:
+                name: kayadb-config
+          ports:
+            - name: client
+              containerPort: 7379
+              protocol: TCP
+            - name: raft
+              containerPort: 7481
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: kayadb-config
+            defaultMode: 0555
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: kayadb
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi
