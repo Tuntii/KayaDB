@@ -1,12 +1,26 @@
-use crate::event::ProbeEvent;
-#[cfg(all(target_os = "linux", feature = "kernel-probes"))]
-use crate::event::SyscallKind;
+use crate::event::{ProbeEvent, SyscallKind};
 
-#[cfg(all(target_os = "linux", feature = "kernel-probes"))]
+/// Wire format emitted by `bpf/fsync_latency.bpf.c` ring buffer entries.
 #[repr(C)]
-struct RawFsyncEvent {
-    latency_us: u64,
-    syscall_kind: u8,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawFsyncEvent {
+    pub latency_us: u64,
+    pub syscall_kind: u8,
+}
+
+/// Parse a ring-buffer item into a probe event (shared by live drain + tests).
+pub fn parse_raw_fsync_event(raw: &RawFsyncEvent, seq: u64) -> ProbeEvent {
+    let syscall = if raw.syscall_kind == 1 {
+        SyscallKind::Fdatasync
+    } else {
+        SyscallKind::Fsync
+    };
+    ProbeEvent::FsyncLatency {
+        seq,
+        syscall,
+        latency_us: raw.latency_us.max(1),
+        ts_ns: 0,
+    }
 }
 
 /// Linux kernel eBPF probe loader (aya kprobe/kretprobe + ring buffer).
@@ -32,18 +46,20 @@ impl KernelBackend {
         #[cfg(not(kaya_ebpf_bpf_built))]
         {
             Err(
-                "kernel bpf object not built; rebuild on Linux with clang and --features kernel-probes"
+                "kernel bpf object not built; install clang/llvm on Linux and rebuild with --features kernel-probes"
                     .into(),
             )
         }
     }
 
-    fn attach_from_object(bytes: &[u8]) -> Result<Self, String> {
+    /// Load and attach kprobes from a compiled BPF object (used by try_attach + tests).
+    pub fn attach_from_object(bytes: &[u8]) -> Result<Self, String> {
         use aya::maps::RingBuf;
         use aya::programs::{KProbe, KRetprobe};
         use aya::Ebpf;
 
         let mut bpf = Ebpf::load(bytes).map_err(|e| format!("bpf load: {e}"))?;
+        verify_programs_present(&bpf)?;
         attach_kprobe_pair(&mut bpf, "fsync_enter", "fsync_exit", "__x64_sys_fsync")?;
         attach_kprobe_pair(
             &mut bpf,
@@ -64,8 +80,25 @@ impl KernelBackend {
         })
     }
 
+    /// Load BPF object without attaching (CAP_BPF-free verification).
+    pub fn verify_object_loads(bytes: &[u8]) -> Result<(), String> {
+        use aya::Ebpf;
+        let bpf = Ebpf::load(bytes).map_err(|e| format!("bpf load: {e}"))?;
+        verify_programs_present(&bpf)
+    }
+
     pub fn is_attached(&self) -> bool {
         self.attached
+    }
+
+    pub fn is_streaming(&self) -> bool {
+        self.attached
+    }
+
+    pub fn detach(&mut self) -> bool {
+        let was = self.attached;
+        self.attached = false;
+        was
     }
 
     pub fn drain_events(&mut self) -> Vec<ProbeEvent> {
@@ -77,21 +110,42 @@ impl KernelBackend {
                 continue;
             }
             let raw = unsafe { *(item.as_ptr() as *const RawFsyncEvent) };
-            let syscall = if raw.syscall_kind == 1 {
-                SyscallKind::Fdatasync
-            } else {
-                SyscallKind::Fsync
-            };
-            self.pending.push(ProbeEvent::FsyncLatency {
-                seq: self.next_seq,
-                syscall,
-                latency_us: raw.latency_us.max(1),
-                ts_ns: 0,
-            });
+            self.pending.push(parse_raw_fsync_event(&raw, self.next_seq));
             self.next_seq += 1;
         }
         self.pending.drain(..).collect()
     }
+
+}
+
+/// Convert a batch of raw ring-buffer records into ordered probe events (test + replay).
+pub fn parse_ringbuf_batch(items: &[RawFsyncEvent], start_seq: u64) -> Vec<ProbeEvent> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(idx, raw)| parse_raw_fsync_event(raw, start_seq + idx as u64))
+        .collect()
+}
+
+#[cfg(all(target_os = "linux", feature = "kernel-probes"))]
+fn verify_programs_present(bpf: &aya::Ebpf) -> Result<(), String> {
+    for name in [
+        "fsync_enter",
+        "fsync_exit",
+        "fdatasync_enter",
+        "fdatasync_exit",
+    ] {
+        if bpf.program(name).is_none() {
+            return Err(format!("missing bpf program {name}"));
+        }
+    }
+    if bpf.map("events").is_none() {
+        return Err("missing bpf map events".into());
+    }
+    if bpf.map("start_ns").is_none() {
+        return Err("missing bpf map start_ns".into());
+    }
+    Ok(())
 }
 
 #[cfg(all(target_os = "linux", feature = "kernel-probes"))]
@@ -145,6 +199,14 @@ impl KernelBackend {
         false
     }
 
+    pub fn is_streaming(&self) -> bool {
+        false
+    }
+
+    pub fn detach(&mut self) -> bool {
+        false
+    }
+
     pub fn drain_events(&mut self) -> Vec<ProbeEvent> {
         Vec::new()
     }
@@ -155,7 +217,72 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_ringbuf_batch_preserves_order_and_sequence() {
+        let events = parse_ringbuf_batch(
+            &[
+                RawFsyncEvent {
+                    latency_us: 10,
+                    syscall_kind: 0,
+                },
+                RawFsyncEvent {
+                    latency_us: 20,
+                    syscall_kind: 1,
+                },
+            ],
+            5,
+        );
+        assert_eq!(events.len(), 2);
+        let ProbeEvent::FsyncLatency { seq, .. } = &events[0];
+        assert_eq!(*seq, 5);
+        let ProbeEvent::FsyncLatency { seq, .. } = &events[1];
+        assert_eq!(*seq, 6);
+    }
+
+    #[test]
+    fn parse_raw_fsync_event_maps_syscall_kinds() {
+        let fsync = parse_raw_fsync_event(
+            &RawFsyncEvent {
+                latency_us: 120,
+                syscall_kind: 0,
+            },
+            1,
+        );
+        let fdatasync = parse_raw_fsync_event(
+            &RawFsyncEvent {
+                latency_us: 80,
+                syscall_kind: 1,
+            },
+            2,
+        );
+        match fsync {
+            ProbeEvent::FsyncLatency { syscall, latency_us, .. } => {
+                assert_eq!(syscall, SyscallKind::Fsync);
+                assert_eq!(latency_us, 120);
+            }
+        }
+        match fdatasync {
+            ProbeEvent::FsyncLatency { syscall, latency_us, .. } => {
+                assert_eq!(syscall, SyscallKind::Fdatasync);
+                assert_eq!(latency_us, 80);
+            }
+        }
+    }
+
+    #[test]
     fn kernel_attach_unavailable_without_linux_feature_combo() {
         assert!(KernelBackend::try_attach().is_err());
+    }
+
+    #[cfg(all(target_os = "linux", feature = "kernel-probes"))]
+    mod linux_kernel {
+        use super::*;
+
+        #[cfg(kaya_ebpf_bpf_built)]
+        #[test]
+        fn bpf_object_loads_and_contains_programs() {
+            let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/fsync_latency.bpf.o"));
+            KernelBackend::verify_object_loads(bytes).expect("bpf object must load");
+        }
+
     }
 }

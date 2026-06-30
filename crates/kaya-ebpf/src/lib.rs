@@ -1,16 +1,22 @@
 //! Optional Linux eBPF observability for KayaDB.
 //!
-//! Provides in-process probe lifecycle (attach/detach), deterministic trace capture,
-//! and Prometheus histogram aggregates. On non-Linux hosts the runtime is a no-op
-//! stub with seeded simulated events for CI.
+//! **Default path (all platforms):** userspace tap fed by engine WAL fsync stats or
+//! explicit `report_fsync` calls — no kernel privileges required.
+//!
+//! **Linux + `kernel-probes` feature:** attempts to compile `bpf/fsync_latency.bpf.c`
+//! (clang + vendored headers, optional bpftool vmlinux) and attach kprobes via aya.
+//! When kernel attach succeeds, per-op ring-buffer samples replace synthetic tap
+//! injection in `sync_from_engine_stats`. Falls back to userspace tap when BPF build
+//! or attach fails.
 
-mod backend;
+pub mod backend;
 mod event;
 mod histogram;
 mod manager;
 mod trace;
 
 pub use backend::{EventBackend, SimulatedBackend, TapBackend};
+pub use backend::kernel::{parse_raw_fsync_event, parse_ringbuf_batch, RawFsyncEvent};
 pub use event::{ProbeEvent, SyscallKind};
 pub use histogram::{FsyncHistogram, FSYNC_LATENCY_BUCKETS_US};
 pub use manager::{shared_probe_manager, ProbeConfig, ProbeManager, ProbeStatus, SharedProbeManager};
@@ -43,8 +49,11 @@ pub mod linux {
     ];
 
     /// Documented build prerequisites for kernel probes.
-    pub const BUILD_NOTES: &str =
-        "In-process userspace tap is default; kernel kprobes require CAP_BPF + clang/llvm for future aya builds.";
+    pub const BUILD_NOTES: &str = concat!(
+        "Userspace tap is default. Kernel kprobes need linux + --features kernel-probes + clang/llvm; ",
+        "optional bpftool for accurate vmlinux.h; CAP_BPF for live attach. ",
+        "See bpf/include/ bundled headers and bpf/fsync_latency.bpf.c."
+    );
 
     pub fn available_scripts() -> Vec<&'static str> {
         PROBES.iter().map(|(_, path)| *path).collect()

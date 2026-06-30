@@ -1,4 +1,4 @@
-mod kernel;
+pub mod kernel;
 mod simulated;
 mod tap;
 
@@ -17,6 +17,10 @@ pub trait EventBackend: Send {
     fn backend_name(&self) -> &'static str;
     fn drain_events(&mut self) -> Vec<ProbeEvent>;
     fn report_fsync(&mut self, _syscall: SyscallKind, _latency_us: u64, _ts_ns: u64) {}
+    /// True when kernel ringbuf probes are attached and supplying per-op samples.
+    fn kernel_streaming(&self) -> bool {
+        false
+    }
 }
 
 /// Composite backend on Linux: kernel probes (when available) + userspace tap + optional sim.
@@ -58,6 +62,9 @@ impl EventBackend for LinuxCompositeBackend {
 
     fn detach(&mut self) -> bool {
         let mut detached = self.tap.detach();
+        if let Some(kernel) = &mut self.kernel {
+            detached &= kernel.detach();
+        }
         if let Some(sim) = &mut self.simulated {
             detached &= sim.detach();
         }
@@ -94,6 +101,10 @@ impl EventBackend for LinuxCompositeBackend {
 
     fn report_fsync(&mut self, syscall: SyscallKind, latency_us: u64, ts_ns: u64) {
         self.tap.report_fsync(syscall, latency_us, ts_ns);
+    }
+
+    fn kernel_streaming(&self) -> bool {
+        self.kernel.as_ref().is_some_and(|k| k.is_streaming())
     }
 }
 

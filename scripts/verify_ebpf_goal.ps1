@@ -14,6 +14,9 @@ Set-Location $RepoRoot
 Write-Host "==> kaya-ebpf tests"
 cargo test -p kaya-ebpf 2>&1 | Tee-Object -FilePath "$Scratch\kaya-ebpf-test.log"
 
+Write-Host "==> kernel ringbuf + bpf object tests"
+cargo test -p kaya-ebpf --test kernel_ringbuf 2>&1 | Tee-Object -FilePath "$Scratch\kernel-ringbuf-test.log"
+
 Write-Host "==> ebpf replay validation"
 cargo test -p kaya-ebpf --test replay_validation 2>&1 | Tee-Object -FilePath "$Scratch\ebpf-replay-test.log"
 

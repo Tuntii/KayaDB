@@ -155,6 +155,13 @@ impl ProbeManager {
         if !self.is_attached() {
             return;
         }
+        // Kernel ringbuf supplies per-op samples; skip synthetic engine-delta tap injection.
+        if self.kernel_streaming() {
+            self.pump_events();
+            self.last_wal_fsync_total_us = wal_fsync_total_us;
+            self.last_wal_fsync_max_us = wal_fsync_max_us;
+            return;
+        }
         let delta = wal_fsync_total_us.saturating_sub(self.last_wal_fsync_total_us);
         if delta > 0 {
             let ts_ns = now_ns();
@@ -204,6 +211,10 @@ impl ProbeManager {
 
     fn backend_name(&self) -> &'static str {
         self.with_backend(|b| b.backend_name())
+    }
+
+    pub fn kernel_streaming(&self) -> bool {
+        self.with_backend(|b| b.kernel_streaming())
     }
 
     fn with_backend_mut<R>(&mut self, f: impl FnOnce(&mut dyn EventBackend) -> R) -> R {
@@ -283,6 +294,13 @@ mod tests {
             after_first,
             "delta=0 must not duplicate events"
         );
+    }
+
+    #[test]
+    fn production_config_kernel_streaming_false_by_default() {
+        let dir = tempdir().unwrap();
+        let mgr = ProbeManager::new(ProbeConfig::for_data_dir(dir.path(), 1, "cfg"));
+        assert!(!mgr.kernel_streaming());
     }
 
     #[test]

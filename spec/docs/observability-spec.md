@@ -145,7 +145,7 @@ Trace files are correctness artifacts, not performance logs.
 
 ## 7. Linux eBPF experiments (M12)
 
-**Status (2026-06):** bpftrace scripts + in-process `kaya-ebpf` runtime. Optional `--ebpf` on `kayadb-server`; no hard dependency.
+**Status (2026-06):** bpftrace scripts + in-process `kaya-ebpf` runtime. Optional `--ebpf` on `kayadb-server`; no hard dependency. Default event path is **userspace tap** (engine WAL fsync stats). Linux `kernel-probes` feature compiles `bpf/fsync_latency.bpf.c` (clang + `bpf/include/` headers) and attaches kprobes when CAP_BPF is available; otherwise falls back to tap.
 
 Implemented (scripts + in-process runtime + CLI + userspace metrics) — Track A updates:
 
