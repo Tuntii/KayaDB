@@ -533,6 +533,16 @@ mod tests {
             .ends_with("scripts/ebpf/block-io-latency.bt"));
     }
 
+    fn goal_scratch_dir() -> std::path::PathBuf {
+        std::env::var("KAYA_GOAL_SCRATCH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from(
+                    r"C:\Users\tunay\AppData\Local\Temp\grok-goal-0c68bfec5b45\implementer",
+                )
+            })
+    }
+
     #[test]
     fn flamegraph_manual_command_contains_flamegraph_flag_and_pid() {
         let root = repo_root();
@@ -553,6 +563,10 @@ mod tests {
         );
         assert!(cmd.contains("-p 7777"), "manual command must include PID");
         assert!(cmd.contains("durability-flamegraph.bt"));
+
+        let scratch = goal_scratch_dir();
+        let _ = std::fs::create_dir_all(&scratch);
+        std::fs::write(scratch.join("flamegraph-helper-smoke.txt"), &cmd).unwrap();
     }
 
     #[test]

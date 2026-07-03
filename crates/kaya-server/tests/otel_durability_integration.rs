@@ -29,6 +29,55 @@ async fn free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
+fn assert_durability_span(
+    spans: &[opentelemetry_sdk::trace::SpanData],
+    name: &str,
+) -> opentelemetry_sdk::trace::SpanData {
+    let span = spans
+        .iter()
+        .find(|s| s.name.as_ref() == name)
+        .unwrap_or_else(|| {
+            panic!(
+                "missing {name} span; names={:?}",
+                spans.iter().map(|s| &s.name).collect::<Vec<_>>()
+            )
+        });
+    let phase = span
+        .attributes
+        .iter()
+        .find(|kv| kv.key.as_ref() == "kaya.durability.phase")
+        .map(|kv| kv.value.as_str().into_owned())
+        .unwrap_or_default();
+    assert_eq!(phase, "enter", "{name} must retain enter phase on export");
+    let duration_us = span
+        .attributes
+        .iter()
+        .find(|kv| kv.key.as_ref() == "kaya.durability.duration_us")
+        .and_then(|kv| match kv.value {
+            opentelemetry::Value::I64(v) => Some(v),
+            _ => None,
+        });
+    assert!(
+        duration_us.is_some_and(|us| us > 0),
+        "{name} must export duration_us > 0; attrs={:?}",
+        span.attributes
+    );
+    let events: Vec<String> = span
+        .events
+        .events
+        .iter()
+        .map(|e| e.name.to_string())
+        .collect();
+    assert_eq!(events, vec!["enter", "exit"], "{name} enter/exit events");
+    let wall_ns = span
+        .end_time
+        .duration_since(span.start_time)
+        .unwrap_or_default()
+        .as_nanos();
+    assert!(wall_ns > 0, "{name} wall-clock span duration must be > 0");
+    span.clone()
+}
+
 #[serial]
 #[tokio::test]
 async fn otel_spans_export_wal_fsync_and_flush_after_put() {
@@ -73,18 +122,14 @@ async fn otel_spans_export_wal_fsync_and_flush_after_put() {
     flush_durability_spans();
 
     let spans = exporter.get_finished_spans().expect("finished spans");
-    shutdown_durability_spans();
+    let _wal = assert_durability_span(&spans, "wal_fsync");
+    let _flush = assert_durability_span(&spans, "flush");
     let summary = spans_summary(&spans);
-    let names: Vec<String> = spans.iter().map(|s| s.name.to_string()).collect();
+    shutdown_durability_spans();
 
-    assert!(
-        names.iter().any(|n| n == "wal_fsync"),
-        "expected wal_fsync span after PUT; names={names:?}"
-    );
-    assert!(
-        names.iter().any(|n| n == "flush"),
-        "expected flush span after auto-flush; names={names:?}"
-    );
+    assert!(summary.contains("\"phase\":\"enter\""));
+    assert!(summary.contains("\"duration_us\":"));
+    assert!(summary.contains("\"events\":[\"enter\", \"exit\"]"));
 
     let scratch = goal_scratch_dir();
     let _ = std::fs::create_dir_all(&scratch);

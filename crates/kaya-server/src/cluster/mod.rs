@@ -255,19 +255,22 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     #[cfg(not(feature = "ebpf"))]
     let durability_mode = DurabilityMode::Relaxed;
 
-    let engine_cfg = EngineConfig {
-        data_dir: config.data_dir.clone(),
-        durability: DurabilityConfig {
-            mode: durability_mode,
-            ..DurabilityConfig::default()
-        },
-        ..EngineConfig::default()
+    let engine_cfg = {
+        let mut cfg = EngineConfig {
+            data_dir: config.data_dir.clone(),
+            durability: DurabilityConfig {
+                mode: durability_mode,
+                ..DurabilityConfig::default()
+            },
+            ..EngineConfig::default()
+        };
+        #[cfg(feature = "ebpf")]
+        if config.ebpf_enabled {
+            // Small memtable cap so PUT traffic produces flush USDT markers in trace.jsonl.
+            cfg.memtable.max_bytes = 16;
+        }
+        cfg
     };
-    #[cfg(feature = "ebpf")]
-    if config.ebpf_enabled {
-        // Small memtable cap so PUT traffic produces flush USDT markers in trace.jsonl.
-        engine_cfg.memtable.max_bytes = 16;
-    }
 
     #[cfg(feature = "otel")]
     if config.otel_enabled && crate::otel_spans::provider_slot_is_empty() {
