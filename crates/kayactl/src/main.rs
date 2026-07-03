@@ -1,6 +1,8 @@
 mod cli;
 #[cfg(feature = "ebpf")]
 mod ebpf;
+#[cfg(feature = "ebpf")]
+mod ebpf_bpftrace;
 mod inspect;
 mod local;
 mod server;

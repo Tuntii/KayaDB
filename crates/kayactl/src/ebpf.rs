@@ -5,6 +5,8 @@ use std::path::Path;
 use kaya_core::Result;
 use kaya_ebpf::{filter_wal_events, ProbeStatus};
 
+use crate::ebpf_bpftrace::{discover_server_pids, list_active_bpftrace, resolve_script};
+
 const LINUX_ONLY_MSG: &str =
     "In-process eBPF probes are Linux-only. Use bpftrace scripts in scripts/ebpf/ on any Linux host.";
 
@@ -47,7 +49,7 @@ fn print_help() -> Result<()> {
 fn print_status(data_dir: &str, pid: Option<u32>) -> Result<()> {
     if !cfg!(target_os = "linux") {
         println!("{LINUX_ONLY_MSG}");
-        println!("Scripts: scripts/ebpf/");
+        print_scripts_hint();
         return Ok(());
     }
 
@@ -68,7 +70,7 @@ fn print_status(data_dir: &str, pid: Option<u32>) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(pid) = pid.or_else(detect_server_pid) {
+    if let Some(pid) = pid.or_else(|| discover_server_pids().first().copied()) {
         println!("eBPF status for PID {pid}:");
         println!("  attached:          unknown (no {}/ebpf/status.json)", data_dir);
         println!("  streaming:         unknown");
@@ -77,14 +79,31 @@ fn print_status(data_dir: &str, pid: Option<u32>) -> Result<()> {
         println!("eBPF status: no local kayadb-server detected");
         println!("  hint: kayadb-server --ebpf --data {data_dir}");
     }
-    println!("Scripts: scripts/ebpf/");
+    let bpftrace_pids = list_active_bpftrace();
+    if !bpftrace_pids.is_empty() {
+        println!("  active bpftrace:   {bpftrace_pids:?}");
+    }
+    print_scripts_hint();
     Ok(())
+}
+
+fn print_scripts_hint() {
+    match resolve_script("fsync-latency") {
+        Ok(path) => {
+            let dir = path
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "scripts/ebpf".to_owned());
+            println!("Scripts: {dir}/");
+        }
+        Err(_) => println!("Scripts: scripts/ebpf/"),
+    }
 }
 
 fn print_trace_wal(data_dir: &str) -> Result<()> {
     if !cfg!(target_os = "linux") {
         println!("{LINUX_ONLY_MSG}");
-        println!("Scripts: scripts/ebpf/");
+        print_scripts_hint();
         return Ok(());
     }
 
@@ -125,18 +144,5 @@ fn print_trace_wal(data_dir: &str) -> Result<()> {
     Ok(())
 }
 
-fn detect_server_pid() -> Option<u32> {
-    if !cfg!(target_os = "linux") {
-        return None;
-    }
-    std::process::Command::new("pgrep")
-        .args(["-f", "kayadb-server"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            String::from_utf8(o.stdout)
-                .ok()
-                .and_then(|s| s.lines().next().and_then(|l| l.trim().parse().ok()))
-        })
-}
+
 
