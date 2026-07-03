@@ -166,12 +166,16 @@ Implemented (scripts + in-process runtime + CLI + kernel-slot metrics) — Track
 - Userspace latency in `EngineStats` (WAL fsync + `flush_total_us`/`max`, `compaction_total_us`/`max`) + exposure in `kayactl stats --latency`, server `status` JSON, and human printers. Designed to be compared side-by-side with eBPF histograms and `kayactl ebpf correlate`.
 - Full usage + correlation notes in `scripts/ebpf/README.md` and `docs/cli-reference.md`. `kayactl ebpf list` is the recommended way to find PIDs in multi-node local clusters.
 
+**Track A Phase 2C (2026-07-03):**
+
+- `scripts/ebpf/durability-flamegraph.bt` + `kayactl ebpf flamegraph [--run]` — bpftrace `-f flamegraph` stack-collapse helper; non-Linux prints manual command.
+- `scripts/ebpf/Makefile` target `make flamegraph`.
+- Optional `kayadb-server --features otel --otel` — OpenTelemetry durability spans at the same sites as USDT markers (`wal_fsync`, `flush` enter/exit); no-op when feature off; does not alter Prometheus or in-process `trace.jsonl`.
+- External stap/perf USDT operator overlay documented in `scripts/ebpf/README.md` (in-process markers remain the CI/testable contract).
+
 v2+ (future) eBPF tooling may still add:
 
 - Per-file / data-dir filters + richer TID/PID attribution.
-- Flamegraph helper integration (Phase 2C).
-- External stap/perf USDT attachment (in-process markers are the testable contract today).
-- OpenTelemetry span exporter (Phase 2C).
 
 Non-goals (unchanged):
 

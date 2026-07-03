@@ -634,9 +634,9 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 - ✅ Extended `ProbeEvent`: `usdt_marker`, `publish_syscall` + replay/schema-drift tests
 - ✅ `kayactl ebpf correlate` marker + publish summaries; `trace wal` prints publish/USDT lines
 - ✅ `scripts/ebpf/Makefile` (Phase 2A)
-- ⬜ Flamegraph + stack collapse entegrasyonu (Phase 2C)
-- ⬜ OpenTelemetry spans (Phase 2C; Prometheus `/metrics` ✅ M15)
-- ⬜ External stap/perf USDT attachment (documented operator path only)
+- ✅ Flamegraph + stack collapse entegrasyonu (Phase 2C): `durability-flamegraph.bt`, `kayactl ebpf flamegraph`, `make flamegraph`
+- ✅ OpenTelemetry spans (Phase 2C; `kayadb-server --features otel --otel`; Prometheus `/metrics` ✅ M15)
+- 🟡 External stap/perf USDT attachment (in-process markers + operator guide in `scripts/ebpf/README.md`; stap not in CI)
 
 **Uzun vadeli / İleri seviye:**
 - Kernel + userspace birleşik attribution (hangi fsync'in ne kadarını kernel'da geçirdiğini net raporla)

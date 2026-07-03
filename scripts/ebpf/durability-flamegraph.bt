@@ -1,0 +1,21 @@
+#!/usr/bin/env bpftrace
+/*
+ * durability-flamegraph.bt — stack samples for WAL/publish hot paths (Phase 2C)
+ *
+ * Pipe bpftrace flamegraph output to flamegraph.pl:
+ *   sudo bpftrace -f flamegraph -p <PID> scripts/ebpf/durability-flamegraph.bt | flamegraph.pl > kayadb.svg
+ *
+ * Or use: kayactl ebpf flamegraph [--pid <pid>] [--run] [--duration <sec>]
+ */
+
+BEGIN
+{
+    printf("KayaDB durability flamegraph: profiling kayadb-server/kayactl stacks (99 Hz)\n");
+    printf("Output format: bpftrace -f flamegraph (fold stacks for flamegraph.pl)\n");
+}
+
+profile:hz:99
+/comm == "kayadb-server" || comm == "kayactl" || comm == "kaya"/
+{
+    @[ustack] = count();
+}

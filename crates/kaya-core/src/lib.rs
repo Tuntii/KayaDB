@@ -5,7 +5,8 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 
 pub use probe_markers::{
-    emit_probe_marker, set_probe_marker_callback, ProbeMarkerPhase, ProbeMarkerSite,
+    emit_probe_marker, set_probe_marker_callback, set_probe_span_callback, ProbeMarkerPhase,
+    ProbeMarkerSite,
 };
 
 pub type Bytes = Vec<u8>;

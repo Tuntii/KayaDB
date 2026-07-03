@@ -7,7 +7,7 @@ use kaya_ebpf::{filter_publish_events, filter_wal_events, ProbeStatus};
 
 use crate::ebpf_bpftrace::{
     discover_server_pids, format_catalog_script_names, list_active_bpftrace, resolve_script,
-    run_bpftrace_script, server_pid_details,
+    run_bpftrace_script, run_flamegraph_helper, server_pid_details,
 };
 use crate::ebpf_correlate::{correlate_report, print_correlate_human};
 
@@ -35,6 +35,7 @@ pub(crate) fn handle_ebpf(
         "fsync-latency" => run_bpftrace_script(pid, "fsync-latency", run, duration_secs),
         "block-latency" => run_bpftrace_script(pid, "block-latency", run, duration_secs),
         "syscall-timeline" => run_bpftrace_script(pid, "syscall-timeline", run, duration_secs),
+        "flamegraph" => run_flamegraph_helper(pid, run, duration_secs),
         "help" | "" => print_help(),
         _ => print_help(),
     }
@@ -61,6 +62,7 @@ fn print_help() -> Result<()> {
     println!("  kayactl ebpf fsync-latency [--pid <pid>] [--run] [--duration <sec>]");
     println!("  kayactl ebpf block-latency [--pid <pid>] [--run] [--duration <sec>]");
     println!("  kayactl ebpf syscall-timeline [--pid <pid>] [--run] [--duration <sec>]");
+    println!("  kayactl ebpf flamegraph [--pid <pid>] [--run] [--duration <sec>]  Stack-collapse / flamegraph helper");
     println!("  kayactl ebpf help");
     println!();
     println!("bpftrace wrapper (--run spawns bpftrace for up to --duration seconds, default 10):");

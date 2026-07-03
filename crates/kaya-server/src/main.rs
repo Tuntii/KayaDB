@@ -97,6 +97,20 @@ fn run() -> Result<(), String> {
         );
     }
 
+    let otel_flag = args.iter().any(|a| a == "--otel");
+    if otel_flag {
+        args.retain(|a| a != "--otel");
+    }
+    #[cfg(feature = "otel")]
+    let otel_enabled = otel_flag;
+    #[cfg(not(feature = "otel"))]
+    if otel_flag {
+        return Err(
+            "OpenTelemetry support not compiled in; rebuild kayadb-server with --features otel"
+                .to_owned(),
+        );
+    }
+
     #[cfg(feature = "ebpf")]
     let ebpf_seed: u64 = if ebpf_enabled {
         take_value(&mut args, "--ebpf-seed")
@@ -207,6 +221,11 @@ fn run() -> Result<(), String> {
     #[cfg(feature = "ebpf")]
     if ebpf_enabled {
         config = config.with_ebpf(ebpf_seed);
+    }
+
+    #[cfg(feature = "otel")]
+    if otel_enabled {
+        config = config.with_otel();
     }
 
     tokio::runtime::Builder::new_multi_thread()

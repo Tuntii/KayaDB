@@ -31,6 +31,7 @@ make list          # discover kayadb-server PIDs
 make fsync         # fsync/fdatasync latency histogram (first PID)
 make block         # block I/O read/write latency histograms
 make timeline      # write/fsync/rename/unlink syscall timeline
+make flamegraph    # stack profile (bpftrace -f flamegraph) for kayadb-server
 make verify        # Linux kernel gate (bpf compile + kaya-ebpf tests)
 ```
 
@@ -101,6 +102,51 @@ sudo bpftrace -p $(pgrep -f kayadb-server | head -1) scripts/ebpf/syscall-timeli
 For a 3-node local cluster use `kayactl ebpf list` (or `status`) to discover all PIDs, then attach to specific ones in separate terminals (or run multiple `bpftrace` instances).
 
 The script is a bpftrace prototype illustrating Track A goals (per-file/dir filtering and richer correlation are easy to extend inside the script or via a future Rust eBPF crate behind an optional feature).
+
+### 4. durability-flamegraph.bt (Track A Phase 2C)
+
+Profiles userspace stacks for `kayadb-server` / `kayactl` at 99 Hz for flamegraph rendering.
+
+Usage (pipe to Brendan Gregg's `flamegraph.pl`):
+
+```bash
+sudo bpftrace -f flamegraph -p $(pgrep -f kayadb-server | head -1) scripts/ebpf/durability-flamegraph.bt | flamegraph.pl > kayadb-durability.svg
+```
+
+Or via kayactl (Linux):
+
+```bash
+kayactl ebpf flamegraph --pid $(pgrep -f kayadb-server | head -1) --run --duration 30
+# copy stdout fold lines into flamegraph.pl
+```
+
+On non-Linux hosts, `kayactl ebpf flamegraph` prints the manual `sudo bpftrace -f flamegraph -p <PID> ...` command instead of failing silently.
+
+## External USDT / stap / perf attachment (operator overlay)
+
+KayaDB's **testable contract** for durability boundaries is the in-process marker emission wired by `kayadb-server --ebpf` (Phase 2B+). Linux operators may additionally attach **external** USDT probes that mirror the same sites:
+
+| Site (`kaya.durability.site`) | Phase | When it fires |
+|-------------------------------|-------|----------------|
+| `wal_fsync` | `enter` / `exit` | Strict WAL batch fsync start/end (`kaya-wal`) |
+| `flush` | `enter` / `exit` | Memtable flush publish start/end (`kaya-engine::flush`) |
+
+Expected `trace.jsonl` shape (in-process, when `--ebpf` is on):
+
+```json
+{"kind":"usdt_marker","site":"wal_fsync","phase":"enter","ts_ns":...}
+{"kind":"usdt_marker","site":"wal_fsync","phase":"exit","duration_us":120,"ts_ns":...}
+{"kind":"usdt_marker","site":"flush","phase":"enter","ts_ns":...}
+{"kind":"usdt_marker","site":"flush","phase":"exit","duration_us":45000,"ts_ns":...}
+```
+
+External stap example (illustrative — requires building KayaDB with real USDT probe points and stap installed):
+
+```bash
+# stap -e 'probe process("/usr/bin/kayadb-server").mark("wal_fsync_enter") { printf("wal_fsync enter\n") }' -c ./kayadb-server ...
+```
+
+`perf` / `bpftrace` userspace stack profiling (see `durability-flamegraph.bt`) is the supported operator path today; stap is **not** required in CI or default `cargo test`.
 
 ## Correlation with KayaDB
 

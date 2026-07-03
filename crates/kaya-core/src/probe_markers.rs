@@ -9,6 +9,16 @@ pub enum ProbeMarkerSite {
     Flush,
 }
 
+impl ProbeMarkerSite {
+    /// Stable site label shared by USDT markers, trace.jsonl, and OTel span names.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WalFsync => "wal_fsync",
+            Self::Flush => "flush",
+        }
+    }
+}
+
 /// Enter/exit phase for a boundary marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProbeMarkerPhase {
@@ -23,15 +33,35 @@ fn marker_slot() -> &'static Mutex<Option<MarkerCallback>> {
     SLOT.get_or_init(|| Mutex::new(None))
 }
 
+fn span_slot() -> &'static Mutex<Option<MarkerCallback>> {
+    static SLOT: OnceLock<Mutex<Option<MarkerCallback>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
 /// Install or clear the global marker sink (typically from `kaya-ebpf` when `--ebpf` is on).
 pub fn set_probe_marker_callback(callback: Option<MarkerCallback>) {
     *marker_slot().lock().expect("probe marker mutex poisoned") = callback;
 }
 
+/// Install or clear a parallel span sink (typically OpenTelemetry when `otel` feature is on).
+pub fn set_probe_span_callback(callback: Option<MarkerCallback>) {
+    *span_slot().lock().expect("probe span mutex poisoned") = callback;
+}
+
 /// Emit a marker; no-op when ebpf is off or no sink is registered.
 pub fn emit_probe_marker(site: ProbeMarkerSite, phase: ProbeMarkerPhase, duration_us: Option<u64>) {
-    let guard = marker_slot().lock().expect("probe marker mutex poisoned");
-    if let Some(cb) = guard.as_ref() {
+    if let Some(cb) = marker_slot()
+        .lock()
+        .expect("probe marker mutex poisoned")
+        .as_ref()
+    {
+        cb(site, phase, duration_us);
+    }
+    if let Some(cb) = span_slot()
+        .lock()
+        .expect("probe span mutex poisoned")
+        .as_ref()
+    {
         cb(site, phase, duration_us);
     }
 }

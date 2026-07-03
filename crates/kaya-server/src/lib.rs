@@ -6,6 +6,8 @@ pub mod command;
 pub mod membership;
 pub mod metrics;
 pub mod operator_auth;
+#[cfg(feature = "otel")]
+pub mod otel_spans;
 pub mod raft_persister;
 pub mod security;
 

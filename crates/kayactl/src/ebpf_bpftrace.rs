@@ -18,6 +18,7 @@ pub fn script_filename(name: &str) -> Result<&'static str> {
         "block-latency" => Ok("block-io-latency.bt"),
         "syscall-timeline" => Ok("syscall-timeline.bt"),
         "durability-syscalls" => Ok("durability-syscalls.bt"),
+        "flamegraph" => Ok("durability-flamegraph.bt"),
         _ => Err(KayaError::invalid_argument(format!(
             "unknown ebpf script: {name}"
         ))),
@@ -104,6 +105,127 @@ fn print_manual_bpftrace_instructions(pid: u32, script_path: &Path) {
     println!("  sudo bpftrace -p {pid} {}", script_path.display());
     println!();
     println!("Discover PIDs: kayactl ebpf list");
+}
+
+/// argv tail for `bpftrace -f flamegraph -p <PID> <script>` (testable without spawning).
+#[cfg(any(test, target_os = "linux"))]
+pub fn bpftrace_flamegraph_command_args(pid: u32, script_path: &Path) -> Vec<String> {
+    vec![
+        "-f".to_owned(),
+        "flamegraph".to_owned(),
+        "-p".to_owned(),
+        pid.to_string(),
+        script_path.display().to_string(),
+    ]
+}
+
+/// Full copy-paste manual flamegraph command (includes `flamegraph` format flag).
+pub fn flamegraph_manual_command(pid: u32, script_path: &Path) -> String {
+    format!(
+        "sudo bpftrace -f flamegraph -p {pid} {}",
+        script_path.display()
+    )
+}
+
+fn print_manual_flamegraph_instructions(pid: u32, script_path: &Path) {
+    println!("Run durability flamegraph manually (Linux, bpftrace + flamegraph.pl):");
+    println!("  {}", flamegraph_manual_command(pid, script_path));
+    println!(
+        "  {} | flamegraph.pl > kayadb-durability.svg",
+        flamegraph_manual_command(pid, script_path)
+    );
+    println!();
+    println!("Discover PIDs: kayactl ebpf list");
+}
+
+/// Resolve flamegraph script, pick PID, print manual command or spawn bpftrace -f flamegraph.
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+pub fn run_flamegraph_helper(pid: Option<u32>, run_mode: bool, duration_secs: u64) -> Result<()> {
+    let script_path = resolve_script("flamegraph")?;
+
+    if !cfg!(target_os = "linux") {
+        println!("{LINUX_ONLY_MSG}");
+        println!("Script: {}", script_path.display());
+        let target_pid = pid
+            .or_else(|| discover_server_pids().first().copied())
+            .unwrap_or(4242);
+        print_manual_flamegraph_instructions(target_pid, &script_path);
+        return Ok(());
+    }
+
+    let target_pid = resolve_target_pid(pid)?;
+
+    if !run_mode {
+        print_manual_flamegraph_instructions(target_pid, &script_path);
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if !bpftrace_available() {
+            print_manual_flamegraph_instructions(target_pid, &script_path);
+            return Err(bpftrace_missing_error());
+        }
+        return run_bpftrace_flamegraph_child(target_pid, &script_path, duration_secs);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    unreachable!("linux-only flamegraph run_mode on non-Linux")
+}
+
+#[cfg(target_os = "linux")]
+fn run_bpftrace_flamegraph_child(pid: u32, script_path: &Path, duration_secs: u64) -> Result<()> {
+    let args = bpftrace_flamegraph_command_args(pid, script_path);
+    let mut child = Command::new("bpftrace")
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| KayaError::Io {
+            message: format!("failed to spawn bpftrace flamegraph: {e}"),
+        })?;
+
+    if let Some(stdout) = child.stdout.take() {
+        thread::spawn(move || stream_lines(stdout, false));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        thread::spawn(move || stream_lines(stderr, true));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(duration_secs.max(1));
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    println!("# Pipe output to: flamegraph.pl > kayadb-durability.svg");
+                    return Ok(());
+                }
+                return Err(KayaError::internal(format!(
+                    "bpftrace flamegraph exited with status {status}"
+                )));
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let child_pid = child.id() as libc::pid_t;
+                    unsafe {
+                        libc::kill(child_pid, libc::SIGTERM);
+                    }
+                    let _ = child.wait();
+                    println!(
+                        "bpftrace flamegraph stopped after {duration_secs}s (--duration timeout)"
+                    );
+                    println!("# Pipe captured output to: flamegraph.pl > kayadb-durability.svg");
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                return Err(KayaError::Io {
+                    message: format!("waiting on bpftrace flamegraph: {e}"),
+                });
+            }
+        }
+    }
 }
 
 /// Resolve script, pick PID, then print manual instructions or spawn bpftrace.
@@ -219,6 +341,7 @@ const CATALOG_SCRIPT_NAMES: &[&str] = &[
     "block-io-latency",
     "syscall-timeline",
     "durability-syscalls",
+    "flamegraph",
 ];
 
 /// Comma-separated catalog script names from `kaya_ebpf::probe_catalog()` (static fallback on non-Linux).
@@ -408,6 +531,56 @@ mod tests {
         assert!(args[2]
             .replace('\\', "/")
             .ends_with("scripts/ebpf/block-io-latency.bt"));
+    }
+
+    #[test]
+    fn flamegraph_manual_command_contains_flamegraph_flag_and_pid() {
+        let root = repo_root();
+        let prev = std::env::current_dir().ok();
+        std::env::set_current_dir(&root).expect("set cwd to repo root");
+        let script_path = resolve_script("flamegraph").expect("durability-flamegraph.bt");
+        if let Some(dir) = prev {
+            let _ = std::env::set_current_dir(dir);
+        }
+        let cmd = flamegraph_manual_command(7777, &script_path);
+        assert!(
+            cmd.contains("flamegraph"),
+            "manual command must name flamegraph format"
+        );
+        assert!(
+            cmd.contains("-f flamegraph"),
+            "manual command must use -f flamegraph"
+        );
+        assert!(cmd.contains("-p 7777"), "manual command must include PID");
+        assert!(cmd.contains("durability-flamegraph.bt"));
+    }
+
+    #[test]
+    fn bpftrace_flamegraph_command_args_include_format_flag() {
+        let script = Path::new("/repo/scripts/ebpf/durability-flamegraph.bt");
+        assert_eq!(
+            bpftrace_flamegraph_command_args(42, script),
+            vec![
+                "-f".to_owned(),
+                "flamegraph".to_owned(),
+                "-p".to_owned(),
+                "42".to_owned(),
+                "/repo/scripts/ebpf/durability-flamegraph.bt".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_flamegraph_script_from_cwd() {
+        let root = repo_root();
+        let prev = std::env::current_dir().ok();
+        std::env::set_current_dir(&root).expect("set cwd to repo root");
+        let path = resolve_script("flamegraph").expect("durability-flamegraph.bt");
+        if let Some(dir) = prev {
+            let _ = std::env::set_current_dir(dir);
+        }
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        assert!(normalized.ends_with("scripts/ebpf/durability-flamegraph.bt"));
     }
 
     #[test]

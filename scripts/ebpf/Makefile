@@ -2,7 +2,7 @@
 PID ?= $(shell pgrep -f kayadb-server | head -1)
 DURATION ?= 10
 
-.PHONY: list fsync block timeline verify help
+.PHONY: list fsync block timeline flamegraph verify help
 
 list:
 	pgrep -af kayadb-server
@@ -16,6 +16,9 @@ block:
 timeline:
 	sudo bpftrace -p $(PID) syscall-timeline.bt
 
+flamegraph:
+	sudo bpftrace -f flamegraph -p $(PID) durability-flamegraph.bt
+
 verify:
 	bash ../../scripts/linux_verify_ebpf_kernel.sh
 
@@ -26,6 +29,7 @@ help:
 	@echo "  make fsync     - attach fsync-latency.bt to PID (default: first kayadb-server)"
 	@echo "  make block     - attach block-io-latency.bt to PID"
 	@echo "  make timeline  - attach syscall-timeline.bt to PID"
+	@echo "  make flamegraph - bpftrace -f flamegraph durability stacks (pipe to flamegraph.pl)"
 	@echo "  make verify    - run Linux eBPF kernel gate (cargo test + bpf object)"
 	@echo ""
 	@echo "Variables:"

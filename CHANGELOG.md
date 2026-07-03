@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Track A Phase 2C: flamegraph helper, optional OpenTelemetry durability spans, external USDT operator docs.
+
+### Added (Phase 2C)
+- `scripts/ebpf/durability-flamegraph.bt` and `make flamegraph` — bpftrace `-f flamegraph` stack-collapse for `flamegraph.pl`
+- `kayactl ebpf flamegraph [--pid] [--run] [--duration]` — resolves script, prints manual Linux command on non-Linux
+- Optional `kayadb-server --features otel --otel` — OTLP-exportable spans for `wal_fsync` and `flush` at existing durability hooks
+- `kaya_core::set_probe_span_callback` parallel to USDT markers; `ProbeMarkerSite::as_str()` shared taxonomy
+- External stap/perf USDT operator guide in `scripts/ebpf/README.md` and `observability-spec.md` §7
+
 Track A Phase 2B+: USDT-shaped userspace markers, extended `ProbeEvent` schema, publish-phase trace correlation.
 
 ### Added

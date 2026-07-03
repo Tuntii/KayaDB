@@ -95,6 +95,9 @@ pub struct ClusterConfig {
     /// Deterministic seed for eBPF trace artifacts.
     #[cfg(feature = "ebpf")]
     pub ebpf_seed: u64,
+    /// When true, emit OpenTelemetry spans at durability boundaries (`otel` feature).
+    #[cfg(feature = "otel")]
+    pub otel_enabled: bool,
 }
 
 impl ClusterConfig {
@@ -137,6 +140,8 @@ impl ClusterConfig {
             ebpf_enabled: false,
             #[cfg(feature = "ebpf")]
             ebpf_seed: 0,
+            #[cfg(feature = "otel")]
+            otel_enabled: false,
         }
     }
 
@@ -197,6 +202,13 @@ impl ClusterConfig {
         self.ebpf_seed = seed;
         self
     }
+
+    /// Enable OpenTelemetry durability spans (`wal_fsync`, `flush`).
+    #[cfg(feature = "otel")]
+    pub fn with_otel(mut self) -> Self {
+        self.otel_enabled = true;
+        self
+    }
 }
 
 /// A running cluster node.
@@ -243,7 +255,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     #[cfg(not(feature = "ebpf"))]
     let durability_mode = DurabilityMode::Relaxed;
 
-    let mut engine_cfg = EngineConfig {
+    let engine_cfg = EngineConfig {
         data_dir: config.data_dir.clone(),
         durability: DurabilityConfig {
             mode: durability_mode,
@@ -256,6 +268,12 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         // Small memtable cap so PUT traffic produces flush USDT markers in trace.jsonl.
         engine_cfg.memtable.max_bytes = 16;
     }
+
+    #[cfg(feature = "otel")]
+    if config.otel_enabled && crate::otel_spans::provider_slot_is_empty() {
+        crate::otel_spans::install_default_durability_spans();
+    }
+
     let disk = Arc::new(FileDisk::new(engine_cfg.data_dir.clone()));
     let engine = Engine::open(engine_cfg, disk)
         .await
@@ -599,6 +617,11 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
             config.node_id.0,
             guard.events().len()
         );
+    }
+
+    #[cfg(feature = "otel")]
+    if config.otel_enabled {
+        crate::otel_spans::shutdown_durability_spans();
     }
 
     Ok(())

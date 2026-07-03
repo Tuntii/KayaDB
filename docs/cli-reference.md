@@ -316,6 +316,7 @@ kayactl ebpf correlate [--data <dir>]
 kayactl ebpf fsync-latency [--pid <pid>]
 kayactl ebpf block-latency [--pid <pid>]
 kayactl ebpf syscall-timeline [--pid <pid>]
+kayactl ebpf flamegraph [--pid <pid>]
 
 # With --run: spawns bpftrace, streams output, stops after --duration (default 10s, SIGTERM)
 kayactl ebpf fsync-latency --run --duration 30
@@ -335,6 +336,7 @@ On non-Linux, subcommands print guidance and point to `scripts/ebpf/`; `correlat
 | `fsync-latency` | Wraps `scripts/ebpf/fsync-latency.bt` — fsync/fdatasync latency histograms (µs) |
 | `block-latency` | Wraps `scripts/ebpf/block-io-latency.bt` — block-layer read/write latency histograms |
 | `syscall-timeline` | Wraps `scripts/ebpf/syscall-timeline.bt` — write/fsync correlation by TID + rename/unlink for flush/compaction |
+| `flamegraph` | Wraps `scripts/ebpf/durability-flamegraph.bt` with `bpftrace -f flamegraph` (stack collapse for `flamegraph.pl`) |
 
 **Flags (bpftrace wrappers):**
 
@@ -353,8 +355,8 @@ On non-Linux, subcommands print guidance and point to `scripts/ebpf/`; `correlat
 **Typical workflow:**
 
 ```bash
-# Terminal 1 — enable in-process probes
-kayadb-server --ebpf --data ./data ...
+# Terminal 1 — enable in-process probes (+ optional OTel spans)
+kayadb-server --ebpf --otel --data ./data ...
 
 # Terminal 2 — drive traffic + inspect
 kayactl --data ./data put k v
@@ -367,7 +369,9 @@ kayactl ebpf trace wal --data ./data
 kayactl ebpf syscall-timeline --run --duration 20
 ```
 
-Alternative: `cd scripts/ebpf && make list|fsync|block|timeline|verify` (see `scripts/ebpf/README.md`).
+Alternative: `cd scripts/ebpf && make list|fsync|block|timeline|flamegraph|verify` (see `scripts/ebpf/README.md`).
+
+**OpenTelemetry (optional, Phase 2C):** rebuild `kayadb-server` with `--features otel` and pass `--otel` to export durability spans (`wal_fsync`, `flush` enter/exit) to stdout. Does not replace Prometheus `kaya_ebpf_*` metrics or `{data_dir}/ebpf/trace.jsonl` when `--ebpf` is on.
 
 See also:
 - `scripts/ebpf/README.md` (correlation guide + one-liners)
