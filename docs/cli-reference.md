@@ -293,41 +293,88 @@ A non-zero exit code is emitted if recovery would fail.
 
 ## Linux eBPF observability (Track A / M12)
 
-`kayactl ebpf` provides Linux-only observability helpers using bpftrace. It does **not** require eBPF at build time or for normal operation.
+`kayactl ebpf` provides optional in-process observability (`kaya-ebpf`) and Linux bpftrace wrappers. Build with `--features ebpf` for full CLI support; bpftrace scripts in `scripts/ebpf/` work on any Linux host without rebuilding.
 
 ```bash
-# Show available subcommands and guidance
+# Overview
 kayactl ebpf
 kayactl ebpf help
 
-# Discover PIDs (great for 3-node local clusters) + active traces
+# Discover local kayadb-server PIDs, active bpftrace processes, catalog scripts
 kayactl ebpf list
-kayactl ebpf status
 
-# Trace fsync/fdatasync latency (in microseconds) for a running server
-kayactl ebpf fsync-latency
-kayactl ebpf fsync-latency --pid 12345
+# In-process probe state (reads {data_dir}/ebpf/status.json when present)
+kayactl ebpf status [--data <dir>] [--pid <pid>]
 
-# Trace block-layer I/O latency (device + scheduler time)
-kayactl ebpf block-latency --pid 12345
+# WAL-relevant lines from {data_dir}/ebpf/trace.jsonl (requires kayadb-server --ebpf)
+kayactl ebpf trace wal [--data <dir>]
 
-# New (Track A): broader syscall timeline with write/fsync correlation by TID + rename/unlink for flush/compaction
-kayactl ebpf syscall-timeline [--pid N] [--run]
+# Userspace WAL fsync vs kernel trace summary (Track A Phase 2A)
+kayactl ebpf correlate [--data <dir>]
+
+# bpftrace wrappers — without --run: prints manual sudo command (no bpftrace required)
+kayactl ebpf fsync-latency [--pid <pid>]
+kayactl ebpf block-latency [--pid <pid>]
+kayactl ebpf syscall-timeline [--pid <pid>]
+
+# With --run: spawns bpftrace, streams output, stops after --duration (default 10s, SIGTERM)
+kayactl ebpf fsync-latency --run --duration 30
+kayactl ebpf syscall-timeline --pid 12345 --run
 ```
 
-On non-Linux the command prints a helpful message and points to `scripts/ebpf/`.
+On non-Linux, subcommands print guidance and point to `scripts/ebpf/`; `correlate` still opens the local engine for userspace stats.
+
+### Subcommand reference
+
+| Subcommand | Purpose |
+|---|---|
+| `list` | `pgrep` discovery of all local `kayadb-server` PIDs (with cmdline), active `bpftrace` PIDs, and catalog script names |
+| `status` | Probe attachment/streaming from `{data_dir}/ebpf/status.json`, or hints when artifacts are missing |
+| `trace wal` | Filter and print WAL-relevant events from `{data_dir}/ebpf/trace.jsonl` |
+| `correlate` | Compare userspace `wal_fsync_*` + `flush_*` from engine stats against kernel trace averages; emits delta hints |
+| `fsync-latency` | Wraps `scripts/ebpf/fsync-latency.bt` — fsync/fdatasync latency histograms (µs) |
+| `block-latency` | Wraps `scripts/ebpf/block-io-latency.bt` — block-layer read/write latency histograms |
+| `syscall-timeline` | Wraps `scripts/ebpf/syscall-timeline.bt` — write/fsync correlation by TID + rename/unlink for flush/compaction |
+
+**Flags (bpftrace wrappers):**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--pid <N>` | auto (first `kayadb-server`) | Target process for bpftrace attach |
+| `--run` | off | Spawn bpftrace and stream stdout/stderr |
+| `--duration <sec>` | `10` (only with `--run`) | Stop bpftrace after N seconds (SIGTERM) |
 
 **Prerequisites on the target Linux machine:**
-- `bpftrace` package installed
-- `sudo` (or appropriate BPF capabilities)
-- A running `kayadb-server` (use `kayactl ebpf list` for auto-discovery of all local nodes)
+- `bpftrace` installed (required only when using `--run`)
+- `sudo` or `CAP_BPF` + `CAP_PERFMON` for live attach
+- A running `kayadb-server` (use `kayactl ebpf list` for multi-node local clusters)
+- For `trace wal` / `correlate` kernel side: `kayadb-server --ebpf [--ebpf-seed N]`
 
-See:
-- `scripts/ebpf/README.md` (detailed usage + one-liners + correlation guide)
+**Typical workflow:**
+
+```bash
+# Terminal 1 — enable in-process probes
+kayadb-server --ebpf --data ./data ...
+
+# Terminal 2 — drive traffic + inspect
+kayactl --data ./data put k v
+kayactl --data ./data flush
+kayactl --data ./data stats --latency
+kayactl ebpf correlate --data ./data
+kayactl ebpf trace wal --data ./data
+
+# Terminal 3 — kernel bpftrace (optional, complements in-process trace)
+kayactl ebpf syscall-timeline --run --duration 20
+```
+
+Alternative: `cd scripts/ebpf && make list|fsync|block|timeline|verify` (see `scripts/ebpf/README.md`).
+
+See also:
+- `scripts/ebpf/README.md` (correlation guide + one-liners)
 - `spec/docs/observability-spec.md` §7
 - `ROADMAP.md` (Track A)
 
-The probes are read-only diagnostics. They help answer "why are my strict fsyncs sometimes slow?" and "what is the cost of flush / compaction publish?" by showing kernel-side histograms + publish events that pure userspace timers (now also exposed as `flush_total_us` etc. in stats) cannot reveal. Use together with `kayactl stats --latency` / `flush` (to force publish paths) / `--server ... status`.
+The probes are read-only diagnostics. They help answer "why are my strict fsyncs sometimes slow?" and "what is the cost of flush / compaction publish?" by showing kernel-side histograms + publish events that pure userspace timers (`flush_total_us`, etc. in `stats --latency`) cannot fully explain. Pair `kayactl ebpf correlate` with `stats --latency` / `flush` / `--server ... status`.
 
 ---
 

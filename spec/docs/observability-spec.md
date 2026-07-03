@@ -156,12 +156,14 @@ Implemented (scripts + in-process runtime + CLI + kernel-slot metrics) — Track
 - `scripts/ebpf/fsync-latency.bt` — syscall-level fsync/fdatasync latency histograms (µs).
 - `scripts/ebpf/block-io-latency.bt` — block layer I/O latency histograms (reads vs writes).
 - `scripts/ebpf/syscall-timeline.bt` — write/fsync/fdatasync + rename/unlink + TID correlation + publish timeline for flush/compaction (Track A).
-- `kayactl ebpf`:
-  - `fsync-latency`, `block-latency`, `syscall-timeline` (with `--pid`, `--run`)
-  - `list` + `status` (discover all local kayadb-server PIDs for clusters; show active bpftrace traces)
-  - Improved auto-detect and cross-platform graceful messages.
-- Userspace latency in `EngineStats` (WAL fsync + new `flush_total_us`/`max`, `compaction_total_us`/`max`) + exposure in `kayactl stats`, server `status` JSON, and human printers. Designed to be compared side-by-side with eBPF histograms.
-- Full usage + correlation notes in `scripts/ebpf/README.md`. `kayactl ebpf list` is the recommended way to find PIDs.
+- `scripts/ebpf/Makefile` — `make list|fsync|block|timeline|verify` helpers (Linux + bpftrace).
+- `kayactl ebpf` (requires `kayactl --features ebpf` for full CLI; graceful degradation otherwise):
+  - **Discovery / artifacts:** `list` (local `kayadb-server` PIDs + active bpftrace + catalog), `status` (`{data_dir}/ebpf/status.json`), `trace wal` (WAL lines from `{data_dir}/ebpf/trace.jsonl`).
+  - **Correlation (Track A Phase 2A):** `correlate` — opens local engine for userspace `wal_fsync_*` + `flush_*`, compares against kernel trace averages from `trace.jsonl`, prints delta hints and startup guidance when artifacts are missing.
+  - **bpftrace wrappers:** `fsync-latency`, `block-latency`, `syscall-timeline` with `--pid` (auto-detect first server), `--run` (spawn bpftrace, stream output), `--duration <sec>` (default 10, SIGTERM on timeout). Without `--run`, prints `sudo bpftrace -p <PID> <script>` for copy-paste.
+  - Script resolution: `KAYA_EBPF_SCRIPT_DIR`, cwd `scripts/ebpf/`, walk-up from cwd/exe; cross-platform graceful messages on non-Linux.
+- Userspace latency in `EngineStats` (WAL fsync + `flush_total_us`/`max`, `compaction_total_us`/`max`) + exposure in `kayactl stats --latency`, server `status` JSON, and human printers. Designed to be compared side-by-side with eBPF histograms and `kayactl ebpf correlate`.
+- Full usage + correlation notes in `scripts/ebpf/README.md` and `docs/cli-reference.md`. `kayactl ebpf list` is the recommended way to find PIDs in multi-node local clusters.
 
 v2+ (future) eBPF tooling may still add:
 

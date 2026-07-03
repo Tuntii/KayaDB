@@ -1,7 +1,7 @@
 # KayaDB Development Roadmap
 
 **Status:** Living roadmap  
-**Last updated:** 2026-06-30
+**Last updated:** 2026-07-03
 
 > **"Geniş ve yaşayan yol haritası"** — Bu belge hem tarihi başarıları arşivler, hem şu anki odak noktalarını gösterir, hem de uzun vadeli vizyonu (birden fazla paralel track ile) detaylandırır. Tasarım-öncelikli ve correctness-öncelikli felsefe korunur.
 
@@ -607,28 +607,26 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 
 ### Track A: Observability, Diagnostics & Linux/eBPF Tooling (Aktif — Yüksek Öncelik)
 
-**Mevcut durum (2026-06-16 + Track A devam):** 
+**Mevcut durum (Track A Phase 2A — 2026-07-03):** 
 - bpftrace script'leri: fsync-latency, block-io-latency, **syscall-timeline.bt** (write/fsync/rename/unlink + TID correlation + publish timeline)
-- `kayactl ebpf`: fsync/block/syscall + **list** + **status** (multi-PID discovery for clusters, active traces), **--run --duration**, auto-detect improvements
-- Userspace metrics: WAL fsync + **flush_total/max/count + compaction_total/max/count** in EngineStats, full exposure in `kayactl stats` (incl. **--latency** focused view), server `status`, JSON + human printers everywhere
-- Enriched averages in output, regression test for the new stats paths, correlation guidance in README
-- docs (cli-ref, ebpf/README, observability-spec) + ROADMAP updated
+- `kayactl ebpf`: **list**, **status**, **trace wal**, **correlate**, bpftrace wrappers (**fsync-latency**, **block-latency**, **syscall-timeline** with **--run --duration**), multi-PID discovery, script resolution via `KAYA_EBPF_SCRIPT_DIR` / repo walk-up
+- Userspace metrics: WAL fsync + **flush_total/max/count + compaction_total/max/count** in EngineStats, full exposure in `kayactl stats` (incl. **--latency**), server `status`, JSON + human printers
+- `kayactl ebpf correlate` — userspace WAL vs `{data_dir}/ebpf/trace.jsonl` kernel summary with delta hints
+- `scripts/ebpf/Makefile` (`make list|fsync|block|timeline|verify`) + Docker kernel verify harness (`scripts/docker_verify_ebpf_kernel.{sh,ps1}`)
+- In-process runtime (`kaya-ebpf`, `kayadb-server --ebpf`) + Linux CI gate (`scripts/linux_verify_ebpf_kernel.sh`)
+- docs synced: cli-ref, ebpf/README, observability-spec §7, CHANGELOG Unreleased
 - Cross-platform (graceful on Windows); Linux eBPF remains optional / no hard dep
 
-**Kısa vadeli (hemen / 2026 yaz sonu):**
-- Yeni bpftrace script'leri ekle:
-  - `syscall-timeline.bt` (write, fsync, fdatasync, rename, unlink, fsyncdir)
-  - Per-file veya data-dir filtreli versiyonlar
-  - Basit write + fsync korelasyonu (aynı TID'de)
-- `kayactl ebpf` geliştirmeleri:
-  - `--run` iyileştirmesi (output capture, timeout, multiple script paralel)
-  - `kayactl ebpf list` ve `kayactl ebpf status` (çalışan trace'leri göster)
-  - Auto-detect tüm local `kayadb-server` process'leri (cluster node'lar için)
-- Daha fazla userspace latency metrik:
-  - Flush süresi, compaction süresi, manifest publish fsync'leri
-  - `EngineStats`'e `flush_total_us`, `compaction_total_us` gibi alanlar ekle
-  - `kayactl stats --latency` veya zenginleştirilmiş çıktı
-- eBPF + userspace verilerini birleştiren basit korelasyon yardımcıları (script veya Rust tool)
+**Kısa vadeli (Track A Phase 2A — tamamlandı / kısmi):**
+- ✅ `syscall-timeline.bt` (write, fsync, fdatasync, rename, unlink)
+- ✅ Basit write + fsync korelasyonu (aynı TID'de, syscall-timeline.bt)
+- ✅ `kayactl ebpf list` ve `kayactl ebpf status` (çalışan trace'leri + status.json)
+- ✅ Auto-detect tüm local `kayadb-server` process'leri (cluster node'lar için)
+- ✅ `--run` bpftrace wrapper (output capture, `--duration` timeout + SIGTERM)
+- ✅ Userspace latency: `flush_*` / `compaction_*` + `kayactl stats --latency`
+- ✅ eBPF + userspace korelasyon: `kayactl ebpf correlate`
+- 🟡 Per-file veya data-dir filtreli bpftrace versiyonları (script içinde kolay uzatma; henüz ayrı .bt yok)
+- 🟡 Multiple script paralel `--run` (manuel: ayrı terminaller veya `make` hedefleri)
 
 **Orta vadeli:**
 - Opsiyonel `crates/kaya-ebpf` (veya `kaya-observe`) crate — ✅ M15 stub (`probe_catalog()`, non-hard dep)

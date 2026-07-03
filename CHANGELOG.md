@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Track A Phase 2A: kayactl ebpf CLI hardening, bpftrace wrappers, userspace–kernel correlation.
+
+### Added
+- `kayactl ebpf list` — discover local `kayadb-server` PIDs (with cmdline), active bpftrace processes, and catalog script names
+- `kayactl ebpf correlate` — userspace WAL fsync vs `{data_dir}/ebpf/trace.jsonl` kernel summary with rough delta hints and flush pairing notes
+- `kayactl ebpf fsync-latency|block-latency|syscall-timeline [--run] [--duration <sec>]` — bpftrace wrappers (spawn with streamed output + timeout, or print manual `sudo bpftrace` command)
+- `kayactl ebpf trace wal` — WAL-relevant lines from in-process `{data_dir}/ebpf/trace.jsonl`
+- `scripts/ebpf/Makefile` — `make list|fsync|block|timeline|verify` helpers
+- `scripts/docker_verify_ebpf_kernel.{sh,ps1}` — Docker-based kernel eBPF verification harness
+
+### Changed
+- `kayactl ebpf status` reads `{data_dir}/ebpf/status.json` when present; falls back to PID discovery hints
+- `kayactl stats --latency` cross-references `kayactl ebpf correlate`
+- Track A short-term ROADMAP items marked done/partial for Phase 2A
+- `docs/cli-reference.md`, `spec/docs/observability-spec.md` §7 synced with implemented CLI
+
 ---
 
 ## [0.1.46] — 2026-06-30
