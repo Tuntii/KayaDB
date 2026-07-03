@@ -5,7 +5,10 @@ use std::path::Path;
 use kaya_core::Result;
 use kaya_ebpf::{filter_wal_events, ProbeStatus};
 
-use crate::ebpf_bpftrace::{discover_server_pids, list_active_bpftrace, resolve_script};
+use crate::ebpf_bpftrace::{
+    discover_server_pids, format_catalog_script_names, list_active_bpftrace, resolve_script,
+    server_pid_details,
+};
 
 const LINUX_ONLY_MSG: &str =
     "In-process eBPF probes are Linux-only. Use bpftrace scripts in scripts/ebpf/ on any Linux host.";
@@ -13,6 +16,7 @@ const LINUX_ONLY_MSG: &str =
 /// Handle `kayactl ebpf ...` subcommands.
 pub(crate) fn handle_ebpf(sub: &str, data_dir: &str, pid: Option<u32>, _json: bool) -> Result<()> {
     match sub {
+        "list" => print_list(),
         "status" => print_status(data_dir, pid),
         "help" | "" => print_help(),
         _ => print_help(),
@@ -33,6 +37,7 @@ fn print_help() -> Result<()> {
     println!("kayactl ebpf — optional in-process observability (kaya-ebpf)");
     println!();
     println!("Subcommands:");
+    println!("  kayactl ebpf list                                  Discover server PIDs + catalog scripts");
     println!("  kayactl ebpf status [--data <dir>] [--pid <pid>]   Probe attachment + streaming state");
     println!("  kayactl ebpf trace wal [--data <dir>]              WAL-relevant lines from trace.jsonl");
     println!("  kayactl ebpf help");
@@ -43,6 +48,43 @@ fn print_help() -> Result<()> {
         println!();
         println!("{LINUX_ONLY_MSG}");
     }
+    Ok(())
+}
+
+fn print_list() -> Result<()> {
+    if !cfg!(target_os = "linux") {
+        println!("{LINUX_ONLY_MSG}");
+    }
+
+    let server_details = server_pid_details();
+    println!("kayadb-server PIDs:");
+    if server_details.is_empty() {
+        println!("  (none)");
+    } else {
+        for (pid, cmd) in server_details {
+            println!("  {pid}  cmd={cmd}");
+        }
+    }
+
+    let bpftrace_pids = list_active_bpftrace();
+    if bpftrace_pids.is_empty() {
+        println!("bpftrace processes: (none)");
+    } else {
+        let pids = bpftrace_pids
+            .iter()
+            .map(|pid| pid.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("bpftrace processes: {pids}");
+    }
+
+    let catalog = format_catalog_script_names();
+    if catalog.is_empty() {
+        println!("catalog scripts: (none)");
+    } else {
+        println!("catalog scripts: {catalog}");
+    }
+
     Ok(())
 }
 

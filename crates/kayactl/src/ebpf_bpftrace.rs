@@ -33,9 +33,63 @@ pub fn discover_server_pids() -> Vec<u32> {
     pgrep("-f", "kayadb-server")
 }
 
+/// Return `(pid, cmdline)` for each discovered `kayadb-server` process (Linux only).
+pub fn server_pid_details() -> Vec<(u32, String)> {
+    discover_server_pids()
+        .into_iter()
+        .map(|pid| (pid, pid_cmdline(pid)))
+        .collect()
+}
+
 /// List active `bpftrace` PIDs via `pgrep` (Linux only).
 pub fn list_active_bpftrace() -> Vec<u32> {
     pgrep("-f", "bpftrace")
+}
+
+/// Comma-separated catalog script names from `kaya_ebpf::probe_catalog()`.
+pub fn format_catalog_script_names() -> String {
+    format_probe_names(kaya_ebpf::probe_catalog().iter().map(|p| p.name))
+}
+
+/// Join probe/script names for display (e.g. `kayactl ebpf list` catalog line).
+pub fn format_probe_names<'a, I>(names: I) -> String
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    names.into_iter().collect::<Vec<_>>().join(", ")
+}
+
+#[cfg(target_os = "linux")]
+fn pid_cmdline(pid: u32) -> String {
+    if let Ok(output) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
+        .output()
+    {
+        let args = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !args.is_empty() {
+            return args;
+        }
+    }
+
+    let path = format!("/proc/{pid}/cmdline");
+    if let Ok(raw) = std::fs::read(&path) {
+        let cmd = raw
+            .split(|byte| byte == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| std::str::from_utf8(part).unwrap_or("?"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !cmd.is_empty() {
+            return cmd;
+        }
+    }
+
+    "(unknown)".to_owned()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pid_cmdline(_pid: u32) -> String {
+    String::new()
 }
 
 #[cfg(target_os = "linux")]
@@ -124,6 +178,21 @@ mod tests {
             script_filename("block-latency").unwrap(),
             "block-io-latency.bt"
         );
+    }
+
+    #[test]
+    fn format_probe_names_joins_catalog_entries() {
+        let names = ["fsync-latency", "block-io-latency", "syscall-timeline"];
+        assert_eq!(
+            format_probe_names(names),
+            "fsync-latency, block-io-latency, syscall-timeline"
+        );
+    }
+
+    #[test]
+    fn format_catalog_script_names_matches_probe_catalog() {
+        let expected = format_probe_names(kaya_ebpf::probe_catalog().iter().map(|p| p.name));
+        assert_eq!(format_catalog_script_names(), expected);
     }
 
     #[test]
