@@ -243,7 +243,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     #[cfg(not(feature = "ebpf"))]
     let durability_mode = DurabilityMode::Relaxed;
 
-    let engine_cfg = EngineConfig {
+    let mut engine_cfg = EngineConfig {
         data_dir: config.data_dir.clone(),
         durability: DurabilityConfig {
             mode: durability_mode,
@@ -251,6 +251,11 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         },
         ..EngineConfig::default()
     };
+    #[cfg(feature = "ebpf")]
+    if config.ebpf_enabled {
+        // Small memtable cap so PUT traffic produces flush USDT markers in trace.jsonl.
+        engine_cfg.memtable.max_bytes = 16;
+    }
     let disk = Arc::new(FileDisk::new(engine_cfg.data_dir.clone()));
     let engine = Engine::open(engine_cfg, disk)
         .await

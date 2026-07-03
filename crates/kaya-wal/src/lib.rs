@@ -353,6 +353,59 @@ mod tests {
         });
     }
 
+    #[test]
+    fn wal_fsync_marker_emits_balanced_exit_on_fsync_failure() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        use kaya_core::{
+            emit_probe_marker, set_probe_marker_callback, ProbeMarkerPhase, ProbeMarkerSite,
+        };
+        use kaya_io::{FaultKind, FaultRule, FaultSchedule, SimSeed};
+
+        let enters = Arc::new(AtomicU64::new(0));
+        let exits = Arc::new(AtomicU64::new(0));
+        let enters_cb = enters.clone();
+        let exits_cb = exits.clone();
+        set_probe_marker_callback(Some(Box::new(move |site, phase, _| {
+            if site != ProbeMarkerSite::WalFsync {
+                return;
+            }
+            match phase {
+                ProbeMarkerPhase::Enter => enters_cb.fetch_add(1, Ordering::SeqCst),
+                ProbeMarkerPhase::Exit => exits_cb.fetch_add(1, Ordering::SeqCst),
+            };
+        })));
+
+        block_on(async {
+            let schedule = FaultSchedule {
+                seed: SimSeed(7),
+                rules: vec![FaultRule {
+                    operation_index: 1,
+                    kind: FaultKind::FsyncFailed,
+                }],
+            };
+            let disk = Arc::new(kaya_io::SimDisk::with_faults(schedule));
+            let config = batch_config(1);
+            let writer = WalWriter::open(config, disk).await.unwrap();
+            let result = writer
+                .append(
+                    WalPayload::Put {
+                        key: vec![1],
+                        value: vec![2, 3],
+                    },
+                    DurabilityMode::Strict,
+                )
+                .await;
+            assert!(result.is_err());
+        });
+
+        assert_eq!(enters.load(Ordering::SeqCst), 1);
+        assert_eq!(exits.load(Ordering::SeqCst), 1);
+        set_probe_marker_callback(None);
+        emit_probe_marker(ProbeMarkerSite::WalFsync, ProbeMarkerPhase::Enter, None);
+    }
+
     // KD-0503: malformed WAL record input must not panic.
     #[test]
     fn fuzz_wal_decoder_no_panic() {

@@ -39,6 +39,7 @@ impl<D: Disk> Engine<D> {
             }
         }
         self.stats.last_sequence = append.sequence.get();
+        self.maybe_auto_flush().await?;
         Ok(WriteResult {
             sequence: append.sequence,
             lsn: append.lsn,
@@ -65,6 +66,7 @@ impl<D: Disk> Engine<D> {
             }
         }
         self.stats.last_sequence = append.sequence.get();
+        self.maybe_auto_flush().await?;
         Ok(WriteResult {
             sequence: append.sequence,
             lsn: append.lsn,

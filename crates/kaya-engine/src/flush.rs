@@ -9,6 +9,15 @@ use kaya_lsm::{
 use super::{Engine, FlushResult};
 
 impl<D: Disk> Engine<D> {
+    /// Flush memtable to L0 when it reaches `config.memtable.max_bytes` (if non-zero).
+    pub(crate) async fn maybe_auto_flush(&mut self) -> Result<()> {
+        let max_bytes = self.config.memtable.max_bytes;
+        if max_bytes > 0 && self.memtable.approximate_bytes() >= max_bytes {
+            self.flush().await?;
+        }
+        Ok(())
+    }
+
     pub async fn flush(&mut self) -> Result<FlushResult> {
         if self.memtable.is_empty() {
             return Ok(FlushResult {
@@ -23,6 +32,28 @@ impl<D: Disk> Engine<D> {
             None,
         );
         let flush_start = std::time::Instant::now();
+        let result = self.flush_nonempty(flush_start).await;
+        match &result {
+            Ok(_) => {
+                let flush_us = flush_start.elapsed().as_micros() as u64;
+                kaya_core::emit_probe_marker(
+                    kaya_core::ProbeMarkerSite::Flush,
+                    kaya_core::ProbeMarkerPhase::Exit,
+                    Some(flush_us),
+                );
+            }
+            Err(_) => {
+                kaya_core::emit_probe_marker(
+                    kaya_core::ProbeMarkerSite::Flush,
+                    kaya_core::ProbeMarkerPhase::Exit,
+                    None,
+                );
+            }
+        }
+        result
+    }
+
+    async fn flush_nonempty(&mut self, flush_start: std::time::Instant) -> Result<FlushResult> {
         let entry_count = self.memtable.len() as u64;
         let table_id = self.next_table_id;
         self.next_table_id += 1;
@@ -126,12 +157,6 @@ impl<D: Disk> Engine<D> {
             self.stats.flush_max_us = flush_us;
         }
         self.stats.flush_count += 1;
-
-        kaya_core::emit_probe_marker(
-            kaya_core::ProbeMarkerSite::Flush,
-            kaya_core::ProbeMarkerPhase::Exit,
-            Some(flush_us),
-        );
 
         Ok(FlushResult {
             memtable_entries: entry_count,

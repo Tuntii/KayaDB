@@ -218,7 +218,7 @@ fn print_trace_wal(data_dir: &str) -> Result<()> {
     let publish = filter_publish_events(&events);
     if !publish.is_empty() {
         println!();
-        println!("Publish / USDT marker lines:");
+        println!("Flush publish lines (flush markers + publish_syscall):");
         for event in publish {
             println!("{}", serde_json::to_string(event).unwrap_or_default());
         }

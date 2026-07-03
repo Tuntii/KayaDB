@@ -796,6 +796,25 @@ mod tests {
     }
 
     #[test]
+    fn put_auto_flushes_when_memtable_exceeds_max_bytes() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut config = EngineConfig::default();
+            config.memtable.max_bytes = 6;
+            let mut engine = Engine::open(config, disk).await.unwrap();
+
+            engine
+                .put(b"k".to_vec(), b"value".to_vec(), strict_opts())
+                .await
+                .unwrap();
+
+            assert_eq!(engine.stats().flush_count, 1);
+            assert_eq!(engine.stats().memtable_entries, 0);
+            assert_eq!(engine.stats().sstable_count, 1);
+        });
+    }
+
+    #[test]
     fn flush_crash_recovery_idempotent() {
         block_on(async {
             let disk = Arc::new(SimDisk::new());

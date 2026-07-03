@@ -1305,13 +1305,15 @@ mod tests {
                 break;
             }
         }
-        assert!(saw_nonzero, "timed out waiting for non-zero eBPF/WAL fsync metrics");
-
-        let scratch = std::path::PathBuf::from(
-            std::env::var("KAYA_GOAL_SCRATCH").unwrap_or_else(|_| {
-                r"C:\Users\tunay\AppData\Local\Temp\grok-goal-e9b62b239508\implementer".to_owned()
-            }),
+        assert!(
+            saw_nonzero,
+            "timed out waiting for non-zero eBPF/WAL fsync metrics"
         );
+
+        let scratch =
+            std::path::PathBuf::from(std::env::var("KAYA_GOAL_SCRATCH").unwrap_or_else(|_| {
+                r"C:\Users\tunay\AppData\Local\Temp\grok-goal-10c42b461488\implementer".to_owned()
+            }));
         let _ = std::fs::create_dir_all(&scratch);
 
         for run in 0..2 {
@@ -1323,11 +1325,9 @@ mod tests {
                 "kaya_ebpf_fsync_latency_us_count{syscall=\"fsync\"}",
             )
             .unwrap_or(0);
-            let ebpf_sum = prometheus_sample_value(
-                &body,
-                "kaya_ebpf_fsync_latency_us_sum{syscall=\"fsync\"}",
-            )
-            .unwrap_or(0);
+            let ebpf_sum =
+                prometheus_sample_value(&body, "kaya_ebpf_fsync_latency_us_sum{syscall=\"fsync\"}")
+                    .unwrap_or(0);
             let wal_total = prometheus_sample_value(&body, "kaya_wal_fsync_total_us").unwrap_or(0);
 
             assert!(
@@ -1360,7 +1360,69 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
+        let trace_path = data_dir.join("ebpf/trace.jsonl");
+        let mut trace_raw = String::new();
+        for _ in 0..80 {
+            if trace_path.is_file() {
+                trace_raw = std::fs::read_to_string(&trace_path).unwrap_or_default();
+                if trace_raw.contains("\"site\":\"wal_fsync\"")
+                    && trace_raw.contains("\"site\":\"flush\"")
+                    && trace_raw.contains("\"kind\":\"publish_syscall\"")
+                {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            trace_raw.contains("\"kind\":\"usdt_marker\""),
+            "server trace must record usdt_marker events"
+        );
+        assert!(
+            trace_raw.contains("\"site\":\"wal_fsync\""),
+            "server trace must record wal_fsync markers"
+        );
+        assert!(
+            trace_raw.contains("\"site\":\"flush\""),
+            "server trace must record flush markers after auto-flush"
+        );
+        assert!(
+            trace_raw.contains("\"kind\":\"publish_syscall\""),
+            "server trace must record publish_syscall events"
+        );
+        let _ = std::fs::write(scratch.join("server-trace.jsonl"), &trace_raw);
+        let _ = std::fs::copy(&trace_path, scratch.join("server-ebpf-trace.jsonl"));
+
         handle.abort();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let kayactl = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/debug/kayactl.exe");
+        if kayactl.exists() {
+            for run in 1..=2 {
+                let output = std::process::Command::new(&kayactl)
+                    .args([
+                        "ebpf",
+                        "correlate",
+                        "--data",
+                        &data_dir.display().to_string(),
+                        "--durability",
+                        "strict",
+                    ])
+                    .output()
+                    .expect("kayactl correlate");
+                assert!(output.status.success());
+                let rendered = String::from_utf8_lossy(&output.stdout);
+                assert!(rendered.contains("USDT markers"));
+                assert!(rendered.contains("flush_enter="));
+                assert!(rendered.contains("Publish trace"));
+                let _ = std::fs::write(
+                    scratch.join(format!("correlate-run-{run}.txt")),
+                    rendered.as_ref(),
+                );
+            }
+        }
+
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 }

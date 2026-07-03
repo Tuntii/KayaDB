@@ -165,13 +165,11 @@ mod tests {
         assert!(body.contains("kaya_ebpf_fsync_latency_us_sum{syscall=\"fsync\"} 120"));
         assert!(body.contains("kernel-slot fsync latency"));
         assert!(!body.contains("userspace-tap"));
-        assert!(
-            body.lines().any(|l| {
-                l.starts_with("kaya_ebpf_fsync_latency_us_bucket{syscall=\"fsync\"")
-                    && l.contains("le=\"250\"")
-                    && l.ends_with("} 1")
-            })
-        );
+        assert!(body.lines().any(|l| {
+            l.starts_with("kaya_ebpf_fsync_latency_us_bucket{syscall=\"fsync\"")
+                && l.contains("le=\"250\"")
+                && l.ends_with("} 1")
+        }));
         assert!(body.contains("kaya_wal_fsync_total_us 12345"));
     }
 }

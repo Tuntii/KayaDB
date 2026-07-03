@@ -2,26 +2,24 @@
 
 #![cfg(feature = "ebpf")]
 
+mod ebpf_evidence;
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-fn goal_scratch_dir() -> PathBuf {
-    std::env::var("KAYA_GOAL_SCRATCH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(r"C:\Users\tunay\AppData\Local\Temp\grok-goal-e9b62b239508\implementer")
-        })
-}
+use ebpf_evidence::{
+    assert_server_trace_marker_kinds, capture_server_correlate, goal_scratch_dir,
+    wait_for_server_trace,
+};
 
 use kaya_net::{encode_put_payload, roundtrip};
 use serial_test::serial;
 use tokio::net::TcpListener;
 
 fn server_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug/kayadb-server.exe")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/kayadb-server.exe")
 }
 
 async fn free_port() -> u16 {
@@ -36,7 +34,12 @@ fn prometheus_sample(body: &str, prefix: &str) -> Option<u64> {
         .and_then(|v| v.parse().ok())
 }
 
-fn spawn_server(data_dir: &PathBuf, client: SocketAddr, raft: SocketAddr, metrics: SocketAddr) -> Child {
+fn spawn_server(
+    data_dir: &PathBuf,
+    client: SocketAddr,
+    raft: SocketAddr,
+    metrics: SocketAddr,
+) -> Child {
     Command::new(server_bin())
         .args([
             "--node-id",
@@ -117,7 +120,10 @@ async fn kayadb_server_bin_ebpf_metrics_nonzero_after_put() {
             break;
         }
     }
-    assert!(saw_nonzero, "bin launch: timed out waiting for non-zero ebpf metrics");
+    assert!(
+        saw_nonzero,
+        "bin launch: timed out waiting for non-zero ebpf metrics"
+    );
 
     let scratch = goal_scratch_dir();
     let _ = std::fs::create_dir_all(&scratch);
@@ -185,14 +191,20 @@ async fn kayadb_server_bin_ebpf_metrics_nonzero_after_put() {
         );
     }
 
-    let trace_path = data_dir.join("ebpf/trace.jsonl");
-    if trace_path.exists() {
-        let trace_raw = std::fs::read_to_string(&trace_path).unwrap();
-        assert!(
-            trace_raw.contains("ts_ns") || trace_raw.contains("latency_us"),
-            "trace.jsonl should contain kernel-shaped durability events"
-        );
-    }
+    let trace_raw = wait_for_server_trace(&data_dir).await;
+    assert_server_trace_marker_kinds(&trace_raw);
+    std::fs::write(scratch.join("server-trace.jsonl"), &trace_raw).unwrap();
+    std::fs::copy(
+        data_dir.join("ebpf/trace.jsonl"),
+        scratch.join("server-ebpf-trace.jsonl"),
+    )
+    .unwrap();
+
+    let _ = child.kill();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    capture_server_correlate(&data_dir, &scratch, 1);
+    capture_server_correlate(&data_dir, &scratch, 2);
 
     let backend_slot = if status_raw.contains("kernel-live") {
         "kernel-live"
@@ -215,6 +227,5 @@ async fn kayadb_server_bin_ebpf_metrics_nonzero_after_put() {
     assert!(scratch.join("ebpf-metrics-integration.log").exists());
     assert!(Path::new(&scratch.join("bin-metrics-scrape-0.txt")).exists());
 
-    let _ = child.kill();
     let _ = std::fs::remove_dir_all(&data_dir);
 }

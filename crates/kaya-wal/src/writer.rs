@@ -211,6 +211,11 @@ impl<D: Disk> WalWriterInner<D> {
                 Ok(duration_us)
             }
             Err(error) => {
+                kaya_core::emit_probe_marker(
+                    kaya_core::ProbeMarkerSite::WalFsync,
+                    kaya_core::ProbeMarkerPhase::Exit,
+                    None,
+                );
                 self.batch.fail_flush();
                 Err(error)
             }

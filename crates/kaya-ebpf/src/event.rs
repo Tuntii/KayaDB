@@ -99,7 +99,14 @@ impl ProbeEvent {
     }
 
     pub fn is_wal_relevant(&self) -> bool {
-        matches!(self, Self::FsyncLatency { .. })
+        matches!(
+            self,
+            Self::FsyncLatency { .. }
+                | Self::UsdtMarker {
+                    site: MarkerSite::WalFsync,
+                    ..
+                }
+        )
     }
 
     pub fn is_durability_event(&self) -> bool {

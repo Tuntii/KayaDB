@@ -227,6 +227,29 @@ mod tests {
     }
 
     #[test]
+    fn wal_filter_includes_wal_fsync_usdt_markers() {
+        let events = seeded_mixed_durability_events(12);
+        let wal = filter_wal_events(&events);
+        assert!(wal
+            .iter()
+            .any(|e| matches!(e, ProbeEvent::FsyncLatency { .. })));
+        assert!(wal.iter().any(|e| matches!(
+            e,
+            ProbeEvent::UsdtMarker {
+                site: crate::event::MarkerSite::WalFsync,
+                ..
+            }
+        )));
+        assert!(!wal.iter().any(|e| matches!(
+            e,
+            ProbeEvent::UsdtMarker {
+                site: crate::event::MarkerSite::Flush,
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn replay_rejects_unknown_event_kind_on_schema_drift() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("drift.jsonl");
