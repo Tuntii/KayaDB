@@ -43,14 +43,20 @@ pub struct CorrelateReport {
 }
 
 /// Build a correlation report by opening the local engine and reading eBPF artifacts.
-pub(crate) fn correlate_report(data_dir: &str, durability: DurabilityMode) -> Result<CorrelateReport> {
+pub(crate) fn correlate_report(
+    data_dir: &str,
+    durability: DurabilityMode,
+) -> Result<CorrelateReport> {
     let engine = block_on(crate::local::open_engine(data_dir.to_owned(), durability))?;
     let stats = engine.stats();
     build_correlate_report(Path::new(data_dir), &stats)
 }
 
 /// Build a correlation report from existing stats and `{data_dir}/ebpf/*` artifacts.
-pub(crate) fn build_correlate_report(data_dir: &Path, stats: &EngineStats) -> Result<CorrelateReport> {
+pub(crate) fn build_correlate_report(
+    data_dir: &Path,
+    stats: &EngineStats,
+) -> Result<CorrelateReport> {
     let userspace = summarize_userspace_wal(stats);
     let flush = summarize_flush(stats);
 
@@ -80,9 +86,9 @@ pub(crate) fn build_correlate_report(data_dir: &Path, stats: &EngineStats) -> Re
     let delta_hint = match (userspace.avg_us, kernel.as_ref().and_then(|k| k.avg_us)) {
         (Some(u), Some(k)) => format_delta_hint(u, k),
         (Some(_), None) => "kernel trace avg unavailable (no WAL fsync events in trace)".to_owned(),
-        (None, Some(k)) => format!(
-            "userspace avg unavailable (wal_fsync_count=0); kernel trace avg_us={k}"
-        ),
+        (None, Some(k)) => {
+            format!("userspace avg unavailable (wal_fsync_count=0); kernel trace avg_us={k}")
+        }
         (None, None) => "userspace and kernel trace averages unavailable".to_owned(),
     };
 
@@ -118,9 +124,7 @@ pub(crate) fn print_correlate_human(report: &CorrelateReport) {
 fn summarize_userspace_wal(stats: &EngineStats) -> UserspaceWalSummary {
     UserspaceWalSummary {
         count: stats.wal_fsync_count,
-        avg_us: stats
-            .wal_fsync_total_us
-            .checked_div(stats.wal_fsync_count),
+        avg_us: stats.wal_fsync_total_us.checked_div(stats.wal_fsync_count),
         max_us: stats.wal_fsync_max_us,
     }
 }
@@ -144,12 +148,15 @@ fn wal_latency_totals(wal: &[&ProbeEvent]) -> (u64, u64) {
 }
 
 fn load_trace_events(trace_path: &Path) -> Result<Vec<ProbeEvent>> {
-    let file = File::open(trace_path)
-        .map_err(|e| kaya_core::KayaError::Io { message: e.to_string() })?;
+    let file = File::open(trace_path).map_err(|e| kaya_core::KayaError::Io {
+        message: e.to_string(),
+    })?;
     let reader = BufReader::new(file);
     let mut events = Vec::new();
     for (idx, line) in reader.lines().enumerate() {
-        let line = line.map_err(|e| kaya_core::KayaError::Io { message: e.to_string() })?;
+        let line = line.map_err(|e| kaya_core::KayaError::Io {
+            message: e.to_string(),
+        })?;
         if idx == 0 && line.contains("artifact") {
             continue;
         }

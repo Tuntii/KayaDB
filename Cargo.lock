@@ -602,6 +602,7 @@ dependencies = [
  "kaya-wal",
  "libc",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

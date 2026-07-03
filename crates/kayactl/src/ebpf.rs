@@ -121,8 +121,9 @@ fn print_status(data_dir: &str, pid: Option<u32>) -> Result<()> {
 
     let status_path = Path::new(data_dir).join("ebpf/status.json");
     if status_path.exists() {
-        let raw = std::fs::read_to_string(&status_path)
-            .map_err(|e| kaya_core::KayaError::Io { message: e.to_string() })?;
+        let raw = std::fs::read_to_string(&status_path).map_err(|e| kaya_core::KayaError::Io {
+            message: e.to_string(),
+        })?;
         let status: ProbeStatus = serde_json::from_str(&raw).map_err(|e| {
             kaya_core::KayaError::invalid_argument(format!("invalid ebpf status json: {e}"))
         })?;
@@ -138,7 +139,10 @@ fn print_status(data_dir: &str, pid: Option<u32>) -> Result<()> {
 
     if let Some(pid) = pid.or_else(|| discover_server_pids().first().copied()) {
         println!("eBPF status for PID {pid}:");
-        println!("  attached:          unknown (no {}/ebpf/status.json)", data_dir);
+        println!(
+            "  attached:          unknown (no {}/ebpf/status.json)",
+            data_dir
+        );
         println!("  streaming:         unknown");
         println!("  hint: start server with --ebpf to populate status artifacts");
     } else {
@@ -182,12 +186,15 @@ fn print_trace_wal(data_dir: &str) -> Result<()> {
         return Ok(());
     }
 
-    let file = File::open(&trace_path)
-        .map_err(|e| kaya_core::KayaError::Io { message: e.to_string() })?;
+    let file = File::open(&trace_path).map_err(|e| kaya_core::KayaError::Io {
+        message: e.to_string(),
+    })?;
     let reader = BufReader::new(file);
     let mut events = Vec::new();
     for (idx, line) in reader.lines().enumerate() {
-        let line = line.map_err(|e| kaya_core::KayaError::Io { message: e.to_string() })?;
+        let line = line.map_err(|e| kaya_core::KayaError::Io {
+            message: e.to_string(),
+        })?;
         if idx == 0 && line.contains("artifact") {
             println!("# {line}");
             continue;
@@ -200,7 +207,10 @@ fn print_trace_wal(data_dir: &str) -> Result<()> {
         }
     }
 
-    println!("WAL-relevant eBPF trace lines from {}:", trace_path.display());
+    println!(
+        "WAL-relevant eBPF trace lines from {}:",
+        trace_path.display()
+    );
     for event in filter_wal_events(&events) {
         println!("{}", serde_json::to_string(event).unwrap_or_default());
     }
@@ -209,6 +219,3 @@ fn print_trace_wal(data_dir: &str) -> Result<()> {
     }
     Ok(())
 }
-
-
-

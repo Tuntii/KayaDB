@@ -118,23 +118,17 @@ fn run() -> Result<()> {
                     .map(|s| s.trim_end_matches('s').parse::<u64>())
                     .transpose()
                     .map_err(|_| {
-                        KayaError::invalid_argument("--duration must be a positive integer (seconds)")
+                        KayaError::invalid_argument(
+                            "--duration must be a positive integer (seconds)",
+                        )
                     })?
                     .unwrap_or(10)
             } else {
                 10
             };
-            let pid: Option<u32> = remove_value_flag(&mut args, "--pid")
-                .and_then(|s| s.parse().ok());
-            return ebpf::handle_ebpf(
-                &sub,
-                &data_dir,
-                pid,
-                json,
-                run,
-                duration_secs,
-                durability,
-            );
+            let pid: Option<u32> =
+                remove_value_flag(&mut args, "--pid").and_then(|s| s.parse().ok());
+            return ebpf::handle_ebpf(&sub, &data_dir, pid, json, run, duration_secs, durability);
         }
     }
 

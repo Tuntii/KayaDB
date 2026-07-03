@@ -18,7 +18,9 @@ pub fn script_filename(name: &str) -> Result<&'static str> {
         "block-latency" => Ok("block-io-latency.bt"),
         "syscall-timeline" => Ok("syscall-timeline.bt"),
         "durability-syscalls" => Ok("durability-syscalls.bt"),
-        _ => Err(KayaError::invalid_argument(format!("unknown ebpf script: {name}"))),
+        _ => Err(KayaError::invalid_argument(format!(
+            "unknown ebpf script: {name}"
+        ))),
     }
 }
 
@@ -90,22 +92,16 @@ fn resolve_target_pid(pid: Option<u32>) -> Result<u32> {
     if let Some(pid) = pid {
         return Ok(pid);
     }
-    discover_server_pids()
-        .first()
-        .copied()
-        .ok_or_else(|| {
-            KayaError::invalid_argument(
-                "no kayadb-server PID found; pass --pid or start kayadb-server first",
-            )
-        })
+    discover_server_pids().first().copied().ok_or_else(|| {
+        KayaError::invalid_argument(
+            "no kayadb-server PID found; pass --pid or start kayadb-server first",
+        )
+    })
 }
 
 fn print_manual_bpftrace_instructions(pid: u32, script_path: &Path) {
     println!("Run bpftrace manually (Linux, typically requires sudo):");
-    println!(
-        "  sudo bpftrace -p {pid} {}",
-        script_path.display()
-    );
+    println!("  sudo bpftrace -p {pid} {}", script_path.display());
     println!();
     println!("Discover PIDs: kayactl ebpf list");
 }
@@ -127,10 +123,7 @@ pub fn run_bpftrace_script(
             print_manual_bpftrace_instructions(target_pid, &script_path);
         } else {
             println!("Run bpftrace manually (Linux, typically requires sudo):");
-            println!(
-                "  sudo bpftrace -p <PID> {}",
-                script_path.display()
-            );
+            println!("  sudo bpftrace -p <PID> {}", script_path.display());
             println!();
             println!("Discover PIDs: kayactl ebpf list");
         }
@@ -412,7 +405,9 @@ mod tests {
         let args = bpftrace_command_args(99, &script_path);
         assert_eq!(args[0], "-p");
         assert_eq!(args[1], "99");
-        assert!(args[2].replace('\\', "/").ends_with("scripts/ebpf/block-io-latency.bt"));
+        assert!(args[2]
+            .replace('\\', "/")
+            .ends_with("scripts/ebpf/block-io-latency.bt"));
     }
 
     #[test]
