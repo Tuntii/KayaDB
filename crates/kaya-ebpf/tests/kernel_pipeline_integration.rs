@@ -14,7 +14,10 @@ fn kernel_backend_streams_through_pipeline() {
     ));
 
     mgr.attach().expect("kernel-simulated attach");
-    assert!(mgr.kernel_streaming(), "kernel slot must be streaming after attach");
+    assert!(
+        mgr.kernel_streaming(),
+        "kernel slot must be streaming after attach"
+    );
     assert!(
         mgr.backend_name().contains("kernel"),
         "backend must be kernel-family, got {}",
@@ -36,7 +39,7 @@ fn kernel_backend_streams_through_pipeline() {
         "prometheus must not reference legacy userspace-tap HELP"
     );
 
-    mgr.sync_from_engine_stats(2_000, 350);
+    mgr.sync_from_engine_stats(2_000, 350, 0);
     assert!(
         mgr.histogram().total_count() >= 2,
         "WAL activity must append kernel-shaped events"
@@ -44,7 +47,9 @@ fn kernel_backend_streams_through_pipeline() {
 
     let events = mgr.events();
     assert!(
-        events.iter().any(|e| matches!(e, kaya_ebpf::ProbeEvent::FsyncLatency { ts_ns, .. } if *ts_ns > 0)),
+        events
+            .iter()
+            .any(|e| matches!(e, kaya_ebpf::ProbeEvent::FsyncLatency { ts_ns, .. } if *ts_ns > 0)),
         "kernel-shaped events must carry non-zero ts_ns"
     );
 
@@ -54,7 +59,10 @@ fn kernel_backend_streams_through_pipeline() {
     assert!(!replayed.is_empty());
 
     let status_raw = std::fs::read_to_string(dir.path().join("ebpf/status.json")).unwrap();
-    assert!(status_raw.contains("kernel"), "status.json must record kernel backend");
+    assert!(
+        status_raw.contains("kernel"),
+        "status.json must record kernel backend"
+    );
 
     mgr.detach();
     assert!(!mgr.is_attached());
@@ -74,7 +82,8 @@ fn kernel_preferred_server_slot_try_live_then_streams() {
         mgr.backend_name().contains("kernel-live"),
         "for_server must defer live attach before attach()"
     );
-    mgr.attach().expect("KernelPreferred must attach via live or simulated fallback");
+    mgr.attach()
+        .expect("KernelPreferred must attach via live or simulated fallback");
     assert!(
         mgr.backend_name().contains("kernel"),
         "attached backend must remain kernel-family"
@@ -82,7 +91,7 @@ fn kernel_preferred_server_slot_try_live_then_streams() {
     mgr.pump_events();
     assert!(mgr.histogram().has_nonzero_observations());
 
-    mgr.sync_from_engine_stats(1_500, 280);
+    mgr.sync_from_engine_stats(1_500, 280, 0);
     let events = mgr.events();
     assert!(
         events

@@ -1,9 +1,9 @@
+#[cfg(all(target_os = "linux", feature = "kernel-probes"))]
+use crate::backend::kernel::KernelBackend;
 use crate::backend::kernel_sim::KernelSimulatedBackend;
 use crate::backend::simulated::SimulatedBackend;
 use crate::backend::tap::TapBackend;
 use crate::event::{ProbeEvent, SyscallKind};
-#[cfg(all(target_os = "linux", feature = "kernel-probes"))]
-use crate::backend::kernel::KernelBackend;
 
 /// Explicit probe backend slot — no silent kernel+tap mixing.
 #[allow(clippy::large_enum_variant)]
@@ -58,9 +58,7 @@ impl ProbeBackend {
                 Self::KernelSimulated(KernelSimulatedBackend::new(seed))
             }
             BackendSelection::Tap => Self::Tap(TapBackend::new()),
-            BackendSelection::TestSimulated => {
-                Self::TestSimulated(SimulatedBackend::new(seed))
-            }
+            BackendSelection::TestSimulated => Self::TestSimulated(SimulatedBackend::new(seed)),
             BackendSelection::Noop => Self::Noop,
         }
     }
@@ -130,6 +128,13 @@ impl ProbeBackend {
             Self::Tap(b) => b.drain_events(),
             Self::TestSimulated(b) => b.drain_events(),
             Self::Noop => Vec::new(),
+        }
+    }
+
+    pub fn sync_flush_activity(&mut self, delta_total_us: u64) {
+        match self {
+            Self::KernelSimulated(b) => b.sync_flush_activity(delta_total_us),
+            Self::KernelLive(_) | Self::Tap(_) | Self::TestSimulated(_) | Self::Noop => {}
         }
     }
 
@@ -250,4 +255,3 @@ pub enum BackendSelection {
     TestSimulated,
     Noop,
 }
-

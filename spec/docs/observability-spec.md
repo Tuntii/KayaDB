@@ -149,7 +149,8 @@ Trace files are correctness artifacts, not performance logs.
 
 Implemented (scripts + in-process runtime + CLI + kernel-slot metrics) — Track A updates:
 
-- `crates/kaya-ebpf` — attach/detach probe manager, explicit backend slots (kernel-live / kernel-simulated / tap / test), `trace.jsonl` replay validation, Prometheus `kaya_ebpf_*` histograms.
+- `crates/kaya-ebpf` — attach/detach probe manager, explicit backend slots (kernel-live / kernel-simulated / tap / test), `trace.jsonl` replay validation, Prometheus `kaya_ebpf_*` histograms (fsync/fdatasync only; markers do not alter histograms).
+- **Track A Phase 2B+ (2026-07):** `ProbeEvent` kinds `usdt_marker` (WAL fsync + flush enter/exit) and `publish_syscall` (write/rename/fsync_dir shaped) recorded in `trace.jsonl` when `kayadb-server --ebpf` is on. Hooks use `kaya_core::emit_probe_marker` in `kaya-wal` strict fsync and `kaya-engine::flush` — no-op when ebpf off. `install_usdt_marker_sink` bridges hooks to the in-process probe manager. `kayactl ebpf correlate` prints USDT marker counts and publish syscall kinds; `trace wal` includes publish/USDT lines.
 - `kayadb-server --ebpf [--ebpf-seed N]` — starts probe runtime on Linux; default-off elsewhere.
 - `kayactl ebpf status` / `kayactl ebpf trace wal` — read `{data_dir}/ebpf/status.json` and WAL lines from `trace.jsonl`; graceful non-Linux guidance.
 
@@ -168,9 +169,9 @@ Implemented (scripts + in-process runtime + CLI + kernel-slot metrics) — Track
 v2+ (future) eBPF tooling may still add:
 
 - Per-file / data-dir filters + richer TID/PID attribution.
-- Flamegraph helper integration.
-- Trace correlation by PID/TID + userspace markers / USDT.
-- Optional Rust eBPF crate (Aya or libbpf-rs) behind `ebpf` feature + `cfg(target_os = "linux")`.
+- Flamegraph helper integration (Phase 2C).
+- External stap/perf USDT attachment (in-process markers are the testable contract today).
+- OpenTelemetry span exporter (Phase 2C).
 
 Non-goals (unchanged):
 

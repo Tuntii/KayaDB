@@ -44,8 +44,14 @@ impl FsyncHistogram {
     }
 
     pub fn ingest(&mut self, event: &ProbeEvent) {
-        let ProbeEvent::FsyncLatency { syscall, latency_us, .. } = event;
-        self.observe(*syscall, *latency_us);
+        if let ProbeEvent::FsyncLatency {
+            syscall,
+            latency_us,
+            ..
+        } = event
+        {
+            self.observe(*syscall, *latency_us);
+        }
     }
 
     pub fn total_count(&self) -> u64 {

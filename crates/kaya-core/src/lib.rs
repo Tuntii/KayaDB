@@ -1,6 +1,12 @@
+mod probe_markers;
+
 use std::fmt;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
+
+pub use probe_markers::{
+    emit_probe_marker, set_probe_marker_callback, ProbeMarkerPhase, ProbeMarkerSite,
+};
 
 pub type Bytes = Vec<u8>;
 pub type Result<T> = std::result::Result<T, KayaError>;

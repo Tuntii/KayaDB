@@ -6,8 +6,14 @@ use kaya_ebpf::{ProbeEvent, SyscallKind};
 #[test]
 fn bpf_source_declares_target_pid_filter() {
     let bpf_src = include_str!("../bpf/fsync_latency.bpf.c");
-    assert!(bpf_src.contains("target_pid"), "bpf must declare target_pid map");
-    assert!(bpf_src.contains("pid_allowed"), "bpf must filter by target pid");
+    assert!(
+        bpf_src.contains("target_pid"),
+        "bpf must declare target_pid map"
+    );
+    assert!(
+        bpf_src.contains("pid_allowed"),
+        "bpf must filter by target pid"
+    );
 
     let rust_src = include_str!("../src/backend/kernel.rs");
     assert!(
@@ -43,16 +49,14 @@ fn decode_ringbuf_injected_items_produces_nonempty_events_with_ts_ns() {
             .all(|e| matches!(e, ProbeEvent::FsyncLatency { ts_ns, .. } if *ts_ns > 0)),
         "injected ringbuf decode must stamp non-zero ts_ns"
     );
-    match &events[0] {
+    assert!(matches!(
+        &events[0],
         ProbeEvent::FsyncLatency {
-            syscall,
-            latency_us,
+            syscall: SyscallKind::Fsync,
+            latency_us: 512,
             ..
-        } => {
-            assert_eq!(*syscall, SyscallKind::Fsync);
-            assert_eq!(*latency_us, 512);
         }
-    }
+    ));
 }
 
 #[test]
@@ -141,8 +145,7 @@ mod linux {
         if std::env::var("KAYA_EBPF_LIVE_KERNEL").ok().as_deref() != Some("1") {
             panic!("set KAYA_EBPF_LIVE_KERNEL=1 to run live kernel attach test");
         }
-        let mut backend =
-            KernelBackend::try_attach().expect("live kernel attach requires CAP_BPF");
+        let mut backend = KernelBackend::try_attach().expect("live kernel attach requires CAP_BPF");
         assert!(backend.is_streaming());
         let file = tempfile::NamedTempFile::new().expect("temp file");
         file.as_file().sync_all().expect("fsync");

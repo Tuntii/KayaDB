@@ -144,7 +144,6 @@ impl KernelBackend {
         self.pending.extend(decoded);
         self.pending.drain(..).collect()
     }
-
 }
 
 /// Convert a batch of raw ring-buffer records into ordered probe events (test + replay).
@@ -187,7 +186,8 @@ fn set_target_pid_map(bpf: &mut aya::Ebpf) -> Result<(), String> {
     let map = bpf
         .map_mut("target_pid")
         .ok_or("missing target_pid map for write")?;
-    let mut arr: Array<_, u32> = Array::try_from(map).map_err(|e| format!("target_pid map: {e}"))?;
+    let mut arr: Array<_, u32> =
+        Array::try_from(map).map_err(|e| format!("target_pid map: {e}"))?;
     arr.set(0, pid, 0)
         .map_err(|e| format!("target_pid set: {e}"))?;
     Ok(())
@@ -219,9 +219,7 @@ fn attach_kprobe_pair(
         .ok_or_else(|| format!("missing {exit}"))?
         .try_into()
         .map_err(|e| format!("{exit} type: {e}"))?;
-    exit_prog
-        .load()
-        .map_err(|e| format!("{exit} load: {e}"))?;
+    exit_prog.load().map_err(|e| format!("{exit} load: {e}"))?;
     exit_prog
         .attach(symbol, 0)
         .map_err(|e| format!("{exit} attach: {e}"))?;
@@ -277,10 +275,14 @@ mod tests {
             5,
         );
         assert_eq!(events.len(), 2);
-        let ProbeEvent::FsyncLatency { seq, .. } = &events[0];
-        assert_eq!(*seq, 5);
-        let ProbeEvent::FsyncLatency { seq, .. } = &events[1];
-        assert_eq!(*seq, 6);
+        assert!(matches!(
+            &events[0],
+            ProbeEvent::FsyncLatency { seq: 5, .. }
+        ));
+        assert!(matches!(
+            &events[1],
+            ProbeEvent::FsyncLatency { seq: 6, .. }
+        ));
     }
 
     #[test]
@@ -312,6 +314,7 @@ mod tests {
                 assert_eq!(latency_us, 120);
                 assert_eq!(ts_ns, 42);
             }
+            _ => panic!("expected fsync latency event"),
         }
         match fdatasync {
             ProbeEvent::FsyncLatency {
@@ -324,6 +327,7 @@ mod tests {
                 assert_eq!(latency_us, 80);
                 assert_eq!(ts_ns, 43);
             }
+            _ => panic!("expected fdatasync latency event"),
         }
     }
 
@@ -350,17 +354,25 @@ mod tests {
         assert_eq!(seq, 9);
         for event in &events {
             match event {
-                ProbeEvent::FsyncLatency { ts_ns, latency_us, .. } => {
+                ProbeEvent::FsyncLatency {
+                    ts_ns, latency_us, ..
+                } => {
                     assert!(*ts_ns > 0);
                     assert!(*latency_us > 0);
                 }
+                _ => panic!("expected fsync latency from ringbuf decode"),
             }
         }
         match &events[0] {
-            ProbeEvent::FsyncLatency { syscall, latency_us, .. } => {
+            ProbeEvent::FsyncLatency {
+                syscall,
+                latency_us,
+                ..
+            } => {
                 assert_eq!(*syscall, SyscallKind::Fsync);
                 assert_eq!(*latency_us, 1_024);
             }
+            _ => panic!("expected fsync latency"),
         }
     }
 
@@ -379,6 +391,5 @@ mod tests {
             let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/fsync_latency.bpf.o"));
             KernelBackend::verify_object_loads(bytes).expect("bpf object must load");
         }
-
     }
 }

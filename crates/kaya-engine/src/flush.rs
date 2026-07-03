@@ -17,6 +17,11 @@ impl<D: Disk> Engine<D> {
             });
         }
 
+        kaya_core::emit_probe_marker(
+            kaya_core::ProbeMarkerSite::Flush,
+            kaya_core::ProbeMarkerPhase::Enter,
+            None,
+        );
         let flush_start = std::time::Instant::now();
         let entry_count = self.memtable.len() as u64;
         let table_id = self.next_table_id;
@@ -121,6 +126,12 @@ impl<D: Disk> Engine<D> {
             self.stats.flush_max_us = flush_us;
         }
         self.stats.flush_count += 1;
+
+        kaya_core::emit_probe_marker(
+            kaya_core::ProbeMarkerSite::Flush,
+            kaya_core::ProbeMarkerPhase::Exit,
+            Some(flush_us),
+        );
 
         Ok(FlushResult {
             memtable_entries: entry_count,

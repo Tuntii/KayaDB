@@ -628,16 +628,15 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 - 🟡 Per-file veya data-dir filtreli bpftrace versiyonları (script içinde kolay uzatma; henüz ayrı .bt yok)
 - 🟡 Multiple script paralel `--run` (manuel: ayrı terminaller veya `make` hedefleri)
 
-**Orta vadeli:**
-- Opsiyonel `crates/kaya-ebpf` (veya `kaya-observe`) crate — ✅ M15 stub (`probe_catalog()`, non-hard dep)
-  - `ebpf` Cargo feature
-  - `cfg(target_os = "linux")` + build.rs notları (clang, bpf-linker, libbpf)
-  - Aya veya libbpf-rs tabanlı örnek probe'lar (USDT marker'lar, custom maps)
-  - Hala **non-hard-dependency** — normal `cargo test` çalışmalı
-- USDT (User Statically-Defined Tracing) marker'lar Rust koduna ekle (WAL fsync, flush entry/exit noktaları)
-- Flamegraph + stack collapse entegrasyonu
-- Prometheus / OpenTelemetry exporter — ✅ M15 Prometheus `/metrics`; OpenTelemetry spans ⬜
-- `scripts/ebpf/` altına BCC / bpftrace helper script'leri + Makefile
+**Orta vadeli (Track A Phase 2B+ — tamamlandı / kısmi, 2026-07-03):**
+- ✅ `crates/kaya-ebpf` in-process runtime + Linux `kernel-probes` tier-B CI gate
+- ✅ USDT-shaped userspace markers: `kaya_core::emit_probe_marker` at WAL fsync + flush boundaries → `{data_dir}/ebpf/trace.jsonl` when `--ebpf`
+- ✅ Extended `ProbeEvent`: `usdt_marker`, `publish_syscall` + replay/schema-drift tests
+- ✅ `kayactl ebpf correlate` marker + publish summaries; `trace wal` prints publish/USDT lines
+- ✅ `scripts/ebpf/Makefile` (Phase 2A)
+- ⬜ Flamegraph + stack collapse entegrasyonu (Phase 2C)
+- ⬜ OpenTelemetry spans (Phase 2C; Prometheus `/metrics` ✅ M15)
+- ⬜ External stap/perf USDT attachment (documented operator path only)
 
 **Uzun vadeli / İleri seviye:**
 - Kernel + userspace birleşik attribution (hangi fsync'in ne kadarını kernel'da geçirdiğini net raporla)

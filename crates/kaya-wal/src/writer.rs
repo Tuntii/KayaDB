@@ -193,10 +193,20 @@ impl<D: Disk> WalWriterInner<D> {
     }
 
     async fn flush_strict_batch(&mut self) -> Result<u64> {
+        kaya_core::emit_probe_marker(
+            kaya_core::ProbeMarkerSite::WalFsync,
+            kaya_core::ProbeMarkerPhase::Enter,
+            None,
+        );
         let start = Instant::now();
         match self.disk.fsync_file(&self.active_path).await {
             Ok(()) => {
                 let duration_us = start.elapsed().as_micros() as u64;
+                kaya_core::emit_probe_marker(
+                    kaya_core::ProbeMarkerSite::WalFsync,
+                    kaya_core::ProbeMarkerPhase::Exit,
+                    Some(duration_us),
+                );
                 self.batch.complete_flush(duration_us);
                 Ok(duration_us)
             }

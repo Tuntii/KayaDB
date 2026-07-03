@@ -4,8 +4,9 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde::Serialize;
 
+use crate::backend::kernel::drain_timestamp_ns;
 use crate::backend::{BackendSelection, KernelSimulatedBackend, ProbeBackend};
-use crate::event::{ProbeEvent, SyscallKind};
+use crate::event::{MarkerPhase, MarkerSite, ProbeEvent, PublishSyscallKind, SyscallKind};
 use crate::pipeline::EventPipeline;
 use crate::trace::{write_trace, TraceReplayError};
 
@@ -21,7 +22,11 @@ pub struct ProbeConfig {
 
 impl ProbeConfig {
     /// Server `--ebpf`: kernel slot (live when available, else kernel-simulated).
-    pub fn for_server(data_dir: impl AsRef<Path>, seed: u64, config_hash: impl Into<String>) -> Self {
+    pub fn for_server(
+        data_dir: impl AsRef<Path>,
+        seed: u64,
+        config_hash: impl Into<String>,
+    ) -> Self {
         let data_dir = data_dir.as_ref();
         Self {
             seed,
@@ -33,7 +38,11 @@ impl ProbeConfig {
     }
 
     /// Explicit kernel-simulated slot (integration tests, Windows harness).
-    pub fn for_kernel_slot(data_dir: impl AsRef<Path>, seed: u64, config_hash: impl Into<String>) -> Self {
+    pub fn for_kernel_slot(
+        data_dir: impl AsRef<Path>,
+        seed: u64,
+        config_hash: impl Into<String>,
+    ) -> Self {
         let data_dir = data_dir.as_ref();
         Self {
             seed,
@@ -45,12 +54,20 @@ impl ProbeConfig {
     }
 
     /// Legacy name — routes to server kernel slot.
-    pub fn for_data_dir(data_dir: impl AsRef<Path>, seed: u64, config_hash: impl Into<String>) -> Self {
+    pub fn for_data_dir(
+        data_dir: impl AsRef<Path>,
+        seed: u64,
+        config_hash: impl Into<String>,
+    ) -> Self {
         Self::for_server(data_dir, seed, config_hash)
     }
 
     /// Seeded test-simulated backend (non-kernel family).
-    pub fn for_tests(data_dir: impl AsRef<Path>, seed: u64, config_hash: impl Into<String>) -> Self {
+    pub fn for_tests(
+        data_dir: impl AsRef<Path>,
+        seed: u64,
+        config_hash: impl Into<String>,
+    ) -> Self {
         let data_dir = data_dir.as_ref();
         Self {
             seed,
@@ -90,6 +107,7 @@ pub struct ProbeManager {
     pipeline: EventPipeline,
     last_wal_fsync_total_us: u64,
     last_wal_fsync_max_us: u64,
+    last_flush_total_us: u64,
 }
 
 impl ProbeManager {
@@ -101,15 +119,14 @@ impl ProbeManager {
             pipeline: EventPipeline::new(),
             last_wal_fsync_total_us: 0,
             last_wal_fsync_max_us: 0,
+            last_flush_total_us: 0,
         }
     }
 
     pub fn attach(&mut self) -> Result<(), String> {
         match self.backend.attach() {
             Ok(()) => Ok(()),
-            Err(_)
-                if self.config.backend_selection == BackendSelection::KernelPreferred =>
-            {
+            Err(_) if self.config.backend_selection == BackendSelection::KernelPreferred => {
                 self.backend =
                     ProbeBackend::KernelSimulated(KernelSimulatedBackend::new(self.config.seed));
                 self.backend.attach()
@@ -155,21 +172,74 @@ impl ProbeManager {
         self.pipeline.ingest_batch(drained);
     }
 
-    /// Sync WAL activity into the active backend slot, then drain.
-    pub fn sync_from_engine_stats(&mut self, wal_fsync_total_us: u64, wal_fsync_max_us: u64) {
+    /// Sync WAL + flush activity into the active backend slot, then drain.
+    pub fn sync_from_engine_stats(
+        &mut self,
+        wal_fsync_total_us: u64,
+        wal_fsync_max_us: u64,
+        flush_total_us: u64,
+    ) {
         if !self.is_attached() {
             return;
         }
-        let delta = wal_fsync_total_us.saturating_sub(self.last_wal_fsync_total_us);
-        self.backend.sync_wal_activity(delta, wal_fsync_max_us);
+        let wal_delta = wal_fsync_total_us.saturating_sub(self.last_wal_fsync_total_us);
+        self.backend.sync_wal_activity(wal_delta, wal_fsync_max_us);
         self.last_wal_fsync_total_us = wal_fsync_total_us;
         self.last_wal_fsync_max_us = wal_fsync_max_us;
+
+        let flush_delta = flush_total_us.saturating_sub(self.last_flush_total_us);
+        if flush_delta > 0 {
+            self.backend.sync_flush_activity(flush_delta);
+            self.last_flush_total_us = flush_total_us;
+        }
         self.pump_events();
     }
 
     pub fn report_fsync(&mut self, syscall: SyscallKind, latency_us: u64) {
         self.backend.report_fsync(syscall, latency_us, 0);
         self.pump_events();
+    }
+
+    /// Record a userspace USDT-shaped marker into the active trace pipeline.
+    pub fn record_usdt_marker(
+        &mut self,
+        site: MarkerSite,
+        phase: MarkerPhase,
+        duration_us: Option<u64>,
+    ) {
+        if !self.is_attached() {
+            return;
+        }
+        let ts_ns = drain_timestamp_ns();
+        self.pipeline.ingest_batch(vec![ProbeEvent::UsdtMarker {
+            seq: 0,
+            site,
+            phase,
+            duration_us,
+            ts_ns,
+        }]);
+        if matches!(site, MarkerSite::Flush) && matches!(phase, MarkerPhase::Exit) {
+            self.emit_flush_publish_syscalls(ts_ns);
+        }
+    }
+
+    fn emit_flush_publish_syscalls(&mut self, ts_base: u64) {
+        let syscalls = [
+            (PublishSyscallKind::Write, Some(100_u64)),
+            (PublishSyscallKind::Rename, Some(55)),
+            (PublishSyscallKind::FsyncDir, Some(200)),
+        ];
+        let events: Vec<ProbeEvent> = syscalls
+            .into_iter()
+            .enumerate()
+            .map(|(i, (syscall, latency_us))| ProbeEvent::PublishSyscall {
+                seq: 0,
+                syscall,
+                latency_us,
+                ts_ns: ts_base.wrapping_add(i as u64 + 1),
+            })
+            .collect();
+        self.pipeline.ingest_batch(events);
     }
 
     pub fn write_status(&self) -> std::io::Result<()> {
@@ -221,7 +291,8 @@ mod tests {
     #[test]
     fn kernel_slot_config_streams_kernel_family_backend() {
         let dir = tempdir().unwrap();
-        let mut mgr = ProbeManager::new(ProbeConfig::for_kernel_slot(dir.path(), 42, "kernel-slot"));
+        let mut mgr =
+            ProbeManager::new(ProbeConfig::for_kernel_slot(dir.path(), 42, "kernel-slot"));
         mgr.attach().unwrap();
         mgr.pump_events();
         assert!(mgr.is_kernel_family_backend());
@@ -246,7 +317,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let mgr = ProbeManager::new(ProbeConfig::for_server(dir.path(), 1, "srv"));
         assert!(!mgr.is_attached());
-        assert!(!mgr.kernel_streaming(), "KernelLive attach is deferred until attach()");
+        assert!(
+            !mgr.kernel_streaming(),
+            "KernelLive attach is deferred until attach()"
+        );
         assert!(
             mgr.backend_name().contains("kernel-live"),
             "KernelPreferred must start as deferred live slot, got {}",
@@ -262,10 +336,10 @@ mod tests {
             mgr.backend_name().contains("kernel-live"),
             "expected deferred live slot before attach"
         );
-        mgr.attach().expect("live unavailable must fall back to kernel-simulated");
+        mgr.attach()
+            .expect("live unavailable must fall back to kernel-simulated");
         assert!(
-            mgr.backend_name().contains("kernel-simulated")
-                || mgr.backend_name() == "kernel-live",
+            mgr.backend_name().contains("kernel-simulated") || mgr.backend_name() == "kernel-live",
             "after attach: live when CAP_BPF available, else kernel-simulated; got {}",
             mgr.backend_name()
         );
@@ -302,9 +376,52 @@ mod tests {
         let mut mgr = ProbeManager::new(ProbeConfig::for_kernel_slot(dir.path(), 3, "cfg"));
         mgr.attach().unwrap();
         let boot_count = mgr.histogram().total_count();
-        mgr.sync_from_engine_stats(500, 120);
+        mgr.sync_from_engine_stats(500, 120, 0);
         assert!(mgr.histogram().total_count() > boot_count);
         assert!(mgr.kernel_streaming());
+    }
+
+    #[test]
+    fn install_marker_sink_forwards_wal_hooks() {
+        use crate::{clear_usdt_marker_sink, install_usdt_marker_sink};
+        use kaya_core::{emit_probe_marker, ProbeMarkerPhase, ProbeMarkerSite};
+
+        let dir = tempdir().unwrap();
+        let mut mgr = ProbeManager::new(ProbeConfig::for_tests(dir.path(), 9, "sink"));
+        mgr.attach().unwrap();
+        let shared = shared_probe_manager(ProbeConfig::for_tests(dir.path(), 9, "sink"));
+        {
+            let mut guard = shared.lock();
+            guard.attach().unwrap();
+        }
+        install_usdt_marker_sink(shared.clone());
+        emit_probe_marker(ProbeMarkerSite::WalFsync, ProbeMarkerPhase::Enter, None);
+        emit_probe_marker(ProbeMarkerSite::WalFsync, ProbeMarkerPhase::Exit, Some(42));
+        let guard = shared.lock();
+        assert!(guard.events().iter().any(|e| matches!(
+            e,
+            ProbeEvent::UsdtMarker {
+                site: MarkerSite::WalFsync,
+                ..
+            }
+        )));
+        clear_usdt_marker_sink();
+    }
+
+    #[test]
+    fn record_usdt_marker_ingests_without_histogram_noise() {
+        let dir = tempdir().unwrap();
+        let mut mgr = ProbeManager::new(ProbeConfig::for_tests(dir.path(), 1, "markers"));
+        mgr.attach().unwrap();
+        mgr.pump_events();
+        let hist_before = mgr.histogram().total_count();
+        mgr.record_usdt_marker(MarkerSite::WalFsync, MarkerPhase::Enter, None);
+        mgr.record_usdt_marker(MarkerSite::WalFsync, MarkerPhase::Exit, Some(99));
+        assert_eq!(mgr.histogram().total_count(), hist_before);
+        assert!(mgr
+            .events()
+            .iter()
+            .any(|e| matches!(e, ProbeEvent::UsdtMarker { .. })));
     }
 
     #[test]
@@ -314,10 +431,10 @@ mod tests {
         mgr.attach().unwrap();
         mgr.pump_events();
         let after_boot = mgr.histogram().total_count();
-        mgr.sync_from_engine_stats(500, 120);
+        mgr.sync_from_engine_stats(500, 120, 0);
         let after_first = mgr.histogram().total_count();
         assert!(after_first > after_boot);
-        mgr.sync_from_engine_stats(500, 120);
+        mgr.sync_from_engine_stats(500, 120, 0);
         assert_eq!(mgr.histogram().total_count(), after_first);
     }
 }

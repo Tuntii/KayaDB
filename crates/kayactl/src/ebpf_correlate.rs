@@ -1,9 +1,11 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
 use kaya_core::{DurabilityMode, Result};
-use kaya_ebpf::{filter_wal_events, ProbeEvent, ProbeStatus};
+use kaya_ebpf::{
+    filter_publish_events, filter_wal_events, MarkerPhase, MarkerSite, ProbeEvent, ProbeStatus,
+};
 use kaya_engine::EngineStats;
 
 use crate::cli::block_on;
@@ -32,6 +34,22 @@ pub struct FlushSummary {
     pub avg_us: Option<u64>,
 }
 
+/// USDT-shaped marker counts from `trace.jsonl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MarkerSummary {
+    pub wal_enter: u64,
+    pub wal_exit: u64,
+    pub flush_enter: u64,
+    pub flush_exit: u64,
+}
+
+/// Publish-phase syscall events from `trace.jsonl`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishSummary {
+    pub events: u64,
+    pub kinds: Vec<String>,
+}
+
 /// Full userspace↔kernel correlation report (Track A).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorrelateReport {
@@ -39,6 +57,8 @@ pub struct CorrelateReport {
     pub kernel: Option<KernelTraceSummary>,
     pub delta_hint: String,
     pub flush: FlushSummary,
+    pub markers: MarkerSummary,
+    pub publish: PublishSummary,
     pub no_trace_hint: Option<String>,
 }
 
@@ -62,6 +82,22 @@ pub(crate) fn build_correlate_report(
 
     let trace_path = data_dir.join("ebpf/trace.jsonl");
     let status_path = data_dir.join("ebpf/status.json");
+
+    let (markers, publish) = if trace_path.is_file() {
+        let events = load_trace_events(&trace_path)?;
+        (
+            summarize_markers(&events),
+            summarize_publish(filter_publish_events(&events)),
+        )
+    } else {
+        (
+            MarkerSummary::default(),
+            PublishSummary {
+                events: 0,
+                kinds: Vec::new(),
+            },
+        )
+    };
 
     let kernel = if trace_path.is_file() {
         let events = load_trace_events(&trace_path)?;
@@ -103,22 +139,48 @@ pub(crate) fn build_correlate_report(
         kernel,
         delta_hint,
         flush,
+        markers,
+        publish,
         no_trace_hint,
     })
 }
 
 pub(crate) fn print_correlate_human(report: &CorrelateReport) {
-    println!("=== eBPF Correlation (Track A) ===");
-    print_userspace_line(&report.userspace);
+    let _ = write_correlate_human(report, &mut std::io::stdout());
+}
+
+#[cfg(test)]
+fn render_correlate_human(report: &CorrelateReport) -> String {
+    let mut buf = Vec::new();
+    write_correlate_human(report, &mut buf).expect("render correlate human output");
+    String::from_utf8(buf).expect("correlate human output is utf-8")
+}
+
+fn write_correlate_human<W: Write>(report: &CorrelateReport, out: &mut W) -> std::io::Result<()> {
+    writeln!(out, "=== eBPF Correlation (Track A) ===")?;
+    write_userspace_line(out, &report.userspace)?;
     if let Some(kernel) = &report.kernel {
-        print_kernel_line(kernel);
-        println!("Delta hint:     {}", report.delta_hint);
+        write_kernel_line(out, kernel)?;
+        writeln!(out, "Delta hint:     {}", report.delta_hint)?;
     } else if let Some(hint) = &report.no_trace_hint {
-        println!("Kernel trace:   (none)");
-        println!("Hint:           {hint}");
+        writeln!(out, "Kernel trace:   (none)")?;
+        writeln!(out, "Hint:           {hint}")?;
     }
-    print_flush_line(&report.flush);
-    println!("========================================");
+    write_flush_line(out, &report.flush)?;
+    write_marker_line(out, &report.markers)?;
+    write_publish_line(out, &report.publish)?;
+    if report.markers.wal_enter == 0
+        && report.markers.flush_enter == 0
+        && report.publish.events == 0
+        && report.kernel.is_none()
+    {
+        writeln!(
+            out,
+            "Hint:           run kayadb-server --ebpf to record usdt_marker + publish_syscall events"
+        )?;
+    }
+    writeln!(out, "========================================")?;
+    Ok(())
 }
 
 fn summarize_userspace_wal(stats: &EngineStats) -> UserspaceWalSummary {
@@ -136,13 +198,47 @@ fn summarize_flush(stats: &EngineStats) -> FlushSummary {
     }
 }
 
+fn summarize_markers(events: &[ProbeEvent]) -> MarkerSummary {
+    let mut summary = MarkerSummary::default();
+    for event in events {
+        let ProbeEvent::UsdtMarker { site, phase, .. } = event else {
+            continue;
+        };
+        match (site, phase) {
+            (MarkerSite::WalFsync, MarkerPhase::Enter) => summary.wal_enter += 1,
+            (MarkerSite::WalFsync, MarkerPhase::Exit) => summary.wal_exit += 1,
+            (MarkerSite::Flush, MarkerPhase::Enter) => summary.flush_enter += 1,
+            (MarkerSite::Flush, MarkerPhase::Exit) => summary.flush_exit += 1,
+        }
+    }
+    summary
+}
+
+fn summarize_publish(publish: Vec<&ProbeEvent>) -> PublishSummary {
+    let mut kinds = Vec::new();
+    for event in &publish {
+        let ProbeEvent::PublishSyscall { syscall, .. } = event else {
+            continue;
+        };
+        let label = syscall.as_str().to_owned();
+        if !kinds.contains(&label) {
+            kinds.push(label);
+        }
+    }
+    PublishSummary {
+        events: publish.len() as u64,
+        kinds,
+    }
+}
+
 fn wal_latency_totals(wal: &[&ProbeEvent]) -> (u64, u64) {
     let mut total_us = 0u64;
     let mut max_us = 0u64;
     for event in wal {
-        let ProbeEvent::FsyncLatency { latency_us, .. } = event;
-        total_us = total_us.saturating_add(*latency_us);
-        max_us = max_us.max(*latency_us);
+        if let ProbeEvent::FsyncLatency { latency_us, .. } = event {
+            total_us = total_us.saturating_add(*latency_us);
+            max_us = max_us.max(*latency_us);
+        }
     }
     (total_us, max_us)
 }
@@ -199,39 +295,68 @@ fn no_kernel_trace_hint(trace_path: &Path) -> String {
     )
 }
 
-fn print_userspace_line(userspace: &UserspaceWalSummary) {
+fn write_userspace_line<W: Write>(
+    out: &mut W,
+    userspace: &UserspaceWalSummary,
+) -> std::io::Result<()> {
     match userspace.avg_us {
-        Some(avg) => println!(
+        Some(avg) => writeln!(
+            out,
             "Userspace WAL:  count={}  avg_us={}  max_us={}",
             userspace.count, avg, userspace.max_us
         ),
-        None => println!(
+        None => writeln!(
+            out,
             "Userspace WAL:  count={}  avg_us=(n/a)  max_us={}",
             userspace.count, userspace.max_us
         ),
     }
 }
 
-fn print_kernel_line(kernel: &KernelTraceSummary) {
+fn write_kernel_line<W: Write>(out: &mut W, kernel: &KernelTraceSummary) -> std::io::Result<()> {
     match kernel.avg_us {
-        Some(avg) => println!(
+        Some(avg) => writeln!(
+            out,
             "Kernel trace:   events={}  avg_us={}  max_us={}  backend={}",
             kernel.events, avg, kernel.max_us, kernel.backend
         ),
-        None => println!(
+        None => writeln!(
+            out,
             "Kernel trace:   events={}  avg_us=(n/a)  max_us={}  backend={}",
             kernel.events, kernel.max_us, kernel.backend
         ),
     }
 }
 
-fn print_flush_line(flush: &FlushSummary) {
+fn write_marker_line<W: Write>(out: &mut W, markers: &MarkerSummary) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "USDT markers:   wal_enter={} wal_exit={} flush_enter={} flush_exit={}",
+        markers.wal_enter, markers.wal_exit, markers.flush_enter, markers.flush_exit
+    )
+}
+
+fn write_publish_line<W: Write>(out: &mut W, publish: &PublishSummary) -> std::io::Result<()> {
+    if publish.events == 0 {
+        return writeln!(out, "Publish trace:  events=0 kinds=(none)");
+    }
+    writeln!(
+        out,
+        "Publish trace:  events={} kinds={}",
+        publish.events,
+        publish.kinds.join(",")
+    )
+}
+
+fn write_flush_line<W: Write>(out: &mut W, flush: &FlushSummary) -> std::io::Result<()> {
     match flush.avg_us {
-        Some(avg) => println!(
+        Some(avg) => writeln!(
+            out,
             "Flush:          count={} avg_us={}  (pair with syscall-timeline rename/unlink)",
             flush.count, avg
         ),
-        None => println!(
+        None => writeln!(
+            out,
             "Flush:          count={} avg_us=(n/a)  (pair with syscall-timeline rename/unlink)",
             flush.count
         ),
@@ -241,7 +366,7 @@ fn print_flush_line(flush: &FlushSummary) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kaya_ebpf::{seeded_fsync_events, write_trace};
+    use kaya_ebpf::{seeded_fsync_events, seeded_mixed_durability_events, write_trace};
     use kaya_engine::EngineStats;
     use tempfile::tempdir;
 
@@ -265,8 +390,9 @@ mod tests {
 
         // 38 events with avg ~365 us and max 1150 (seeded distribution is close enough).
         let mut events = seeded_fsync_events(7, 38);
-        let ProbeEvent::FsyncLatency { latency_us, .. } = &mut events[0];
-        *latency_us = 1150;
+        if let ProbeEvent::FsyncLatency { latency_us, .. } = &mut events[0] {
+            *latency_us = 1150;
+        }
         write_trace(&trace_path, 7, "correlate-test", &events).unwrap();
 
         let status_path = data_dir.join("ebpf/status.json");
@@ -310,5 +436,45 @@ mod tests {
     fn delta_hint_within_five_percent_uses_within_wording() {
         assert!(format_delta_hint(380, 365).contains("within"));
         assert!(format_delta_hint(400, 365).contains("differs"));
+    }
+
+    #[test]
+    fn correlate_human_output_names_marker_and_publish_kinds() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path();
+        let trace_path = data_dir.join("ebpf/trace.jsonl");
+        std::fs::create_dir_all(trace_path.parent().unwrap()).unwrap();
+        write_trace(
+            &trace_path,
+            88,
+            "correlate-human",
+            &seeded_mixed_durability_events(88),
+        )
+        .unwrap();
+        let report = build_correlate_report(data_dir, &fixture_stats()).unwrap();
+        let rendered = render_correlate_human(&report);
+        assert!(rendered.contains("USDT markers"));
+        assert!(rendered.contains("wal_enter=1"));
+        assert!(rendered.contains("Publish trace"));
+        assert!(rendered.contains("rename"));
+    }
+
+    #[test]
+    fn correlate_report_surfaces_mixed_marker_and_publish_events() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path();
+        let trace_path = data_dir.join("ebpf/trace.jsonl");
+        std::fs::create_dir_all(trace_path.parent().unwrap()).unwrap();
+        let events = seeded_mixed_durability_events(88);
+        write_trace(&trace_path, 88, "mixed-correlate", &events).unwrap();
+
+        let report = build_correlate_report(data_dir, &fixture_stats()).unwrap();
+        assert_eq!(report.markers.wal_enter, 1);
+        assert_eq!(report.markers.wal_exit, 1);
+        assert_eq!(report.markers.flush_enter, 1);
+        assert_eq!(report.markers.flush_exit, 1);
+        assert!(report.publish.events >= 2);
+        assert!(report.publish.kinds.iter().any(|k| k == "rename"));
+        assert!(report.publish.kinds.iter().any(|k| k == "fsync_dir"));
     }
 }

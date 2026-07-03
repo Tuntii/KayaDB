@@ -8,18 +8,25 @@ pub mod backend;
 mod event;
 mod histogram;
 mod manager;
+mod markers;
 mod pipeline;
 mod trace;
 
-pub use backend::{BackendSelection, EventBackend, KernelSimulatedBackend, ProbeBackend, SimulatedBackend, TapBackend};
 pub use backend::kernel::{parse_raw_fsync_event, parse_ringbuf_batch, RawFsyncEvent};
-pub use event::{ProbeEvent, SyscallKind};
+pub use backend::{
+    BackendSelection, EventBackend, KernelSimulatedBackend, ProbeBackend, SimulatedBackend,
+    TapBackend,
+};
+pub use event::{MarkerPhase, MarkerSite, ProbeEvent, PublishSyscallKind, SyscallKind};
 pub use histogram::{FsyncHistogram, FSYNC_LATENCY_BUCKETS_US};
-pub use manager::{shared_probe_manager, ProbeConfig, ProbeManager, ProbeStatus, SharedProbeManager};
+pub use manager::{
+    shared_probe_manager, ProbeConfig, ProbeManager, ProbeStatus, SharedProbeManager,
+};
+pub use markers::{clear_usdt_marker_sink, install_usdt_marker_sink};
 pub use pipeline::EventPipeline;
 pub use trace::{
-    filter_wal_events, replay_validate, seeded_fsync_events, write_trace, TraceHeader,
-    TraceReplayError,
+    filter_publish_events, filter_wal_events, replay_validate, seeded_fsync_events,
+    seeded_mixed_durability_events, write_trace, TraceHeader, TraceReplayError,
 };
 
 /// Metadata for a bpftrace probe script shipped with KayaDB.

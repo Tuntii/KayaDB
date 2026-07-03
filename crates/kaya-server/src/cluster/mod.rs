@@ -43,7 +43,10 @@ use crate::membership::{load_persisted_roster, persist_roster, shared_roster, Sh
 use crate::raft_persister::RaftPersister;
 
 #[cfg(feature = "ebpf")]
-use kaya_ebpf::{shared_probe_manager, ProbeConfig, SharedProbeManager};
+use kaya_ebpf::{
+    clear_usdt_marker_sink, install_usdt_marker_sink, shared_probe_manager, ProbeConfig,
+    SharedProbeManager,
+};
 
 use client_ops::{ProposeReq, ReadIndexReq};
 
@@ -382,6 +385,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
                 let _ = guard.write_status();
             }
         }
+        install_usdt_marker_sink(mgr.clone());
         Some(mgr)
     } else {
         None
@@ -396,7 +400,11 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 let stats = engine.lock().await.stats();
                 let mut guard = ebpf.lock();
-                guard.sync_from_engine_stats(stats.wal_fsync_total_us, stats.wal_fsync_max_us);
+                guard.sync_from_engine_stats(
+                    stats.wal_fsync_total_us,
+                    stats.wal_fsync_max_us,
+                    stats.flush_total_us,
+                );
                 let _ = guard.write_status();
                 if !guard.events().is_empty() {
                     let _ = guard.flush_trace();
@@ -580,6 +588,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         let _ = guard.flush_trace();
         let _ = guard.write_status();
         guard.detach();
+        clear_usdt_marker_sink();
         eprintln!(
             "[node {}] eBPF probes detached ({} events)",
             config.node_id.0,
@@ -647,6 +656,7 @@ async fn handle_metrics_connection(
                 guard.sync_from_engine_stats(
                     engine_stats.wal_fsync_total_us,
                     engine_stats.wal_fsync_max_us,
+                    engine_stats.flush_total_us,
                 );
                 let _ = guard.write_status();
             }

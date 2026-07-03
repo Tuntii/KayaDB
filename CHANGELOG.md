@@ -9,9 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Track A Phase 2A: kayactl ebpf CLI hardening, bpftrace wrappers, userspace–kernel correlation.
+Track A Phase 2B+: USDT-shaped userspace markers, extended `ProbeEvent` schema, publish-phase trace correlation.
 
 ### Added
+- `ProbeEvent::UsdtMarker` and `ProbeEvent::PublishSyscall` in `trace.jsonl` with replay validation and mixed-kind fixtures
+- Global `kaya_core::emit_probe_marker` hooks at WAL strict fsync and `Engine::flush` entry/exit (no-op when ebpf off)
+- `kaya_ebpf::install_usdt_marker_sink` wires markers into `kayadb-server --ebpf` trace artifacts
+- `kayactl ebpf correlate` / `trace wal` surfaces USDT marker counts and publish syscall kinds
+- Kernel-simulated `sync_flush_activity` emits publish-shaped events from flush stats deltas
+
+Track A Phase 2A: kayactl ebpf CLI hardening, bpftrace wrappers, userspace–kernel correlation.
+
+### Added (Phase 2A)
 - `kayactl ebpf list` — discover local `kayadb-server` PIDs (with cmdline), active bpftrace processes, and catalog script names
 - `kayactl ebpf correlate` — userspace WAL fsync vs `{data_dir}/ebpf/trace.jsonl` kernel summary with rough delta hints and flush pairing notes
 - `kayactl ebpf fsync-latency|block-latency|syscall-timeline [--run] [--duration <sec>]` — bpftrace wrappers (spawn with streamed output + timeout, or print manual `sudo bpftrace` command)

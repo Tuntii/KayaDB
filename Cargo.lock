@@ -478,6 +478,7 @@ name = "kaya-ebpf"
 version = "0.1.46"
 dependencies = [
  "aya",
+ "kaya-core",
  "parking_lot",
  "serde",
  "serde_json",

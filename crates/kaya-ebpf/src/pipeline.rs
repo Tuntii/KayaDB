@@ -37,8 +37,7 @@ impl EventPipeline {
     pub fn ingest_batch(&mut self, mut drained: Vec<ProbeEvent>) {
         for mut event in drained.drain(..) {
             let seq = self.collected.len() as u64 + 1;
-            let ProbeEvent::FsyncLatency { seq: ref mut event_seq, .. } = &mut event;
-            *event_seq = seq;
+            event.set_seq(seq);
             self.histogram.ingest(&event);
             self.collected.push(event);
         }

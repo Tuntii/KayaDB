@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::backend::kernel::{parse_ringbuf_batch, RawFsyncEvent};
-use crate::event::{ProbeEvent, SyscallKind};
+use crate::event::{ProbeEvent, PublishSyscallKind, SyscallKind};
 
 /// Deterministic kernel-slot backend: ringbuf-shaped events without CAP_BPF.
 pub struct KernelSimulatedBackend {
@@ -36,9 +36,10 @@ impl KernelSimulatedBackend {
             },
         ];
         for (i, mut event) in parse_ringbuf_batch(&raw, 1).into_iter().enumerate() {
-            let ProbeEvent::FsyncLatency { ref mut ts_ns, .. } = &mut event;
-            *ts_ns = self.seed.wrapping_mul(1_000).wrapping_add(i as u64 + 1);
-            self.pending.push_back(event);
+            if let ProbeEvent::FsyncLatency { ref mut ts_ns, .. } = &mut event {
+                *ts_ns = self.seed.wrapping_mul(1_000).wrapping_add(i as u64 + 1);
+                self.pending.push_back(event);
+            }
         }
         self.boot_batch_emitted = true;
     }
@@ -48,7 +49,10 @@ impl KernelSimulatedBackend {
         if !self.attached || delta_total_us == 0 {
             return;
         }
-        let ts_base = self.seed.wrapping_mul(1_000).wrapping_add(self.pending.len() as u64);
+        let ts_base = self
+            .seed
+            .wrapping_mul(1_000)
+            .wrapping_add(self.pending.len() as u64);
         self.pending.push_back(ProbeEvent::FsyncLatency {
             seq: 0,
             syscall: SyscallKind::Fsync,
@@ -61,6 +65,30 @@ impl KernelSimulatedBackend {
                 syscall: SyscallKind::Fdatasync,
                 latency_us: (delta_total_us - max_us).max(1),
                 ts_ns: ts_base.wrapping_add(1),
+            });
+        }
+    }
+
+    /// Synthesize publish-phase syscalls from observed flush wall time.
+    pub fn sync_flush_activity(&mut self, delta_total_us: u64) {
+        if !self.attached || delta_total_us == 0 {
+            return;
+        }
+        let ts_base = self
+            .seed
+            .wrapping_mul(1_000)
+            .wrapping_add(self.pending.len() as u64);
+        let samples = [
+            (PublishSyscallKind::Write, delta_total_us / 10),
+            (PublishSyscallKind::Rename, delta_total_us / 20),
+            (PublishSyscallKind::FsyncDir, delta_total_us / 5),
+        ];
+        for (i, (syscall, latency_us)) in samples.into_iter().enumerate() {
+            self.pending.push_back(ProbeEvent::PublishSyscall {
+                seq: 0,
+                syscall,
+                latency_us: Some(latency_us.max(1)),
+                ts_ns: ts_base.wrapping_add(i as u64),
             });
         }
     }
@@ -109,7 +137,9 @@ mod tests {
         b.attach().unwrap();
         let events = b.drain_events();
         assert_eq!(events.len(), 2);
-        assert!(events.iter().all(|e| matches!(e, ProbeEvent::FsyncLatency { ts_ns, .. } if *ts_ns > 0)));
+        assert!(events
+            .iter()
+            .all(|e| matches!(e, ProbeEvent::FsyncLatency { ts_ns, .. } if *ts_ns > 0)));
         assert!(b.kernel_streaming());
         assert_eq!(b.backend_name(), "kernel-simulated");
     }

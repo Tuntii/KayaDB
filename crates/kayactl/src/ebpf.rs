@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use kaya_core::Result;
-use kaya_ebpf::{filter_wal_events, ProbeStatus};
+use kaya_ebpf::{filter_publish_events, filter_wal_events, ProbeStatus};
 
 use crate::ebpf_bpftrace::{
     discover_server_pids, format_catalog_script_names, list_active_bpftrace, resolve_script,
@@ -211,8 +211,17 @@ fn print_trace_wal(data_dir: &str) -> Result<()> {
         "WAL-relevant eBPF trace lines from {}:",
         trace_path.display()
     );
-    for event in filter_wal_events(&events) {
+    let wal = filter_wal_events(&events);
+    for event in wal {
         println!("{}", serde_json::to_string(event).unwrap_or_default());
+    }
+    let publish = filter_publish_events(&events);
+    if !publish.is_empty() {
+        println!();
+        println!("Publish / USDT marker lines:");
+        for event in publish {
+            println!("{}", serde_json::to_string(event).unwrap_or_default());
+        }
     }
     if events.is_empty() {
         println!("(no events recorded yet)");

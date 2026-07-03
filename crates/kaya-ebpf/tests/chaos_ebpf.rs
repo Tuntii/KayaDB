@@ -7,12 +7,16 @@ use tempfile::tempdir;
 fn bounded_chaos_workload_produces_trace_with_durability_events() {
     let dir = tempdir().unwrap();
     let seed = 2026;
-    let mut mgr = ProbeManager::new(ProbeConfig::for_kernel_slot(dir.path(), seed, "chaos-bounded"));
+    let mut mgr = ProbeManager::new(ProbeConfig::for_kernel_slot(
+        dir.path(),
+        seed,
+        "chaos-bounded",
+    ));
     mgr.attach().unwrap();
     mgr.pump_events();
 
     for step in 1..=5u64 {
-        mgr.sync_from_engine_stats(step * 200, 80 + step * 20);
+        mgr.sync_from_engine_stats(step * 200, 80 + step * 20, step * 1_000);
     }
 
     mgr.write_status().unwrap();

@@ -55,12 +55,7 @@ impl TapBackend {
         self.next_seq += 1;
     }
 
-    pub fn report_from_engine_delta(
-        &mut self,
-        delta_total_us: u64,
-        max_us: u64,
-        ts_ns: u64,
-    ) {
+    pub fn report_from_engine_delta(&mut self, delta_total_us: u64, max_us: u64, ts_ns: u64) {
         if delta_total_us == 0 {
             return;
         }

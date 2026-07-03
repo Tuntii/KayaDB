@@ -25,13 +25,14 @@ fn main() {
         return;
     }
 
-    let arch_define = match std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default().as_str() {
+    let arch_define = match std::env::var("CARGO_CFG_TARGET_ARCH")
+        .unwrap_or_default()
+        .as_str()
+    {
         "x86_64" => "-D__TARGET_ARCH_x86",
         "aarch64" => "-D__TARGET_ARCH_arm64",
         _ => {
-            eprintln!(
-                "cargo:warning=kaya-ebpf: unsupported BPF arch; kernel bpf object not built"
-            );
+            eprintln!("cargo:warning=kaya-ebpf: unsupported BPF arch; kernel bpf object not built");
             return;
         }
     };
@@ -54,7 +55,10 @@ fn main() {
     match cmd.status() {
         Ok(status) if status.success() => {
             println!("cargo:rustc-cfg=kaya_ebpf_bpf_built");
-            println!("cargo:warning=kaya-ebpf: bpf object built at {}", obj.display());
+            println!(
+                "cargo:warning=kaya-ebpf: bpf object built at {}",
+                obj.display()
+            );
         }
         Ok(status) => {
             eprintln!(
