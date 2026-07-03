@@ -21,6 +21,29 @@ On Fedora/RHEL:
 sudo dnf install bpftrace
 ```
 
+## Quick start
+
+From `scripts/ebpf/` (with `kayadb-server` running on Linux):
+
+```bash
+make help          # print targets
+make list          # discover kayadb-server PIDs
+make fsync         # fsync/fdatasync latency histogram (first PID)
+make block         # block I/O read/write latency histograms
+make timeline      # write/fsync/rename/unlink syscall timeline
+make verify        # Linux kernel gate (bpf compile + kaya-ebpf tests)
+```
+
+Override the target PID or pair with a timed workload:
+
+```bash
+make fsync PID=12345
+make timeline PID=$(pgrep -f kayadb-server | head -1) DURATION=30
+# In another terminal: kayactl --data ./db put k v && kayactl --data ./db flush
+```
+
+`make verify` runs `scripts/linux_verify_ebpf_kernel.sh` from the repo root (skips on non-Linux hosts).
+
 ## Provided Scripts
 
 All scripts are designed to be attached to a running `kayadb-server` (or any KayaDB process).
