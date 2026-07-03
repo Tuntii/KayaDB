@@ -29,6 +29,10 @@ default = []
 ebpf = ["dep:kaya-ebpf"]
 tls = ["kaya-net/tls"]
 
+[dev-dependencies]
+tempfile = "3"
+kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.46" }
+
 [[bin]]
 name = "kayactl"
 path = "src/main.rs"

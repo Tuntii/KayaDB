@@ -9,6 +9,7 @@ use crate::ebpf_bpftrace::{
     discover_server_pids, format_catalog_script_names, list_active_bpftrace, resolve_script,
     run_bpftrace_script, server_pid_details,
 };
+use crate::ebpf_correlate::{correlate_report, print_correlate_human};
 
 const LINUX_ONLY_MSG: &str =
     "In-process eBPF probes are Linux-only. Use bpftrace scripts in scripts/ebpf/ on any Linux host.";
@@ -21,10 +22,16 @@ pub(crate) fn handle_ebpf(
     _json: bool,
     run: bool,
     duration_secs: u64,
+    durability: kaya_core::DurabilityMode,
 ) -> Result<()> {
     match sub {
         "list" => print_list(),
         "status" => print_status(data_dir, pid),
+        "correlate" => {
+            let report = correlate_report(data_dir, durability)?;
+            print_correlate_human(&report);
+            Ok(())
+        }
         "fsync-latency" => run_bpftrace_script(pid, "fsync-latency", run, duration_secs),
         "block-latency" => run_bpftrace_script(pid, "block-latency", run, duration_secs),
         "syscall-timeline" => run_bpftrace_script(pid, "syscall-timeline", run, duration_secs),
@@ -50,6 +57,7 @@ fn print_help() -> Result<()> {
     println!("  kayactl ebpf list                                              Discover server PIDs + catalog scripts");
     println!("  kayactl ebpf status [--data <dir>] [--pid <pid>]               Probe attachment + streaming state");
     println!("  kayactl ebpf trace wal [--data <dir>]                          WAL-relevant lines from trace.jsonl");
+    println!("  kayactl ebpf correlate [--data <dir>]                            Userspace WAL vs kernel trace summary");
     println!("  kayactl ebpf fsync-latency [--pid <pid>] [--run] [--duration <sec>]");
     println!("  kayactl ebpf block-latency [--pid <pid>] [--run] [--duration <sec>]");
     println!("  kayactl ebpf syscall-timeline [--pid <pid>] [--run] [--duration <sec>]");

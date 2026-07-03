@@ -293,7 +293,8 @@ pub(crate) fn print_latency_human(stats: &EngineStats) {
         println!("  avg_us:  {avg}");
     }
     println!();
-    println!("Cross-reference with scripts/ebpf/ (Linux bpftrace probes; see README.md)");
+    println!("Cross-reference: kayactl ebpf correlate  (userspace vs kernel trace)");
+    println!("External bpftrace: scripts/ebpf/ (see README.md)");
     println!("========================================");
 }
 

@@ -3,6 +3,8 @@ mod cli;
 mod ebpf;
 #[cfg(feature = "ebpf")]
 mod ebpf_bpftrace;
+#[cfg(feature = "ebpf")]
+mod ebpf_correlate;
 mod inspect;
 mod local;
 mod server;
@@ -124,7 +126,15 @@ fn run() -> Result<()> {
             };
             let pid: Option<u32> = remove_value_flag(&mut args, "--pid")
                 .and_then(|s| s.parse().ok());
-            return ebpf::handle_ebpf(&sub, &data_dir, pid, json, run, duration_secs);
+            return ebpf::handle_ebpf(
+                &sub,
+                &data_dir,
+                pid,
+                json,
+                run,
+                duration_secs,
+                durability,
+            );
         }
     }
 
