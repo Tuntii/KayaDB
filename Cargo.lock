@@ -600,6 +600,7 @@ dependencies = [
  "kaya-lsm",
  "kaya-net",
  "kaya-wal",
+ "libc",
  "serde_json",
  "tokio",
 ]
