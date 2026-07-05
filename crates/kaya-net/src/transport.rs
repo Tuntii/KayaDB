@@ -228,13 +228,12 @@ async fn accept_raft_loop_tls(
                         let tx = tx.clone();
                         let acceptor = acceptor.clone();
                         tokio::spawn(async move {
-                            match acceptor.accept(stream).await {
-                                Ok(mut tls_stream) => {
-                                    while let Ok(env) = read_raft_envelope(&mut tls_stream).await {
-                                        if tx.send(env).await.is_err() { break; }
+                            if let Ok(mut tls_stream) = acceptor.accept(stream).await {
+                                while let Ok(env) = read_raft_envelope(&mut tls_stream).await {
+                                    if tx.send(env).await.is_err() {
+                                        break;
                                     }
                                 }
-                                Err(_) => {}
                             }
                         });
                     }

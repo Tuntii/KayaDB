@@ -1,3 +1,8 @@
+# Remotion video project
+/video/node_modules/
+/video/build/
+/video/out/
+
 # Build artifacts
 /target/
 /fuzz/target/
@@ -32,3 +37,4 @@ Thumbs.db
 *~
 /terminals
 docs/superpowers/plans/2026-06-30-m15-remaining-tracks.md
+/video
