@@ -151,7 +151,7 @@ mod tests {
         let _ = b.drain_events();
         b.sync_wal_activity(500, 120);
         let events = b.drain_events();
-        assert!(events.len() >= 1);
+        assert!(!events.is_empty());
         assert!(events.iter().any(|e| matches!(
             e,
             ProbeEvent::FsyncLatency {

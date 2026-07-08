@@ -71,10 +71,20 @@ impl IoUringDisk {
         Ok(res as usize)
     }
 
-    fn uring_write_all(&self, fd: types::Fd, mut offset: u64, buf: &[u8]) -> Result<()> {
+    /// Write all of `buf` through an already-locked ring.
+    ///
+    /// Callers lock `self.ring` once and hold the guard for the whole write
+    /// (and, for `append`, across the length probe too) so multi-submission
+    /// writes are never interleaved with a concurrent write on this instance.
+    fn uring_write_all(
+        ring: &mut IoUring,
+        fd: types::Fd,
+        mut offset: u64,
+        buf: &[u8],
+    ) -> Result<()> {
         let mut written = 0usize;
         while written < buf.len() {
-            let n = self.uring_write(fd, offset, &buf[written..])?;
+            let n = Self::uring_write(ring, fd, offset, &buf[written..])?;
             if n == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WriteZero,
@@ -88,8 +98,7 @@ impl IoUringDisk {
         Ok(())
     }
 
-    fn uring_write(&self, fd: types::Fd, offset: u64, buf: &[u8]) -> Result<usize> {
-        let mut ring = self.ring.lock().unwrap();
+    fn uring_write(ring: &mut IoUring, fd: types::Fd, offset: u64, buf: &[u8]) -> Result<usize> {
         let write_e = opcode::Write::new(fd, buf.as_ptr(), buf.len() as u32)
             .offset(offset)
             .build()
@@ -154,7 +163,8 @@ impl Disk for IoUringDisk {
             .write(true)
             .open(self.resolve(path))?;
         let fd = types::Fd(file.as_raw_fd());
-        self.uring_write_all(fd, offset, buf)?;
+        let mut ring = self.ring.lock().unwrap();
+        Self::uring_write_all(&mut ring, fd, offset, buf)?;
         Ok(buf.len())
     }
 
@@ -166,9 +176,12 @@ impl Disk for IoUringDisk {
             .read(true)
             .write(true)
             .open(self.resolve(path))?;
+        // Lock the ring before probing the length so concurrent appends via
+        // this instance are serialized per the `Disk::append` contract.
+        let mut ring = self.ring.lock().unwrap();
         let offset = file.metadata()?.len();
         let fd = types::Fd(file.as_raw_fd());
-        self.uring_write_all(fd, offset, buf)?;
+        Self::uring_write_all(&mut ring, fd, offset, buf)?;
         Ok(offset)
     }
 

@@ -79,6 +79,9 @@ For local demos, bind to `127.0.0.1`. For multi-host experiments, bind to a priv
 | Client credential on data ops | none (open) | `--client-token` / `KAYA_CLIENT_TOKEN` (server + kayactl + kaya-client) | PUT/GET/DELETE/SCAN/STATS (opcodes 1–4, 6) require matching `CLIENT\x00` token prefix when configured; HEALTH (op 5) stays open | ✅ (M15) kaya-server + kaya-net codec + kayactl + kaya-client |
 | Structured audit logging | off | `--audit-log` / `--no-audit-log` (default on when any token configured) | Append-only JSONL at `{data_dir}/audit.jsonl` for all client opcodes | ✅ (M15) `crates/kaya-server/src/audit.rs` |
 | Prometheus metrics | disabled | `--metrics-addr` (default `127.0.0.1:9090`) | HTTP `/metrics` text exposition (WAL fsync, SSTable count, Raft role/term) | ✅ (M15) `crates/kaya-server/src/metrics.rs` |
+| Concurrent client connections | 1024 max | `--max-client-connections` / `KAYA_MAX_CLIENT_CONNECTIONS` | Accept-loop semaphore; excess connections wait in TCP backlog (no unbounded task spawn) | ✅ `crates/kaya-server/src/cluster/client_ops.rs` |
+| Scan result / byte caps | 100 000 entries / 64 MiB | `EngineConfig.limits.max_scan_results` / `max_scan_bytes` | Unbounded SCAN cannot exhaust memory; merge window bounded; oversized prefixes → `STATUS_INVALID_ARGUMENT` | ✅ `crates/kaya-engine/src/memtable.rs` |
+| Data-dir exclusive lock | on | `EngineConfig.disable_locking` | `KAYA_LOCK` file (share-mode 0 on Windows, `flock` on Unix) prevents two processes corrupting one data dir | ✅ `crates/kaya-engine/src/lib.rs` |
 
 `kayadb-server` calls security checks before binding listeners. See `crates/kaya-server/src/security.rs` and `cluster.rs` (snapshot load + compaction, TLS listener setup).
 

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Technical-debt hardening pass: scan caps, graceful shutdown, connection limits, format fixtures, decoder tests, disk-append contract.
+
+### Added (hardening)
+- Server-side scan caps: `LimitsConfig.max_scan_results` (default 100 000) and `max_scan_bytes` (default 64 MiB) bound every `scan_prefix` — merge memory included; oversized scan prefixes (> `max_key_len`) are rejected with `InvalidArgument` (surfaced as `STATUS_INVALID_ARGUMENT` on the wire)
+- Graceful shutdown: `kayadb-server` handles Ctrl-C (all platforms) and SIGTERM (Unix); the run loop falls through to its cleanup path (eBPF detach/flush, OTel span shutdown) instead of dying mid-flight
+- Client connection cap: `--max-client-connections` / `KAYA_MAX_CLIENT_CONNECTIONS` (default 1024) — accept-loop semaphore applies TCP-backlog backpressure; integration test `test_max_client_connections_backpressure`
+- Persistent format golden fixtures (M1 debt, format-versioning-spec §6): committed WAL v1, SSTable v2/v3, and manifest v1 fixtures with byte-exact golden tests + typed corruption rejections (27 tests in `kaya-wal`/`kaya-lsm` `tests/format_fixtures.rs`)
+- WAL decoder edge-case suite (M1 debt): 16 targeted tests in `kaya-wal/tests/decoder_edge_cases.rs` covering `UnknownFlags`, `OversizedPayload`, `BadHeaderChecksum`, `BadPayloadChecksum`, `UnknownRecordType`, `MalformedPayload`, partial header/payload, decoder statelessness, and recovery-truncation semantics
+- `Disk::append` concurrency contract documented; `FileDisk` now serializes appends internally (shared lock across clones) with a concurrent-append contract test for `FileDisk`/`SimDisk`/`IoUringDisk`
+
+### Fixed (hardening)
+- `IoUringDisk::append` offset race: file-length probe now happens under the ring mutex, so concurrent appends cannot clobber each other
+- Flaky `wal_fsync_marker_emits_balanced_exit_on_fsync_failure`: the global probe-marker callback now filters by test thread, immune to parallel sibling tests
+- `kaya-ebpf` clippy violations (`new_without_default`, `len_zero`) that broke `cargo clippy --workspace -D warnings`
+
 Track A Phase 2C: flamegraph helper, optional OpenTelemetry durability spans, external USDT operator docs.
 
 ### Added (Phase 2C)

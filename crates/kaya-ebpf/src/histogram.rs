@@ -14,6 +14,12 @@ pub struct FsyncHistogram {
     pub fdatasync_sum_us: u64,
 }
 
+impl Default for FsyncHistogram {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FsyncHistogram {
     pub fn new() -> Self {
         let bucket_len = FSYNC_LATENCY_BUCKETS_US.len() + 1;

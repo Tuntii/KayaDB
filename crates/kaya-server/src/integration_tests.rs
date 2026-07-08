@@ -1142,6 +1142,69 @@ mod tests {
 
     #[serial]
     #[tokio::test]
+    async fn test_max_client_connections_backpressure() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_connlimit_{test_id}"));
+
+        let r1 = get_free_port().await;
+        let c1 = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{r1}").parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{c1}").parse().unwrap();
+
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![])
+            .with_max_client_connections(1);
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "single-node leader not ready for conn-limit test");
+
+        // Hold the single permitted connection open without sending anything.
+        let held = tokio::net::TcpStream::connect(client_addr).await.unwrap();
+
+        // Give the accept loop time to hand the permit to the held connection.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // A second connection must not be served while the first is held.
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            roundtrip(client_addr, 5, &[]),
+        )
+        .await;
+        assert!(
+            blocked.is_err(),
+            "second connection should be backpressured while the limit is exhausted"
+        );
+
+        // Releasing the held connection frees the permit; requests flow again.
+        drop(held);
+        let mut served = false;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                served = true;
+                break;
+            }
+        }
+        assert!(served, "connection should be served after permit release");
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[serial]
+    #[tokio::test]
     async fn test_node_restart_preserves_raft_term() {
         use kaya_raft::{decode_hard_state, Term, RAFT_HARD_STATE_LEN};
 

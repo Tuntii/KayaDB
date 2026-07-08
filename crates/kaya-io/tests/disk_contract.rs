@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use kaya_io::{
-    test_append_fsync_read, test_list_dir, test_write_truncate_rename_remove, Disk, FileDisk,
-    SimDisk,
+    test_append_fsync_read, test_concurrent_appends, test_list_dir,
+    test_write_truncate_rename_remove, Disk, FileDisk, SimDisk,
 };
 
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
@@ -20,7 +20,9 @@ async fn run_contract_suite<D: Disk>(disk: Arc<D>) {
     test_write_truncate_rename_remove(disk.clone())
         .await
         .unwrap();
-    test_list_dir(disk).await.unwrap();
+    test_list_dir(disk.clone()).await.unwrap();
+    // Synchronous helper: it spawns its own threads to hammer `append`.
+    test_concurrent_appends(disk).unwrap();
 }
 
 #[test]

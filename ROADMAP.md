@@ -155,11 +155,11 @@ Exit criteria:
 
 ---
 
-## M1 — Disk layer and WAL format 🟡
+## M1 — Disk layer and WAL format ✅
 
 Goal: make the durability foundation explicit and testable.
 
-Implemented or mostly implemented:
+Implemented:
 
 - Core types and error model.
 - `RelativePath` validation.
@@ -168,13 +168,9 @@ Implemented or mostly implemented:
 - WAL record constants/types.
 - WAL encoder and decoder.
 - Basic malformed WAL rejection tests.
-
-Still needed:
-
-- Harden `FileDisk` concurrency/append serialization if needed by tests.
-- Add more shared disk contract tests for `FileDisk` and `SimDisk`.
-- Expand decoder tests around unknown flags, oversized lengths and corruption cases.
-- Add persistent format fixtures.
+- `FileDisk` append serialization (internal lock, documented `Disk::append` contract) + shared concurrent-append contract test (2026-07-08).
+- Decoder edge-case suite: unknown flags, oversized lengths, header/payload CRC corruption, unknown record type, malformed payloads (`kaya-wal/tests/decoder_edge_cases.rs`, 2026-07-08).
+- Persistent format golden fixtures for WAL v1, SSTable v2/v3, manifest v1 (`tests/fixtures/` + byte-exact golden tests, 2026-07-08).
 
 Primary backlog IDs:
 
@@ -251,12 +247,15 @@ Implemented:
 - Delete-then-restart correctness test.
 - Scan-prefix correctness after restart.
 
+Since closed (previously "still needed"):
+
+- Stronger validation around limits and scan behavior — ✅ key/value limits + scan hard caps (`max_scan_results` / `max_scan_bytes`) and scan-prefix validation (2026-07-08).
+- Recovery diagnostics exposed through CLI — ✅ `kayactl recover --dry-run` (M9).
+- Clear data directory locking behavior — ✅ `KAYA_LOCK` exclusive lock in `Engine::open` (share-mode 0 on Windows, `flock` on Unix).
+
 Still needed:
 
-- Stronger validation around limits and scan behavior.
 - More CLI JSON output and snapshot-style CLI tests.
-- Recovery diagnostics exposed through CLI.
-- Clear data directory locking behavior.
 
 Primary backlog IDs:
 
@@ -682,6 +681,8 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 - Deployment (systemd, Docker, Kubernetes örnekleri) — ✅ M15 `deploy/docker/` + `deploy/k8s/`
 - Monitoring stack (Prometheus + eBPF + custom exporter) — ✅ M15 Prometheus `/metrics`; 🟡 eBPF stub (`kaya-ebpf`)
 - Structured audit logging — ✅ M15 local JSONL; SIEM export remains operator responsibility
+- Graceful shutdown (SIGTERM/Ctrl-C → clean cleanup path) + client connection cap (`--max-client-connections`, default 1024) — ✅ 2026-07-08
+- Scan hard caps (`max_scan_results` / `max_scan_bytes`) against unbounded-scan memory abuse — ✅ 2026-07-08
 - SLO / error budget / limit envelope tanımları — ⬜ planned
 
 ### Track F: Performance & Benchmarking

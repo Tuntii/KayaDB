@@ -367,8 +367,12 @@ mod tests {
         let exits = Arc::new(AtomicU64::new(0));
         let enters_cb = enters.clone();
         let exits_cb = exits.clone();
+        // The marker callback is process-global; sibling tests running in
+        // parallel also emit WalFsync markers. Count only markers emitted on
+        // this test's thread (append runs under a current-thread block_on).
+        let test_thread = std::thread::current().id();
         set_probe_marker_callback(Some(Box::new(move |site, phase, _| {
-            if site != ProbeMarkerSite::WalFsync {
+            if site != ProbeMarkerSite::WalFsync || std::thread::current().id() != test_thread {
                 return;
             }
             match phase {

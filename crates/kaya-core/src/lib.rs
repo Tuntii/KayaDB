@@ -14,6 +14,8 @@ pub type Result<T> = std::result::Result<T, KayaError>;
 
 pub const DEFAULT_MAX_KEY_LEN: usize = 4 * 1024;
 pub const DEFAULT_MAX_VALUE_LEN: usize = 16 * 1024 * 1024;
+pub const DEFAULT_MAX_SCAN_RESULTS: usize = 100_000;
+pub const DEFAULT_MAX_SCAN_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_PAYLOAD_LEN: u32 = 32 * 1024 * 1024;
 pub const DEFAULT_SEGMENT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_MEMTABLE_MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -260,6 +262,12 @@ impl Default for SstableConfig {
 pub struct LimitsConfig {
     pub max_key_len: usize,
     pub max_value_len: usize,
+    /// Hard cap on entries a single scan may return, even without a client limit.
+    /// Bounds merge memory as well: at most this many keys are held during the merge.
+    pub max_scan_results: usize,
+    /// Hard cap on total key+value bytes a single scan may return. The first
+    /// entry is always allowed so a scan can make progress.
+    pub max_scan_bytes: usize,
 }
 
 impl Default for LimitsConfig {
@@ -267,6 +275,8 @@ impl Default for LimitsConfig {
         Self {
             max_key_len: DEFAULT_MAX_KEY_LEN,
             max_value_len: DEFAULT_MAX_VALUE_LEN,
+            max_scan_results: DEFAULT_MAX_SCAN_RESULTS,
+            max_scan_bytes: DEFAULT_MAX_SCAN_BYTES,
         }
     }
 }

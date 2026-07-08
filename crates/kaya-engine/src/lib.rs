@@ -417,7 +417,7 @@ mod tests {
     use std::sync::Arc;
 
     use kaya_core::{
-        CompactionConfig, CompactionPolicyKind, DurabilityMode, EngineConfig,
+        CompactionConfig, CompactionPolicyKind, DurabilityMode, EngineConfig, KeyValue,
         LeveledCompactionConfig,
     };
     use kaya_io::SimDisk;
@@ -1125,6 +1125,131 @@ mod tests {
                 Some(b"val1".to_vec()),
                 "data must still be readable from memtable"
             );
+        });
+    }
+
+    fn scan_limits_config(max_scan_results: usize, max_scan_bytes: usize) -> EngineConfig {
+        let mut config = EngineConfig::default();
+        config.limits.max_scan_results = max_scan_results;
+        config.limits.max_scan_bytes = max_scan_bytes;
+        config
+    }
+
+    #[test]
+    fn scan_hard_cap_bounds_unlimited_scan() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(scan_limits_config(5, usize::MAX), disk)
+                .await
+                .unwrap();
+            for i in 0..10u8 {
+                engine
+                    .put(vec![b'k', b'0' + i], b"v".to_vec(), strict_opts())
+                    .await
+                    .unwrap();
+            }
+            let result = engine
+                .scan_prefix(b"k", ScanOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(result.len(), 5, "hard cap must bound unlimited scans");
+            assert_eq!(result[0].key, b"k0".to_vec());
+            assert_eq!(result[4].key, b"k4".to_vec());
+        });
+    }
+
+    #[test]
+    fn scan_user_limit_capped_by_hard_cap() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(scan_limits_config(3, usize::MAX), disk)
+                .await
+                .unwrap();
+            for i in 0..6u8 {
+                engine
+                    .put(vec![b'k', b'0' + i], b"v".to_vec(), strict_opts())
+                    .await
+                    .unwrap();
+            }
+            let result = engine
+                .scan_prefix(b"k", ScanOptions { limit: Some(10) })
+                .await
+                .unwrap();
+            assert_eq!(result.len(), 3, "user limit above hard cap is clamped");
+        });
+    }
+
+    #[test]
+    fn scan_byte_cap_truncates_but_returns_first_entry() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            // Each entry is 2 (key) + 100 (value) bytes; cap allows one entry only,
+            // and the first entry must always pass even when it alone exceeds the cap.
+            let mut engine = Engine::open(scan_limits_config(usize::MAX, 10), disk)
+                .await
+                .unwrap();
+            for i in 0..4u8 {
+                engine
+                    .put(vec![b'k', b'0' + i], vec![b'v'; 100], strict_opts())
+                    .await
+                    .unwrap();
+            }
+            let result = engine
+                .scan_prefix(b"k", ScanOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(result.len(), 1, "byte cap should stop after first entry");
+            assert_eq!(result[0].key, b"k0".to_vec());
+        });
+    }
+
+    #[test]
+    fn scan_rejects_oversized_prefix() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            let oversized = vec![b'p'; kaya_core::DEFAULT_MAX_KEY_LEN + 1];
+            let result = engine.scan_prefix(&oversized, ScanOptions::default()).await;
+            assert!(
+                matches!(result, Err(KayaError::InvalidArgument { .. })),
+                "prefix longer than max key length must be rejected, got: {result:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn scan_hard_cap_keeps_newest_values_across_flush() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(scan_limits_config(3, usize::MAX), disk)
+                .await
+                .unwrap();
+            for i in 0..6u8 {
+                engine
+                    .put(vec![b'k', b'0' + i], b"old".to_vec(), strict_opts())
+                    .await
+                    .unwrap();
+            }
+            engine.flush().await.unwrap();
+            engine
+                .put(b"k0".to_vec(), b"new".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            let result = engine
+                .scan_prefix(b"k", ScanOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(result.len(), 3);
+            assert_eq!(
+                result[0],
+                KeyValue {
+                    key: b"k0".to_vec(),
+                    value: b"new".to_vec()
+                },
+                "capped scan must not resurrect stale values"
+            );
+            assert_eq!(result[1].key, b"k1".to_vec());
+            assert_eq!(result[2].key, b"k2".to_vec());
         });
     }
 }

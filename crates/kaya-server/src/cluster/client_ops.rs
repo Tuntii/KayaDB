@@ -14,7 +14,7 @@ use kaya_net::{
 };
 use kaya_raft::{ClusterMember, NodeId};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 
 use crate::audit::AuditLog;
 use crate::client_auth::{decode_client_auth_payload, CLIENT_AUTH_PREFIX};
@@ -79,8 +79,19 @@ pub(crate) async fn client_accept_loop(
     client_token: Option<String>,
     audit_log: SharedAuditLog,
     network_partitioned: Option<Arc<AtomicBool>>,
+    max_connections: usize,
 ) {
-    while let Ok((stream, peer)) = listener.accept().await {
+    // Backpressure: stop accepting when `max_connections` handlers are live;
+    // further connections queue in the OS backlog until a permit frees up.
+    let connection_permits = Arc::new(Semaphore::new(max_connections.max(1)));
+    loop {
+        let permit = match connection_permits.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => return,
+        };
+        let Ok((stream, peer)) = listener.accept().await else {
+            return;
+        };
         if network_partitioned
             .as_ref()
             .is_some_and(|f| f.load(Ordering::SeqCst))
@@ -100,6 +111,7 @@ pub(crate) async fn client_accept_loop(
         let cli_tok = client_token.clone();
         let audit = audit_log.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             handle_connection(
                 stream,
                 peer,
@@ -456,6 +468,12 @@ async fn dispatch(
                                     kvs.into_iter().map(|kv| (kv.key, kv.value)).collect();
                                 outcome(STATUS_OK, encode_scan_response(&items), client_auth, None)
                             }
+                            Err(e @ kaya_core::KayaError::InvalidArgument { .. }) => outcome(
+                                STATUS_INVALID_ARGUMENT,
+                                encode_error_payload(&e.to_string()),
+                                client_auth,
+                                None,
+                            ),
                             Err(e) => outcome(
                                 STATUS_ERROR,
                                 encode_error_payload(&e.to_string()),

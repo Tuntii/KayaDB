@@ -52,6 +52,9 @@ use client_ops::{ProposeReq, ReadIndexReq};
 
 // ── public API ────────────────────────────────────────────────────────────────
 
+/// Default cap on concurrent client connections per node.
+pub const DEFAULT_MAX_CLIENT_CONNECTIONS: usize = 1024;
+
 /// Static configuration for a single cluster member.
 #[derive(Debug, Clone)]
 pub struct ClusterConfig {
@@ -89,6 +92,9 @@ pub struct ClusterConfig {
     pub audit_log: bool,
     /// When `Some`, expose Prometheus metrics at this listen address (`GET /metrics`).
     pub metrics_addr: Option<SocketAddr>,
+    /// Maximum concurrent client connections. Further connections are not
+    /// accepted until an active one closes (TCP backlog backpressure).
+    pub max_client_connections: usize,
     /// When true, start the in-process eBPF probe runtime (`ebpf` feature).
     #[cfg(feature = "ebpf")]
     pub ebpf_enabled: bool,
@@ -136,6 +142,7 @@ impl ClusterConfig {
             network_partitioned: None,
             audit_log: false,
             metrics_addr: None,
+            max_client_connections: DEFAULT_MAX_CLIENT_CONNECTIONS,
             #[cfg(feature = "ebpf")]
             ebpf_enabled: false,
             #[cfg(feature = "ebpf")]
@@ -154,6 +161,12 @@ impl ClusterConfig {
     /// Mark this node as a join-cluster participant (seed `--peer` entries required).
     pub fn with_join_cluster(mut self) -> Self {
         self.join_cluster = true;
+        self
+    }
+
+    /// Cap concurrent client connections (must be at least 1).
+    pub fn with_max_client_connections(mut self, max: usize) -> Self {
+        self.max_client_connections = max.max(1);
         self
     }
 
@@ -256,6 +269,8 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     let durability_mode = DurabilityMode::Relaxed;
 
     let engine_cfg = {
+        // `mut` is only exercised when the ebpf feature shrinks the memtable below.
+        #[cfg_attr(not(feature = "ebpf"), allow(unused_mut))]
         let mut cfg = EngineConfig {
             data_dir: config.data_dir.clone(),
             durability: DurabilityConfig {
@@ -526,6 +541,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         client_token,
         shared_audit,
         config.network_partitioned.clone(),
+        config.max_client_connections,
     );
     // Load persisted Raft snapshot once at startup (before the event loop applies entries).
     snapshot::install_persisted_snapshot_at_startup(
@@ -558,6 +574,8 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         config.tls.clone(),
     );
 
+    let shutdown_fut = shutdown_signal(config.node_id.0);
+
     #[cfg(feature = "ebpf")]
     match (metrics_fut, ebpf_pump_fut) {
         (Some(metrics_fut), Some(ebpf_pump_fut)) => {
@@ -566,6 +584,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
                 _ = raft_fut => {}
                 _ = metrics_fut => {}
                 _ = ebpf_pump_fut => {}
+                _ = shutdown_fut => {}
             }
         }
         (Some(metrics_fut), None) => {
@@ -573,6 +592,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
                 _ = accept_fut => {}
                 _ = raft_fut => {}
                 _ = metrics_fut => {}
+                _ = shutdown_fut => {}
             }
         }
         (None, Some(ebpf_pump_fut)) => {
@@ -580,12 +600,14 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
                 _ = accept_fut => {}
                 _ = raft_fut => {}
                 _ = ebpf_pump_fut => {}
+                _ = shutdown_fut => {}
             }
         }
         (None, None) => {
             tokio::select! {
                 _ = accept_fut => {}
                 _ = raft_fut => {}
+                _ = shutdown_fut => {}
             }
         }
     }
@@ -597,12 +619,14 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
                 _ = accept_fut => {}
                 _ = raft_fut => {}
                 _ = metrics_fut => {}
+                _ = shutdown_fut => {}
             }
         }
         None => {
             tokio::select! {
                 _ = accept_fut => {}
                 _ = raft_fut => {}
+                _ = shutdown_fut => {}
             }
         }
     }
@@ -627,7 +651,34 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         crate::otel_spans::shutdown_durability_spans();
     }
 
+    eprintln!("[node {}] shut down cleanly", config.node_id.0);
     Ok(())
+}
+
+/// Resolves when the process receives Ctrl-C (all platforms) or SIGTERM (Unix),
+/// letting the run loop fall through to its cleanup path instead of being killed
+/// mid-flight.
+async fn shutdown_signal(node_id: u64) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+    eprintln!("[node {node_id}] shutdown signal received; closing");
 }
 
 #[cfg(feature = "ebpf")]

@@ -160,6 +160,14 @@ fn run() -> Result<(), String> {
         return Err("--join-cluster requires at least one --peer seed address".to_owned());
     }
 
+    let max_client_connections = take_value(&mut args, "--max-client-connections")
+        .or_else(|| env::var("KAYA_MAX_CLIENT_CONNECTIONS").ok())
+        .map(|s| {
+            s.parse::<usize>()
+                .map_err(|e| format!("--max-client-connections: {e}"))
+        })
+        .transpose()?;
+
     let operator_token =
         take_value(&mut args, "--operator-token").or_else(|| env::var("KAYA_OPERATOR_TOKEN").ok());
 
@@ -216,6 +224,9 @@ fn run() -> Result<(), String> {
     }
     if join_cluster {
         config = config.with_join_cluster();
+    }
+    if let Some(max) = max_client_connections {
+        config = config.with_max_client_connections(max);
     }
 
     #[cfg(feature = "ebpf")]

@@ -1,19 +1,36 @@
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use kaya_core::Result;
 
 use crate::{DirEntry, Disk, RelativePath};
 
+/// Real-filesystem [`Disk`] rooted at a directory.
+///
+/// # Concurrency
+///
+/// `append` honors the [`Disk::append`] contract by serializing all appends
+/// through a per-instance lock that is held across the open + length probe +
+/// write, so concurrent appends via one `FileDisk` (or its clones, which
+/// share the lock) never interleave and always return the correct offset.
+///
+/// Two *separately constructed* `FileDisk` instances on the same root do not
+/// share that lock and rely only on the OS's `O_APPEND` atomicity.
 #[derive(Debug, Clone)]
 pub struct FileDisk {
     root: PathBuf,
+    /// Serializes `append` calls on this instance (shared by clones).
+    append_lock: Arc<Mutex<()>>,
 }
 
 impl FileDisk {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            append_lock: Arc::new(Mutex::new(())),
+        }
     }
 
     pub fn root(&self) -> &PathBuf {
@@ -56,6 +73,13 @@ impl Disk for FileDisk {
     }
 
     async fn append(&self, path: &RelativePath, buf: &[u8]) -> Result<u64> {
+        // Hold the per-instance lock across open + length probe + write so
+        // concurrent appends through this instance (or its clones) are atomic
+        // and serialized per the `Disk::append` contract.
+        let _guard = self
+            .append_lock
+            .lock()
+            .expect("file disk append mutex poisoned");
         self.ensure_parent(path)?;
         let mut file = OpenOptions::new()
             .create(true)

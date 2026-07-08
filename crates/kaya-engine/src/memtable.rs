@@ -93,7 +93,13 @@ impl<D: Disk> Engine<D> {
     }
 
     pub async fn scan_prefix(&mut self, prefix: &[u8], opts: ScanOptions) -> Result<Vec<KeyValue>> {
+        self.validate_scan_prefix(prefix)?;
         self.stats.scan_count += 1;
+        let max_results = self.config.limits.max_scan_results;
+        let max_bytes = self.config.limits.max_scan_bytes;
+        // Merge window is bounded to `max_scan_results` keys (tombstones included):
+        // the map always holds the smallest keys seen so far, so pruning the
+        // largest key never resurrects a stale version of a surviving key.
         let mut merged: BTreeMap<Bytes, (u64, Option<Bytes>)> = BTreeMap::new();
         for (_, reader) in self.live_sstables.iter().rev() {
             for entry in reader.scan_prefix(prefix)? {
@@ -102,19 +108,33 @@ impl<D: Disk> Engine<D> {
                     Some((s, _)) if *s >= seq => {}
                     _ => {
                         merged.insert(entry.key, (seq, entry.value));
+                        if merged.len() > max_results {
+                            merged.pop_last();
+                        }
                     }
                 }
             }
         }
         for (key, value, seq) in self.memtable.raw_scan_prefix(prefix) {
             merged.insert(key, (seq.get(), value));
+            if merged.len() > max_results {
+                merged.pop_last();
+            }
         }
-        let mut result: Vec<KeyValue> = merged
-            .into_iter()
-            .filter_map(|(key, (_, v))| v.map(|value| KeyValue { key, value }))
-            .collect();
-        if let Some(limit) = opts.limit {
-            result.truncate(limit);
+        let effective_limit = opts.limit.map_or(max_results, |l| l.min(max_results));
+        let mut result: Vec<KeyValue> = Vec::new();
+        let mut total_bytes = 0usize;
+        for (key, (_, v)) in merged {
+            let Some(value) = v else { continue };
+            let entry_bytes = key.len() + value.len();
+            if !result.is_empty() && total_bytes + entry_bytes > max_bytes {
+                break;
+            }
+            total_bytes += entry_bytes;
+            result.push(KeyValue { key, value });
+            if result.len() >= effective_limit {
+                break;
+            }
         }
         self.sync_block_cache_stats();
         Ok(result)
@@ -142,6 +162,17 @@ impl<D: Disk> Engine<D> {
             return Err(KayaError::invalid_argument(format!(
                 "key length {} exceeds max {}",
                 key.len(),
+                self.config.limits.max_key_len
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_scan_prefix(&self, prefix: &[u8]) -> Result<()> {
+        if prefix.len() > self.config.limits.max_key_len {
+            return Err(KayaError::invalid_argument(format!(
+                "scan prefix length {} exceeds max key length {}",
+                prefix.len(),
                 self.config.limits.max_key_len
             )));
         }

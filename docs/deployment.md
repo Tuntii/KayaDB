@@ -56,8 +56,11 @@ When running `kayadb-server` directly or in containers:
 | `--audit-log` / `--no-audit-log` | JSONL audit at `{data_dir}/audit.jsonl` (default on when any token set) |
 | `--metrics-addr` / `--no-metrics` | Prometheus HTTP `/metrics` (default `127.0.0.1:9090`) |
 | `--tls-cert`, `--tls-key`, `--tls-ca` | Native TLS (feature build) |
+| `--max-client-connections` / `KAYA_MAX_CLIENT_CONNECTIONS` | Cap concurrent client connections (default 1024); excess connections wait in the TCP backlog |
 
 **Health checks:** opcode 5 (HEALTH) stays open when client token is configured — use for liveness probes.
+
+**Shutdown:** the server exits cleanly on Ctrl-C (all platforms) and SIGTERM (Unix) — eBPF probes are detached and OTel spans flushed before exit. Durability never depends on clean shutdown (acknowledged strict writes are already fsynced).
 
 ---
 
