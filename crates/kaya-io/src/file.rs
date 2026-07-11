@@ -101,8 +101,30 @@ impl Disk for FileDisk {
     }
 
     async fn fsync_dir(&self, path: &RelativePath) -> Result<()> {
-        let _ = path;
-        Ok(())
+        #[cfg(unix)]
+        {
+            // On Unix, durability of a directory *entry* (after create, rename
+            // or remove) is only guaranteed once the directory itself is
+            // fsync'd. Open the directory read-only and sync its file
+            // descriptor. Without this, an acknowledged rename/publish can be
+            // lost on crash even though the file's own data was fsync'd.
+            let dir = self.resolve(path);
+            let file = OpenOptions::new().read(true).open(&dir)?;
+            file.sync_all()?;
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            // On Windows there is no portable way to flush a directory handle
+            // (`FlushFileBuffers` on a directory requires a handle opened with
+            // backup semantics and is not guaranteed by the platform). The call
+            // boundary is preserved so the durability intent stays explicit;
+            // directory-entry durability relies on the underlying filesystem.
+            // Documented as an accepted platform limitation in
+            // `spec/docs/disk-and-io-spec.md` §4.4.
+            let _ = path;
+            Ok(())
+        }
     }
 
     async fn truncate(&self, path: &RelativePath, len: u64) -> Result<()> {

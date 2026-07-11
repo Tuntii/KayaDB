@@ -195,8 +195,12 @@ impl Disk for IoUringDisk {
     }
 
     async fn fsync_dir(&self, path: &RelativePath) -> Result<()> {
-        let _ = path;
-        Ok(())
+        // Linux directory-entry durability: open the directory read-only and
+        // fsync its descriptor through the ring, mirroring `fsync_file`. This
+        // makes create/rename/remove entries durable after an atomic publish.
+        let file = OpenOptions::new().read(true).open(self.resolve(path))?;
+        let fd = types::Fd(file.as_raw_fd());
+        self.uring_fsync(fd)
     }
 
     async fn truncate(&self, path: &RelativePath, len: u64) -> Result<()> {

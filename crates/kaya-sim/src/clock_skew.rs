@@ -33,6 +33,8 @@ mod tests {
         SimNetworkConfig {
             drop_percent: 0,
             dup_percent: 0,
+            latency_ticks: 0,
+            reorder_percent: 0,
         }
     }
 

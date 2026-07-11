@@ -1,9 +1,11 @@
+mod histogram;
 mod probe_markers;
 
 use std::fmt;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
+pub use histogram::{LatencyHistogram, LATENCY_BUCKET_BOUNDS_US};
 pub use probe_markers::{
     emit_probe_marker, set_probe_marker_callback, set_probe_span_callback, ProbeMarkerPhase,
     ProbeMarkerSite,
@@ -74,6 +76,36 @@ impl KayaError {
             Self::InvariantViolation { .. } => 5,
             Self::LockConflict => 6,
             Self::Io { .. } | Self::DiskFull | Self::FsyncFailed | Self::Internal { .. } => 1,
+        }
+    }
+
+    /// Actionable operator guidance for recoverable errors: a short hint at the
+    /// tool or check that usually resolves the condition. `None` when there is
+    /// no generic remedy. CLIs can append this to the error message so users
+    /// are told what to do, not just what failed.
+    pub fn guidance(&self) -> Option<&'static str> {
+        match self {
+            Self::Corruption { .. } => Some(
+                "Run `kayactl recover --dry-run --data <dir>` to inspect the durable prefix \
+                 before reopening; a corrupt tail is truncated on recovery.",
+            ),
+            Self::LockConflict => Some(
+                "Another process holds the data-directory lock. Stop the other KayaDB \
+                 instance (or clear a stale lock) and retry.",
+            ),
+            Self::DiskFull => Some(
+                "Free space on the data volume (compact or archive old SSTables) and retry; \
+                 acknowledged writes are preserved.",
+            ),
+            Self::FsyncFailed => Some(
+                "The storage device failed to flush. Check disk health and mount options; do \
+                 not treat the last write as durable until fsync succeeds.",
+            ),
+            Self::UnsupportedVersion { .. } => Some(
+                "This binary is older than the on-disk format. Upgrade kayadb to a version \
+                 that supports this format, or restore a compatible backup.",
+            ),
+            _ => None,
         }
     }
 }

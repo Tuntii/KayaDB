@@ -79,6 +79,7 @@ pub struct Engine<D: Disk> {
     wal: WalWriter<D>,
     memtable: Memtable,
     stats: EngineStats,
+    histograms: stats::EngineHistograms,
     last_recovery: RecoveryReport,
     manifest_state: ManifestState,
     next_table_id: u64,
@@ -126,12 +127,9 @@ fn acquire_directory_lock(config: &EngineConfig) -> Result<Option<std::fs::File>
 
         let file = match options.open(&lock_path) {
             Ok(f) => f,
-            Err(e) => {
-                return Err(KayaError::internal(format!(
-                    "Could not acquire exclusive directory lock on KAYA_LOCK: {}. Is another instance of KayaDB running on this directory?",
-                    e
-                )));
-            }
+            // Structural lock-conflict error; `KayaError::guidance()` supplies
+            // the "another instance is running" operator hint uniformly.
+            Err(_) => return Err(KayaError::LockConflict),
         };
 
         #[cfg(unix)]
@@ -140,7 +138,7 @@ fn acquire_directory_lock(config: &EngineConfig) -> Result<Option<std::fs::File>
             let fd = file.as_raw_fd();
             let res = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
             if res != 0 {
-                return Err(KayaError::internal("Could not acquire exclusive directory lock on KAYA_LOCK. Is another instance of KayaDB running on this directory?"));
+                return Err(KayaError::LockConflict);
             }
         }
 
@@ -234,6 +232,7 @@ impl<D: Disk> Engine<D> {
             wal,
             memtable,
             stats,
+            histograms: stats::EngineHistograms::default(),
             last_recovery,
             manifest_state,
             next_table_id,
@@ -403,6 +402,7 @@ impl<D: Disk> Engine<D> {
             self.stats.compaction_max_us = compact_us;
         }
         self.stats.compaction_count += 1;
+        self.histograms.compaction_us.observe(compact_us);
 
         let actual_input = input_ids.len() as u64;
         Ok(CompactionResult {
@@ -792,6 +792,47 @@ mod tests {
             let s3 = engine.stats();
             assert!(s3.compaction_count >= 1);
             let _ = s3.compaction_total_us;
+        });
+    }
+
+    #[test]
+    fn read_path_latency_histograms_are_populated() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+
+            for i in 0..20u8 {
+                engine
+                    .put(vec![b'k', i], vec![b'v', i], strict_opts())
+                    .await
+                    .unwrap();
+            }
+            for i in 0..20u8 {
+                let _ = engine
+                    .get(&[b'k', i], ReadOptions::default())
+                    .await
+                    .unwrap();
+            }
+            let _ = engine
+                .scan_prefix(b"k", ScanOptions::default())
+                .await
+                .unwrap();
+
+            let h = engine.histograms();
+            assert_eq!(h.get_us.count(), 20, "each get records a latency sample");
+            assert_eq!(h.scan_us.count(), 1);
+            assert!(
+                h.wal_fsync_us.count() >= 20,
+                "strict puts record fsync latency"
+            );
+            // Percentile is a finite bucket bound (or max), never a panic.
+            let p99 = h.get_us.percentile_us(0.99);
+            assert!(p99 >= h.get_us.percentile_us(0.5));
+
+            // Scalar counters mirror the histograms.
+            let s = engine.stats();
+            assert_eq!(s.get_count, 20);
+            assert!(s.get_total_us >= s.get_max_us);
         });
     }
 

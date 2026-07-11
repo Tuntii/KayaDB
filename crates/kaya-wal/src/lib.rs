@@ -382,10 +382,13 @@ mod tests {
         })));
 
         block_on(async {
+            // Write ops on a fresh WAL: 0 = append (creates first segment),
+            // 1 = fsync_dir("wal") (persists the new segment's directory entry),
+            // 2 = fsync_file (the strict durability fsync we want to fail).
             let schedule = FaultSchedule {
                 seed: SimSeed(7),
                 rules: vec![FaultRule {
-                    operation_index: 1,
+                    operation_index: 2,
                     kind: FaultKind::FsyncFailed,
                 }],
             };

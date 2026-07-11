@@ -1,3 +1,4 @@
+mod backup;
 mod cli;
 #[cfg(feature = "ebpf")]
 mod ebpf;
@@ -23,6 +24,11 @@ use cli::{remove_all_value_flags, remove_flag, remove_value_flag};
 fn main() {
     if let Err(error) = run() {
         eprintln!("ERROR: {error}");
+        // Surface actionable recovery guidance for known-recoverable errors so
+        // the operator is told what to do next, not just what failed.
+        if let Some(hint) = error.guidance() {
+            eprintln!("HINT: {hint}");
+        }
         process::exit(error.exit_code());
     }
 }
@@ -158,6 +164,15 @@ fn run() -> Result<()> {
             operator_token,
             client_token,
         );
+    }
+
+    // ── backup (filesystem copy of a node's data dir) ─────────────────────────
+    if args.first().map(String::as_str) == Some("backup") {
+        let mut backup_args = args;
+        if json {
+            backup_args.push("--json".to_owned());
+        }
+        return backup::run_backup(backup_args, &data_dir);
     }
 
     // ── local engine mode ─────────────────────────────────────────────────────

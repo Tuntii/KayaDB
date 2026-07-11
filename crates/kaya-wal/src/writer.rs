@@ -31,6 +31,10 @@ struct WalWriterInner<D: Disk> {
     active_segment_id: SegmentId,
     active_path: RelativePath,
     active_len: u64,
+    /// Whether the active segment file's *directory entry* is known durable.
+    /// A freshly rotated segment is created lazily on its first append, so its
+    /// entry must be fsync'd on the `wal` directory only after the file exists.
+    active_dir_synced: bool,
     next_lsn: Lsn,
     next_sequence: SequenceNumber,
     batch: WalBatchWriter,
@@ -61,9 +65,12 @@ impl<D: Disk> WalWriter<D> {
             .map(SegmentId)
             .unwrap_or(SegmentId(1));
         let active_path = segment_path(active_segment_id)?;
-        let active_len = match disk.file_len(&active_path).await {
-            Ok(len) => len,
-            Err(KayaError::NotFound) => 0,
+        // An existing segment file's directory entry is already durable (it was
+        // listed on disk); a not-yet-created segment must be dir-synced after
+        // its first append creates the file.
+        let (active_len, active_dir_synced) = match disk.file_len(&active_path).await {
+            Ok(len) => (len, true),
+            Err(KayaError::NotFound) => (0, false),
             Err(error) => return Err(error),
         };
         let batch = WalBatchWriter::new(&config.batch);
@@ -75,6 +82,7 @@ impl<D: Disk> WalWriter<D> {
                 active_segment_id,
                 active_path,
                 active_len,
+                active_dir_synced,
                 next_lsn,
                 next_sequence,
                 batch,
@@ -112,6 +120,14 @@ impl<D: Disk> WalWriter<D> {
         let sequence = inner.next_sequence;
         let segment_id = inner.active_segment_id;
         let offset = inner.disk.append(&inner.active_path, &encoded).await?;
+
+        // The append just created the segment file if this is its first record.
+        // Persist the new directory entry so a rotated segment survives a crash
+        // even before its own content is fsync'd.
+        if !inner.active_dir_synced {
+            inner.disk.fsync_dir(&RelativePath::new("wal")?).await?;
+            inner.active_dir_synced = true;
+        }
 
         match mode {
             DurabilityMode::Relaxed => {
@@ -226,7 +242,9 @@ impl<D: Disk> WalWriterInner<D> {
         self.active_segment_id = SegmentId(self.active_segment_id.0 + 1);
         self.active_path = segment_path(self.active_segment_id)?;
         self.active_len = 0;
-        self.disk.fsync_dir(&RelativePath::new("wal")?).await?;
+        // The new segment file does not exist yet (created lazily on first
+        // append), so defer the `wal` directory fsync to that first append.
+        self.active_dir_synced = false;
         Ok(())
     }
 }

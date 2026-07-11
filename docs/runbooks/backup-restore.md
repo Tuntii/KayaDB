@@ -47,6 +47,25 @@ Restores themselves do not require the token; membership changes after restore d
 
 When native TLS or sidecars are in use, the backed-up data (including any persisted TLS-related state if any) can be restored to nodes that are started with the matching TLS configuration.
 
+## Built-in backup command
+
+`kayactl backup` copies a node's durable state to a backup directory:
+
+```bash
+# Full backup
+kayactl backup --data ./data/nodeN --out /backups/kaya/nodeN
+
+# Incremental: skips immutable files (SSTables, sealed WAL segments) already
+# present in the destination with the same size; copies only new/changed files.
+kayactl backup --data ./data/nodeN --out /backups/kaya/nodeN --incremental
+```
+
+Each file is copied via a temp file + rename so a partial copy never leaves a
+truncated file at the destination. For a point-in-time-consistent snapshot,
+stop the node first — a live backup is safe for the immutable SSTables but the
+WAL/manifest may be mid-write. Add `--json` for machine-readable output
+(`copied`, `skipped`, `bytes_copied`).
+
 ## Automation
 See `kayactl recover --dry-run` for inspecting a data directory before reuse.
 

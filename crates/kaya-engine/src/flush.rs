@@ -157,6 +157,7 @@ impl<D: Disk> Engine<D> {
             self.stats.flush_max_us = flush_us;
         }
         self.stats.flush_count += 1;
+        self.histograms.flush_us.observe(flush_us);
 
         Ok(FlushResult {
             memtable_entries: entry_count,

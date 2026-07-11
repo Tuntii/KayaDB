@@ -54,6 +54,45 @@ pub struct EngineStats {
     pub block_cache_misses: u64,
     /// Wall-clock microseconds spent in the last engine open/recovery path.
     pub recovery_duration_us: u64,
+    /// Cumulative microseconds spent in `get()` read-path lookups (memtable +
+    /// live SSTables). Previously the read path was entirely unmeasured.
+    pub get_total_us: u64,
+    /// Maximum single `get()` duration observed (us).
+    pub get_max_us: u64,
+    /// Cumulative microseconds spent in `scan_prefix()` merges.
+    pub scan_total_us: u64,
+    /// Maximum single `scan_prefix()` duration observed (us).
+    pub scan_max_us: u64,
+}
+
+impl EngineStats {
+    /// Record one `get()` latency sample (microseconds).
+    pub fn record_get_latency(&mut self, us: u64) {
+        self.get_total_us += us;
+        if us > self.get_max_us {
+            self.get_max_us = us;
+        }
+    }
+
+    /// Record one `scan_prefix()` latency sample (microseconds).
+    pub fn record_scan_latency(&mut self, us: u64) {
+        self.scan_total_us += us;
+        if us > self.scan_max_us {
+            self.scan_max_us = us;
+        }
+    }
+}
+
+/// Per-operation latency distributions (percentile-capable), complementing the
+/// `total/max/count` scalars in [`EngineStats`]. Held separately from
+/// `EngineStats` because histograms are not `Copy`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EngineHistograms {
+    pub get_us: kaya_core::LatencyHistogram,
+    pub scan_us: kaya_core::LatencyHistogram,
+    pub wal_fsync_us: kaya_core::LatencyHistogram,
+    pub flush_us: kaya_core::LatencyHistogram,
+    pub compaction_us: kaya_core::LatencyHistogram,
 }
 
 use kaya_io::Disk;
@@ -63,6 +102,11 @@ use super::Engine;
 impl<D: Disk> Engine<D> {
     pub fn stats(&self) -> EngineStats {
         self.stats
+    }
+
+    /// Per-operation latency histograms (p50/p99-capable distributions).
+    pub fn histograms(&self) -> &EngineHistograms {
+        &self.histograms
     }
 
     pub fn last_recovery(&self) -> &RecoveryReport {

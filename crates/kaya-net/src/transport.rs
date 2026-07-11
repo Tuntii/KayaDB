@@ -365,19 +365,23 @@ pub fn encode_client_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Connect to a server, send one request frame, and read the response.
+/// Send one request frame and read one response frame on an already-open
+/// stream. Enables connection reuse (keep-alive) across requests instead of a
+/// fresh TCP connect per operation.
 ///
-/// Returns `(status, payload)`.
-pub async fn roundtrip(
-    server_addr: SocketAddr,
+/// Returns `(status, payload)`. On any I/O error the caller should discard the
+/// stream, since its framing position is no longer known.
+pub async fn request_on_stream<S>(
+    stream: &mut S,
     opcode: u8,
     payload: &[u8],
-) -> std::io::Result<(u16, Vec<u8>)> {
-    let mut stream = TcpStream::connect(server_addr).await?;
+) -> std::io::Result<(u16, Vec<u8>)>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
     let frame = encode_client_frame(opcode, payload);
     stream.write_all(&frame).await?;
     stream.flush().await?;
-    // Read response
     let resp_len = stream.read_u32_le().await? as usize;
     if resp_len < 2 {
         return Err(std::io::Error::new(
@@ -392,6 +396,18 @@ pub async fn roundtrip(
         stream.read_exact(&mut body).await?;
     }
     Ok((status, body))
+}
+
+/// Connect to a server, send one request frame, and read the response.
+///
+/// Returns `(status, payload)`.
+pub async fn roundtrip(
+    server_addr: SocketAddr,
+    opcode: u8,
+    payload: &[u8],
+) -> std::io::Result<(u16, Vec<u8>)> {
+    let mut stream = TcpStream::connect(server_addr).await?;
+    request_on_stream(&mut stream, opcode, payload).await
 }
 
 #[cfg(feature = "tls")]

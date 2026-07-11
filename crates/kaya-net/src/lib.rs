@@ -14,9 +14,9 @@ pub use codec::{
 };
 pub use roster::NodeRoster;
 pub use transport::{
-    encode_client_frame, read_client_frame, roundtrip, send_envelopes, start_raft_listener,
-    write_client_response, TlsConfig, STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND,
-    STATUS_NOT_LEADER, STATUS_OK,
+    encode_client_frame, read_client_frame, request_on_stream, roundtrip, send_envelopes,
+    start_raft_listener, write_client_response, TlsConfig, STATUS_ERROR, STATUS_INVALID_ARGUMENT,
+    STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
 };
 
 #[cfg(feature = "tls")]

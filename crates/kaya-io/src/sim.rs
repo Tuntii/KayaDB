@@ -73,6 +73,27 @@ struct SimState {
     /// truncate, rename, remove_file) for fault-schedule matching.
     write_op_count: u64,
     fault_schedule: Option<FaultSchedule>,
+    /// When `true`, directory *entries* (file creation, rename, removal) are
+    /// volatile until the containing directory is `fsync_dir`'d. A crash then
+    /// reverts namespace mutations that were never made durable, so a missing
+    /// `fsync_dir` after an atomic publish becomes observable. Off by default
+    /// to preserve the content-only crash model used by existing suites.
+    strict_namespace: bool,
+    /// Names whose directory entry is durable on stable storage.
+    durable_names: BTreeSet<String>,
+    /// Durable snapshots of names removed/renamed away but whose removal is not
+    /// yet durable, so a crash can restore them.
+    shadow: BTreeMap<String, SimFile>,
+}
+
+/// The directory key that a `fsync_dir` would target for a given file name.
+/// Root-level files (no `/`) map to the empty string, matching how the engine
+/// calls `fsync_dir` on the data root.
+fn parent_dir(name: &str) -> &str {
+    match name.rfind('/') {
+        Some(idx) => &name[..idx],
+        None => "",
+    }
 }
 
 impl SimState {
@@ -109,9 +130,49 @@ impl SimDisk {
         }
     }
 
+    /// Enable strict directory-entry durability modeling on this disk.
+    ///
+    /// With it on, file creation, rename and removal are only durable after the
+    /// containing directory is `fsync_dir`'d; [`SimDisk::crash`] reverts any
+    /// namespace mutation that was not made durable. This makes a missing
+    /// `fsync_dir` after an atomic publish (create tmp → fsync file → rename →
+    /// fsync dir) detectable, which the content-only model cannot catch.
+    pub fn with_strict_namespace(self) -> Self {
+        {
+            let mut state = self.state.lock().expect("sim disk mutex poisoned");
+            state.strict_namespace = true;
+        }
+        self
+    }
+
     pub fn crash(&self) -> CrashReport {
         let mut state = self.state.lock().expect("sim disk mutex poisoned");
         let mut lost_bytes = 0_u64;
+
+        if state.strict_namespace {
+            let durable = state.durable_names.clone();
+            // Drop creations whose directory entry was never made durable.
+            let dropped: Vec<String> = state
+                .files
+                .keys()
+                .filter(|name| !durable.contains(*name))
+                .cloned()
+                .collect();
+            for name in dropped {
+                if let Some(file) = state.files.remove(&name) {
+                    lost_bytes += file.volatile.len() as u64;
+                }
+            }
+            // Restore durable names whose removal/rename was not yet durable.
+            for name in &durable {
+                if !state.files.contains_key(name) {
+                    if let Some(snapshot) = state.shadow.get(name).cloned() {
+                        state.files.insert(name.clone(), snapshot);
+                    }
+                }
+            }
+        }
+
         for file in state.files.values_mut() {
             if file.volatile.len() > file.stable.len() {
                 lost_bytes += (file.volatile.len() - file.stable.len()) as u64;
@@ -317,6 +378,32 @@ impl Disk for SimDisk {
                 return Err(fault_to_error(fault));
             }
         }
+        if state.strict_namespace {
+            let target = if path.is_root() { "" } else { path.as_str() };
+            let target = target.to_owned();
+            // Present entries in this directory become durable.
+            let present: Vec<String> = state
+                .files
+                .keys()
+                .filter(|name| parent_dir(name) == target)
+                .cloned()
+                .collect();
+            for name in present {
+                state.durable_names.insert(name);
+            }
+            // Removals in this directory become durable: forget the shadow and
+            // drop the name from the durable set.
+            let removed: Vec<String> = state
+                .durable_names
+                .iter()
+                .filter(|name| parent_dir(name) == target && !state.files.contains_key(*name))
+                .cloned()
+                .collect();
+            for name in removed {
+                state.durable_names.remove(&name);
+                state.shadow.remove(&name);
+            }
+        }
         Self::record_event(&mut state, "fsync_dir", path, None, None, None, "ok");
         Ok(())
     }
@@ -339,11 +426,23 @@ impl Disk for SimDisk {
     async fn rename(&self, from: &RelativePath, to: &RelativePath) -> Result<()> {
         let mut state = self.state.lock().expect("sim disk mutex poisoned");
         let _ = state.take_fault(); // advance counter; rename is not fault-injected
-        let file = state
-            .files
-            .remove(&Self::key(from))
-            .ok_or(KayaError::NotFound)?;
-        state.files.insert(Self::key(to), file);
+        let from_key = Self::key(from);
+        let to_key = Self::key(to);
+        let file = state.files.remove(&from_key).ok_or(KayaError::NotFound)?;
+        if state.strict_namespace {
+            // Removal of `from` is volatile until its directory is synced: keep
+            // it in `durable_names` and stash a durable snapshot so a crash can
+            // restore it. The new `to` entry is not durable until fsync_dir.
+            if state.durable_names.contains(&from_key) {
+                let snapshot = SimFile {
+                    volatile: file.stable.clone(),
+                    stable: file.stable.clone(),
+                };
+                state.shadow.insert(from_key.clone(), snapshot);
+            }
+            state.durable_names.remove(&to_key);
+        }
+        state.files.insert(to_key, file);
         Self::record_event(&mut state, "rename", from, None, None, None, to.as_str());
         Ok(())
     }
@@ -351,7 +450,21 @@ impl Disk for SimDisk {
     async fn remove_file(&self, path: &RelativePath) -> Result<()> {
         let mut state = self.state.lock().expect("sim disk mutex poisoned");
         let _ = state.take_fault(); // advance counter; remove_file is not fault-injected
-        state.files.remove(&Self::key(path));
+        let key = Self::key(path);
+        let removed = state.files.remove(&key);
+        if state.strict_namespace {
+            // Deletion is volatile until fsync_dir: retain `key` in
+            // `durable_names` and stash the durable snapshot for crash restore.
+            if state.durable_names.contains(&key) {
+                if let Some(file) = &removed {
+                    let snapshot = SimFile {
+                        volatile: file.stable.clone(),
+                        stable: file.stable.clone(),
+                    };
+                    state.shadow.insert(key.clone(), snapshot);
+                }
+            }
+        }
         Self::record_event(&mut state, "remove_file", path, None, None, None, "ok");
         Ok(())
     }
@@ -506,6 +619,89 @@ mod tests {
         block_on(disk.append(&path, b"data")).unwrap();
         let result = block_on(disk.fsync_file(&path));
         assert_eq!(result, Err(KayaError::FsyncFailed));
+    }
+
+    #[test]
+    fn strict_namespace_creation_lost_without_dir_sync() {
+        let disk = SimDisk::new().with_strict_namespace();
+        let path = RelativePath::new("sst/000001.sst").unwrap();
+
+        block_on(disk.append(&path, b"payload")).unwrap();
+        block_on(disk.fsync_file(&path)).unwrap();
+        // No fsync_dir on "sst": the directory entry is not durable.
+        disk.crash();
+
+        // The file's content was fsync'd, but its directory entry was never
+        // persisted, so it must be gone after the crash.
+        assert_eq!(block_on(disk.file_len(&path)), Err(KayaError::NotFound));
+    }
+
+    #[test]
+    fn strict_namespace_creation_survives_with_dir_sync() {
+        let disk = SimDisk::new().with_strict_namespace();
+        let path = RelativePath::new("sst/000001.sst").unwrap();
+        let dir = RelativePath::new("sst").unwrap();
+
+        block_on(disk.append(&path, b"payload")).unwrap();
+        block_on(disk.fsync_file(&path)).unwrap();
+        block_on(disk.fsync_dir(&dir)).unwrap();
+        disk.crash();
+
+        assert_eq!(block_on(disk.file_len(&path)).unwrap(), 7);
+        let mut buf = [0u8; 7];
+        block_on(disk.read_at(&path, 0, &mut buf)).unwrap();
+        assert_eq!(&buf, b"payload");
+    }
+
+    #[test]
+    fn strict_namespace_atomic_publish_survives() {
+        // create tmp -> fsync file -> rename -> fsync dir is the canonical
+        // durable-publish pattern; the published file must survive a crash and
+        // the tmp name must be gone.
+        let disk = SimDisk::new().with_strict_namespace();
+        let tmp = RelativePath::new("sst/000002.sst.tmp").unwrap();
+        let final_path = RelativePath::new("sst/000002.sst").unwrap();
+        let dir = RelativePath::new("sst").unwrap();
+
+        block_on(disk.write_at(&tmp, 0, b"published")).unwrap();
+        block_on(disk.fsync_file(&tmp)).unwrap();
+        block_on(disk.rename(&tmp, &final_path)).unwrap();
+        block_on(disk.fsync_dir(&dir)).unwrap();
+        disk.crash();
+
+        assert_eq!(block_on(disk.file_len(&final_path)).unwrap(), 9);
+        assert_eq!(block_on(disk.file_len(&tmp)), Err(KayaError::NotFound));
+    }
+
+    #[test]
+    fn strict_namespace_rename_reverts_without_dir_sync() {
+        // A durably-created file renamed without a following fsync_dir reverts
+        // to its original name on crash (the publish is lost).
+        let disk = SimDisk::new().with_strict_namespace();
+        let from = RelativePath::new("sst/aaa.sst").unwrap();
+        let to = RelativePath::new("sst/bbb.sst").unwrap();
+        let dir = RelativePath::new("sst").unwrap();
+
+        block_on(disk.write_at(&from, 0, b"data")).unwrap();
+        block_on(disk.fsync_file(&from)).unwrap();
+        block_on(disk.fsync_dir(&dir)).unwrap(); // `from` now durable
+        block_on(disk.rename(&from, &to)).unwrap();
+        // No fsync_dir after rename.
+        disk.crash();
+
+        assert_eq!(block_on(disk.file_len(&from)).unwrap(), 4);
+        assert_eq!(block_on(disk.file_len(&to)), Err(KayaError::NotFound));
+    }
+
+    #[test]
+    fn non_strict_namespace_keeps_content_only_model() {
+        // Default disk: a fsync'd file survives a crash even without fsync_dir.
+        let disk = SimDisk::new();
+        let path = RelativePath::new("sst/x.sst").unwrap();
+        block_on(disk.append(&path, b"hi")).unwrap();
+        block_on(disk.fsync_file(&path)).unwrap();
+        disk.crash();
+        assert_eq!(block_on(disk.file_len(&path)).unwrap(), 2);
     }
 
     #[test]

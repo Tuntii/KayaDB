@@ -22,6 +22,12 @@ pub struct SimNetworkConfig {
     pub drop_percent: u32,
     /// Percentage of messages to duplicate (0–100).
     pub dup_percent: u32,
+    /// Delivery delay in logical ticks applied to every message. `0` keeps the
+    /// same-tick request→response delivery the cluster relied on historically.
+    pub latency_ticks: u32,
+    /// Percentage of drained batches to deterministically reorder (0–100). `0`
+    /// preserves per-destination FIFO order.
+    pub reorder_percent: u32,
 }
 
 impl Default for SimNetworkConfig {
@@ -29,6 +35,8 @@ impl Default for SimNetworkConfig {
         Self {
             drop_percent: 10,
             dup_percent: 5,
+            latency_ticks: 0,
+            reorder_percent: 0,
         }
     }
 }
@@ -40,10 +48,13 @@ impl Default for SimNetworkConfig {
 pub struct SimNetwork {
     config: SimNetworkConfig,
     rng: SimRng,
-    /// In-flight messages, keyed by destination node.
-    queues: HashMap<NodeId, VecDeque<Envelope>>,
+    /// In-flight messages, keyed by destination node. Each entry carries the
+    /// logical tick at which it becomes deliverable (`deliver_at`).
+    queues: HashMap<NodeId, VecDeque<(u64, Envelope)>>,
     /// Links on which all messages are silently dropped (unidirectional).
     partitions: HashSet<(NodeId, NodeId)>,
+    /// Current logical tick, used to enforce `latency_ticks` delivery delay.
+    current_tick: u64,
 }
 
 impl SimNetwork {
@@ -54,7 +65,15 @@ impl SimNetwork {
             rng: SimRng::new(seed.wrapping_add(0x9e37_79b9_7f4a_7c15)),
             queues: HashMap::new(),
             partitions: HashSet::new(),
+            current_tick: 0,
         }
+    }
+
+    /// Advance the network's logical clock by one tick. Held (latency-delayed)
+    /// messages become deliverable once `current_tick` reaches their
+    /// `deliver_at`. Called once per [`ClusterSim`] step.
+    pub fn advance_tick(&mut self) {
+        self.current_tick += 1;
     }
 
     /// Inject a batch of outgoing envelopes into the network.
@@ -62,6 +81,7 @@ impl SimNetwork {
     /// Partitioned links and random drops are applied here; surviving messages
     /// are queued for the destination and can be retrieved via [`drain`].
     pub fn inject(&mut self, envelopes: Vec<Envelope>) {
+        let deliver_at = self.current_tick + self.config.latency_ticks as u64;
         for env in envelopes {
             // Partition check.
             if self.partitions.contains(&(env.from, env.to)) {
@@ -74,22 +94,50 @@ impl SimNetwork {
             // Random duplicate.
             let dup = self.rng.usize_below(100) < self.config.dup_percent as usize;
             let queue = self.queues.entry(env.to).or_default();
-            queue.push_back(env.clone());
+            queue.push_back((deliver_at, env.clone()));
             if dup {
-                queue.push_back(env);
+                queue.push_back((deliver_at, env));
             }
         }
     }
 
-    /// Drain all queued messages and return them.
+    /// Drain all messages whose delivery tick has arrived and return them.
+    ///
+    /// Messages still within their `latency_ticks` delay are retained. When
+    /// `reorder_percent > 0` a deterministic fraction of the returned batch is
+    /// shuffled to model out-of-order delivery.
     pub fn drain(&mut self) -> Vec<Envelope> {
+        let now = self.current_tick;
         let mut out = Vec::new();
         for queue in self.queues.values_mut() {
-            while let Some(env) = queue.pop_front() {
-                out.push(env);
+            let mut retained = VecDeque::with_capacity(queue.len());
+            while let Some((deliver_at, env)) = queue.pop_front() {
+                if deliver_at <= now {
+                    out.push(env);
+                } else {
+                    retained.push_back((deliver_at, env));
+                }
             }
+            *queue = retained;
+        }
+        if self.config.reorder_percent > 0 {
+            self.reorder(&mut out);
         }
         out
+    }
+
+    /// Deterministically reorder a fraction of the batch by swapping selected
+    /// elements. Fully reproducible via the network RNG.
+    fn reorder(&mut self, batch: &mut [Envelope]) {
+        if batch.len() < 2 {
+            return;
+        }
+        for i in 0..batch.len() {
+            if self.rng.usize_below(100) < self.config.reorder_percent as usize {
+                let j = self.rng.usize_below(batch.len());
+                batch.swap(i, j);
+            }
+        }
     }
 
     /// Partition the link from `a` to `b` (one-directional).
@@ -115,6 +163,24 @@ impl SimNetwork {
         for &peer in peers {
             self.heal(node, peer);
             self.heal(peer, node);
+        }
+    }
+
+    /// Asymmetrically isolate `node`: drop only its *outgoing* messages to
+    /// `peers`, while incoming messages still arrive. Models a one-way link
+    /// failure, where a node believes it can reach peers but its replies (or
+    /// heartbeats) are lost — a classic split-brain trigger.
+    pub fn isolate_outgoing(&mut self, node: NodeId, peers: &[NodeId]) {
+        for &peer in peers {
+            self.partition(node, peer);
+        }
+    }
+
+    /// Asymmetrically isolate `node`: drop only its *incoming* messages from
+    /// `peers`, while its outgoing messages still arrive.
+    pub fn isolate_incoming(&mut self, node: NodeId, peers: &[NodeId]) {
+        for &peer in peers {
+            self.partition(peer, node);
         }
     }
 }
@@ -211,6 +277,7 @@ impl ClusterSim {
     /// Execute one logical tick across all nodes.
     pub fn step(&mut self) {
         self.ticks += 1;
+        self.network.advance_tick();
 
         let ids: Vec<NodeId> = self.all_ids.clone();
         for &id in &ids {
@@ -734,6 +801,8 @@ mod tests {
         SimNetworkConfig {
             drop_percent: 0,
             dup_percent: 0,
+            latency_ticks: 0,
+            reorder_percent: 0,
         }
     }
 
@@ -778,12 +847,77 @@ mod tests {
             SimNetworkConfig {
                 drop_percent: 20,
                 dup_percent: 10,
+                latency_ticks: 0,
+                reorder_percent: 0,
             },
         );
         sim.run_ticks(300);
         assert!(
             sim.violations().is_empty(),
             "invariant violations: {:?}",
+            sim.violations()
+        );
+    }
+
+    /// A leader is still elected and safety holds when every message is delayed
+    /// by a fixed number of logical ticks.
+    #[test]
+    fn election_safe_under_network_latency() {
+        let mut sim = ClusterSim::new(
+            3,
+            31,
+            SimNetworkConfig {
+                drop_percent: 0,
+                dup_percent: 0,
+                latency_ticks: 2,
+                reorder_percent: 0,
+            },
+        );
+        sim.run_ticks(120);
+        assert!(sim.current_leader().is_some(), "no leader under latency");
+        assert!(
+            sim.violations().is_empty(),
+            "invariant violations under latency: {:?}",
+            sim.violations()
+        );
+    }
+
+    /// RAFT-INV-001 holds when delivery order is scrambled and messages are
+    /// dropped, duplicated and delayed together.
+    #[test]
+    fn election_safe_under_reorder_and_latency() {
+        let mut sim = ClusterSim::new(
+            5,
+            9001,
+            SimNetworkConfig {
+                drop_percent: 15,
+                dup_percent: 10,
+                latency_ticks: 1,
+                reorder_percent: 50,
+            },
+        );
+        sim.run_ticks(400);
+        assert!(
+            sim.violations().is_empty(),
+            "invariant violations under reorder+latency: {:?}",
+            sim.violations()
+        );
+    }
+
+    /// A one-way (asymmetric) partition of the leader's outgoing links forces a
+    /// re-election without ever producing two leaders in one term.
+    #[test]
+    fn asymmetric_partition_preserves_election_safety() {
+        let mut sim = ClusterSim::new(3, 12345, no_fault_config());
+        sim.run_ticks(40);
+        let leader = sim.current_leader().expect("leader before partition");
+        let peers: Vec<NodeId> = (1..=3).map(NodeId).filter(|&n| n != leader).collect();
+        // Leader can still hear peers but its own messages never arrive.
+        sim.network_mut().isolate_outgoing(leader, &peers);
+        sim.run_ticks(200);
+        assert!(
+            sim.violations().is_empty(),
+            "asymmetric partition caused a safety violation: {:?}",
             sim.violations()
         );
     }

@@ -355,7 +355,7 @@ M15 closes the data-path authZ and structured audit gaps from M13. M13 delivered
 | Data at rest encryption | Accepted risk | LUKS/DM-Crypt, BitLocker, or encrypted block volumes on the data directory | Section 4 above; no engine-level encryption |
 | Multi-tenant isolation | Accepted risk | One cluster per tenant; network segmentation; separate credentials per deployment | No tenant IDs in engine or protocol |
 | Client cert enforcement on every connection | Accepted risk (partial impl.) | Enable native TLS with CA (`require_client_cert: true` when `--tls-ca` set); or ghostunnel `--allow-cn` | `crates/kaya-server/src/main.rs`, `crates/kaya-net/src/transport.rs` |
-| Compliance-grade audit export to SIEM | Accepted risk | Forward `audit.jsonl` + node logs to your SIEM; ghostunnel access logs for mTLS; no built-in remote sink | Local JSONL only; no syslog/OTLP exporter |
+| Compliance-grade audit export to SIEM | ✅ Optional built-in UDP syslog sink | Set `--audit-syslog <host:port>` / `KAYA_AUDIT_SYSLOG` (RFC 5424 over UDP, requires `--audit-log`); for TCP/TLS transport or delivery guarantees, front with a local syslog agent (rsyslog/vector) | `SyslogSink` in `crates/kaya-server/src/audit.rs`; UDP best-effort, no on-wire encryption |
 | Hardened remote admin API | Accepted risk | Restrict `kayactl` to bastion/VPN; require `--operator-token` for membership and `--client-token` for data ops | `kayactl` over client protocol only |
 
 **No known correctness gaps** are listed as accepted risk. Remaining items are deployment hardening, not storage or consensus defects.

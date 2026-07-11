@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.47] — 2026-07-11
+
+Roadmap parallel-track close-out: durable directory-entry semantics (Track B), richer deterministic chaos faults (Track C), Rust client retry/pooling/observability + a new Python client (Track D), latency histograms + error guidance (Tracks F/G), SLO envelope, incremental backup, and SIEM syslog export (Track E).
+
+### Added (Track B — directory durability)
+- Real Unix directory fsync in `FileDisk` and `IoUringDisk` (`#[cfg(unix)]` opens the directory and `sync_all`s its descriptor); previously `fsync_dir` was a no-op on every platform, so an acknowledged rename/publish could be lost on crash even after the file's own data was fsync'd. Windows remains a documented best-effort no-op
+- WAL segment directory-entry durability: a rotated (or first) segment is now `fsync_dir`'d on the `wal` directory right after its first append creates the file, instead of prematurely in `rotate()` before the file existed (`active_dir_synced` tracking in `kaya-wal`)
+- `SimDisk::with_strict_namespace()` models directory-entry durability: file creation, rename and removal are volatile until the containing directory is `fsync_dir`'d, and `crash()` reverts namespace mutations that were never made durable — so a missing `fsync_dir` after an atomic publish is now detectable (6 new tests; default disk keeps the content-only crash model)
+
+### Added (Track D — Python client)
+- New `clients/kaya-py/`: a pure-standard-library (zero-dependency) synchronous Python client — `put`/`get`/`delete`/`scan`/`health`/`stats`/`hello`, connection reuse with reconnect, leader redirect on `NOT_LEADER`, optional client token (`CLIENT\x00` framing), per-request timeout. Byte-compatible with the Rust/Go clients; tested with codec byte-layout checks and an in-process mock-server loopback (including redirect)
+
+### Fixed (docs)
+- `docs/clients/client-wire-protocol.md` §5: corrected the PUT example frame length (19 = 1 opcode + 18 payload, not 17) and showed the bytes in actual little-endian order; the previous example understated the payload size and used big-endian display
+
+### Added (Track E — operations)
+- `docs/slo-envelope.md`: explicit operating envelope — enforced hard input limits (grounded in `kaya-core` constants), durability/consistency SLOs, latency/throughput guidance tied to the new histograms/Prometheus metrics, and a conservative error-budget posture
+- `kayactl backup --data <src> --out <dest> [--incremental]`: filesystem backup of a node's durable state; incremental mode skips immutable files (SSTables, sealed WAL segments) already present with the same size, copying only new/changed files. Atomic per-file (temp + rename); `--json` summary. Documented in `docs/runbooks/backup-restore.md`
+
+### Added (Track E — SIEM audit export)
+- Optional remote audit forwarding: `--audit-syslog <host:port>` / `KAYA_AUDIT_SYSLOG` streams each audit record to a SIEM collector as an RFC 5424 syslog datagram over UDP (best-effort, never blocks the data path). `docs/security.md` §7 SIEM row updated from accepted-risk to implemented
+
+### Added (Track F — latency observability)
+- `LatencyHistogram` in `kaya-core`: dependency-free fixed-bucket (Prometheus-compatible `le` bounds) histogram with `observe`, `percentile_us` (p50/p99), `mean_us`, `merge`, and cumulative-bucket export
+- Read-path latency is now measured: `EngineStats.get_total_us/get_max_us` and `scan_total_us/scan_max_us` (`get()`/`scan_prefix()` were previously unmeasured)
+- `Engine::histograms()` exposes per-op p50/p99 distributions for get, scan, WAL fsync, flush, and compaction
+- Prometheus exporter expanded beyond WAL fsync: `kaya_flush_*`, `kaya_compaction_*`, `kaya_get_*`, `kaya_scan_*` latency metrics and `kaya_engine_ops_total{op=…}` counters
+
+### Added (Track G — error DX)
+- `KayaError::guidance()` returns actionable operator advice for recoverable errors (corruption → `kayactl recover --dry-run`, lock conflict, disk full, fsync failure, version mismatch); `kayactl` prints it as a `HINT:` line after the error
+- The data-directory lock failure now returns the structural `KayaError::LockConflict` (exit code 6) instead of a stringly-typed `Internal`, so the guidance is uniform
+
+### Added (Track D — Rust client high-level features)
+- `RetryPolicy` (`kaya-client`): configurable `max_attempts`, exponential backoff with optional full jitter, `max_backoff` cap, and a per-attempt `request_timeout` — replacing the previous fixed 60 ms sleep and unbounded read. Retry budget is now separate from the leader-redirect budget (`RetryPolicy::none()` restores single-shot behavior). Set via `KayaClient::set_retry_policy`
+- Connection reuse (keep-alive) for the plain-TCP path via `kaya_net::request_on_stream`: the client holds one connection and reconnects only on error or leader redirect, instead of a fresh `TcpStream::connect` per operation (TLS still connects per op)
+- `ClientObserver` hook + `OpObservation` / `OpOutcome`: per-operation metrics/tracing callback (opcode, attempts, redirects, outcome, end-to-end latency) with a blanket impl for any `Fn(&OpObservation)`; installed via `KayaClient::set_observer`. No dependency on any specific metrics framework
+
+### Added (Track C — deterministic chaos)
+- `SimNetworkConfig.latency_ticks`: fixed per-message delivery delay in logical ticks (tick-accurate hold-back via `SimNetwork::advance_tick`); `0` preserves historical same-tick delivery
+- `SimNetworkConfig.reorder_percent`: deterministic out-of-order delivery within a drained batch (seeded, reproducible); `0` preserves per-destination FIFO
+- Asymmetric partition helpers `SimNetwork::isolate_outgoing` / `isolate_incoming` for one-way link failures (split-brain triggers)
+- New election-safety tests under network latency, reorder+latency+drop+dup, and asymmetric partition
+
 Technical-debt hardening pass: scan caps, graceful shutdown, connection limits, format fixtures, decoder tests, disk-append contract.
 
 ### Added (hardening)

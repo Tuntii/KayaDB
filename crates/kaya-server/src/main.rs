@@ -137,6 +137,16 @@ fn run() -> Result<(), String> {
         )
     };
 
+    // --audit-syslog <host:port> / KAYA_AUDIT_SYSLOG — forward audit records to
+    // a remote SIEM collector over UDP (RFC 5424). Requires --audit-log.
+    let audit_syslog: Option<SocketAddr> = match take_value(&mut args, "--audit-syslog")
+        .or_else(|| std::env::var("KAYA_AUDIT_SYSLOG").ok())
+        .filter(|v| !v.trim().is_empty())
+    {
+        Some(v) => Some(v.parse().map_err(|e| format!("--audit-syslog: {e}"))?),
+        None => None,
+    };
+
     validate_bind_addr(raft_addr, allow_public_bind)?;
     validate_bind_addr(client_addr, allow_public_bind)?;
     if let Some(addr) = metrics_addr {
@@ -205,6 +215,7 @@ fn run() -> Result<(), String> {
     let audit_log = audit_log_flag
         .unwrap_or_else(|| config.operator_token.is_some() || config.client_token.is_some());
     config = config.with_audit_log(audit_log);
+    config = config.with_audit_syslog(audit_syslog);
 
     config = match metrics_addr {
         Some(addr) => config.with_metrics_addr(addr),

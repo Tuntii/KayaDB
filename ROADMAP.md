@@ -1,7 +1,7 @@
 # KayaDB Development Roadmap
 
 **Status:** Living roadmap  
-**Last updated:** 2026-07-03
+**Last updated:** 2026-07-11 (v0.1.47 — parallel-track close-out: Tracks B/C/D/E/F/G advanced)
 
 > **"Geniş ve yaşayan yol haritası"** — Bu belge hem tarihi başarıları arşivler, hem şu anki odak noktalarını gösterir, hem de uzun vadeli vizyonu (birden fazla paralel track ile) detaylandırır. Tasarım-öncelikli ve correctness-öncelikli felsefe korunur.
 
@@ -654,14 +654,14 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 - Gelişmiş compaction stratejileri (leveled + tiered hibrit) — ✅ `CompactionPolicy` wired (M14)
 - Block cache, bloom filter, compression seçenekleri (SSTable v2/v3) — ✅ bloom (M14); block cache + LZ4 compression (v0.1.45 track)
 - WAL group-commit batching — ✅ `WalBatchWriter` (M14)
-- Daha iyi fsync_dir semantiği + directory sync optimizasyonları
+- Daha iyi fsync_dir semantiği + directory sync optimizasyonları — ✅ v0.1.47 (real Unix `fsync_dir` in `FileDisk`/`IoUringDisk`, WAL segment dir-sync timing fix, `SimDisk::with_strict_namespace()` crash-model)
 
 ### Track C: Distributed Correctness & Chaos
 
 - Tam Clojure Jepsen suite (gerçek cluster + dynamic membership + snapshots altında) — out-of-band only; Rust-native T1–T7 full gate ✅ M14
 - Rust-native Jepsen CI (smoke + nightly T1–T7) — ✅ M14
 - Chaos matrix CI (DiskFull, NetworkPartition, ClockSkew) — ✅ M14
-- Daha zengin nemesis seti + clock skew, disk latency injection — 🟡 partial (clock skew in chaos matrix)
+- Daha zengin nemesis seti + clock skew, disk latency injection — 🟡 v0.1.47 (deterministic sim: `SimNetworkConfig.latency_ticks` + `reorder_percent`, asymmetric `isolate_outgoing`/`isolate_incoming`; live-cluster wall-clock skew/disk-latency still needs OS tooling)
 - TLA+ modellerinin genişletilmesi (manifest + compaction + Raft bir arada)
 - Linearizability checker'in production'a yakın versiyonu (WGL + daha iyi raporlama)
 
@@ -670,24 +670,24 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 - Go client gerçek implementasyon + conformance — ✅ M15 (`clients/kaya-go/`)
 - Protocol conformance vectors + Rust runner — ✅ M15 (`docs/clients/conformance/vectors.json`)
 - HELLO protocol version handshake (opcode 0) — ✅ M15
-- Python, TypeScript/JavaScript, Zig native client'lar — ⬜ planned
-- Yüksek seviye özellikler: retry policy'leri, observability hook'lar, connection pooling — 🟡 partial (Rust + Go)
+- Python, TypeScript/JavaScript, Zig native client'lar — 🟡 Python ✅ v0.1.47 (`clients/kaya-py/`, zero-dep); TS/JS, Zig ⬜ planned
+- Yüksek seviye özellikler: retry policy'leri, observability hook'lar, connection pooling — 🟡 Rust ✅ v0.1.47 (`RetryPolicy` backoff+jitter+timeout, keep-alive connection reuse, `ClientObserver` hook); Go keep-alive+timeout only
 
 ### Track E: Operations, Security & Production
 
-- Backup/restore (snapshot + incremental) — 🟡 runbook exists; incremental TBD
+- Backup/restore (snapshot + incremental) — ✅ v0.1.47 (`kayactl backup --data --out [--incremental]`, atomic per-file, skips unchanged immutable files) + runbook
 - TLS + auth her yerde (Raft, client, admin RPC) — ✅ M13 TLS + M13 operator token + M15 client token
 - Day-2 operasyon dokümanları + kayactl komutları — ✅ M13 runbooks + M15 `kayactl watch`
 - Deployment (systemd, Docker, Kubernetes örnekleri) — ✅ M15 `deploy/docker/` + `deploy/k8s/`
 - Monitoring stack (Prometheus + eBPF + custom exporter) — ✅ M15 Prometheus `/metrics`; 🟡 eBPF stub (`kaya-ebpf`)
-- Structured audit logging — ✅ M15 local JSONL; SIEM export remains operator responsibility
+- Structured audit logging — ✅ M15 local JSONL; ✅ v0.1.47 optional SIEM export via `--audit-syslog` (RFC 5424 UDP)
 - Graceful shutdown (SIGTERM/Ctrl-C → clean cleanup path) + client connection cap (`--max-client-connections`, default 1024) — ✅ 2026-07-08
 - Scan hard caps (`max_scan_results` / `max_scan_bytes`) against unbounded-scan memory abuse — ✅ 2026-07-08
-- SLO / error budget / limit envelope tanımları — ⬜ planned
+- SLO / error budget / limit envelope tanımları — ✅ v0.1.47 (`docs/slo-envelope.md`: enforced limits, durability/consistency SLOs, latency guidance, error-budget posture)
 
 ### Track F: Performance & Benchmarking
 
-- Latency histogram'ları her yerde (WAL, read path, compaction)
+- Latency histogram'ları her yerde (WAL, read path, compaction) — ✅ v0.1.47 (`kaya_core::LatencyHistogram` p50/p99; `Engine::histograms()` for get/scan/fsync/flush/compaction; read-path now measured; Prometheus latency metrics expanded)
 - CI regression gate'leri + BENCHMARKS.md otomasyonu
 - Linux perf + eBPF ile düzenli profiling
 - Large value, high concurrency, mixed workload benchmark'ları
@@ -696,7 +696,7 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 
 - `kayactl` interactive / watch modları — ✅ M15 `kayactl watch status`
 - Trace + cluster görselleştirme (dashboard)
-- Daha iyi hata mesajları ve recovery rehberliği
+- Daha iyi hata mesajları ve recovery rehberliği — ✅ v0.1.47 (`KayaError::guidance()` actionable hints; structural `LockConflict`; `kayactl` prints `HINT:` lines)
 - Katkı deneyimini iyileştirme (eBPF "good first issue" etiketleri vs.)
 
 ### Track H: Research & Future Experiments

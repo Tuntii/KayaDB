@@ -90,6 +90,9 @@ pub struct ClusterConfig {
     pub network_partitioned: Option<Arc<AtomicBool>>,
     /// When true, append structured JSONL audit events to `{data_dir}/audit.jsonl`.
     pub audit_log: bool,
+    /// When `Some`, also forward each audit record to this syslog collector over
+    /// UDP (RFC 5424) for SIEM ingestion.
+    pub audit_syslog: Option<SocketAddr>,
     /// When `Some`, expose Prometheus metrics at this listen address (`GET /metrics`).
     pub metrics_addr: Option<SocketAddr>,
     /// Maximum concurrent client connections. Further connections are not
@@ -141,6 +144,7 @@ impl ClusterConfig {
             tls: None,
             network_partitioned: None,
             audit_log: false,
+            audit_syslog: None,
             metrics_addr: None,
             max_client_connections: DEFAULT_MAX_CLIENT_CONNECTIONS,
             #[cfg(feature = "ebpf")]
@@ -193,6 +197,12 @@ impl ClusterConfig {
     /// Enable or disable structured audit logging to `{data_dir}/audit.jsonl`.
     pub fn with_audit_log(mut self, enabled: bool) -> Self {
         self.audit_log = enabled;
+        self
+    }
+
+    /// Forward audit records to a remote syslog collector (UDP, RFC 5424).
+    pub fn with_audit_syslog(mut self, addr: Option<SocketAddr>) -> Self {
+        self.audit_syslog = addr;
         self
     }
 
@@ -503,12 +513,22 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     let client_token = config.client_token.clone();
 
     let shared_audit = if config.audit_log {
-        match AuditLog::open(&config.data_dir, config.node_id) {
+        let opened = AuditLog::open(&config.data_dir, config.node_id).and_then(|log| match config
+            .audit_syslog
+        {
+            Some(addr) => log.with_syslog(addr),
+            None => Ok(log),
+        });
+        match opened {
             Ok(log) => {
                 eprintln!(
-                    "[node {}] audit log enabled at {}",
+                    "[node {}] audit log enabled at {}{}",
                     config.node_id.0,
-                    config.data_dir.join("audit.jsonl").display()
+                    config.data_dir.join("audit.jsonl").display(),
+                    match config.audit_syslog {
+                        Some(addr) => format!(" (syslog → {addr})"),
+                        None => String::new(),
+                    }
                 );
                 Some(Arc::new(log))
             }

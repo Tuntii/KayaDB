@@ -18,7 +18,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.46"
+version = "0.1.47"
 description = "Correctness-first, inspectable, embeddable storage engine with deterministic fault injection, LSM-tree storage, and Raft consensus"
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -31,16 +31,16 @@ keywords = ["storage-engine", "lsm-tree", "raft", "database", "correctness"]
 categories = ["database-implementations", "data-structures"]
 
 [workspace.dependencies]
-kaya-core = { path = "crates/kaya-core", version = "0.1.46" }
+kaya-core = { path = "crates/kaya-core", version = "0.1.47" }
 thiserror = "1"
-kaya-io = { path = "crates/kaya-io", version = "0.1.46" }
-kaya-wal = { path = "crates/kaya-wal", version = "0.1.46" }
-kaya-lsm = { path = "crates/kaya-lsm", version = "0.1.46" }
-kaya-engine = { path = "crates/kaya-engine", version = "0.1.46" }
-kaya-raft = { path = "crates/kaya-raft", version = "0.1.46" }
-kaya-sim = { path = "crates/kaya-sim", version = "0.1.46" }
-kaya-net = { path = "crates/kaya-net", version = "0.1.46" }
-kaya-client = { path = "crates/kaya-client", version = "0.1.46" }
+kaya-io = { path = "crates/kaya-io", version = "0.1.47" }
+kaya-wal = { path = "crates/kaya-wal", version = "0.1.47" }
+kaya-lsm = { path = "crates/kaya-lsm", version = "0.1.47" }
+kaya-engine = { path = "crates/kaya-engine", version = "0.1.47" }
+kaya-raft = { path = "crates/kaya-raft", version = "0.1.47" }
+kaya-sim = { path = "crates/kaya-sim", version = "0.1.47" }
+kaya-net = { path = "crates/kaya-net", version = "0.1.47" }
+kaya-client = { path = "crates/kaya-client", version = "0.1.47" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal"] }
 
 

@@ -37,6 +37,7 @@ impl<D: Disk> Engine<D> {
             if us > self.stats.wal_fsync_max_us {
                 self.stats.wal_fsync_max_us = us;
             }
+            self.histograms.wal_fsync_us.observe(us);
         }
         self.stats.last_sequence = append.sequence.get();
         self.maybe_auto_flush().await?;
@@ -64,6 +65,7 @@ impl<D: Disk> Engine<D> {
             if us > self.stats.wal_fsync_max_us {
                 self.stats.wal_fsync_max_us = us;
             }
+            self.histograms.wal_fsync_us.observe(us);
         }
         self.stats.last_sequence = append.sequence.get();
         self.maybe_auto_flush().await?;
@@ -76,7 +78,16 @@ impl<D: Disk> Engine<D> {
 
     pub async fn get(&mut self, key: &[u8], opts: ReadOptions) -> Result<Option<Bytes>> {
         let _ = opts;
+        let start = std::time::Instant::now();
         self.stats.get_count += 1;
+        let result = self.get_inner(key);
+        let us = start.elapsed().as_micros() as u64;
+        self.stats.record_get_latency(us);
+        self.histograms.get_us.observe(us);
+        result
+    }
+
+    fn get_inner(&mut self, key: &[u8]) -> Result<Option<Bytes>> {
         match self.memtable.get(key) {
             Some(ValueRecordRef::Put { value, .. }) => return Ok(Some(value.to_vec())),
             Some(ValueRecordRef::Delete { .. }) => return Ok(None),
@@ -93,6 +104,15 @@ impl<D: Disk> Engine<D> {
     }
 
     pub async fn scan_prefix(&mut self, prefix: &[u8], opts: ScanOptions) -> Result<Vec<KeyValue>> {
+        let start = std::time::Instant::now();
+        let result = self.scan_prefix_inner(prefix, opts);
+        let us = start.elapsed().as_micros() as u64;
+        self.stats.record_scan_latency(us);
+        self.histograms.scan_us.observe(us);
+        result
+    }
+
+    fn scan_prefix_inner(&mut self, prefix: &[u8], opts: ScanOptions) -> Result<Vec<KeyValue>> {
         self.validate_scan_prefix(prefix)?;
         self.stats.scan_count += 1;
         let max_results = self.config.limits.max_scan_results;

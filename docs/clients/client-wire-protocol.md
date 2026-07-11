@@ -170,13 +170,13 @@ Payload contains the **current leader's client address** as a raw UTF-8 string (
 
 **PUT "hello" → "world" (opcode 1)**
 
-Request (simplified, frame_len shown):
+Request (little-endian bytes as sent on the wire):
 
 ```
-Frame len (4) : 00 00 00 11   (17 = 1 opcode + 16 payload)
+Frame len (4) : 13 00 00 00   (19 = 1 opcode + 18 payload)
 Opcode        : 01
-key_len       : 00 00 00 05
-value_len     : 00 00 00 05
+key_len       : 05 00 00 00
+value_len     : 05 00 00 00
 key           : 68 65 6c 6c 6f
 value         : 77 6f 72 6c 64
 ```

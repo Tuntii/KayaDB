@@ -2,17 +2,26 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, UdpSocket};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use kaya_raft::NodeId;
 
-/// Append-only audit sink at `{data_dir}/audit.jsonl`.
+/// Optional remote SIEM sink: forwards each audit record as an RFC 5424 syslog
+/// datagram over UDP. Best-effort — send errors never block the data path.
+struct SyslogSink {
+    socket: UdpSocket,
+    target: SocketAddr,
+}
+
+/// Append-only audit sink at `{data_dir}/audit.jsonl`, with an optional remote
+/// syslog forwarder for SIEM ingestion.
 pub struct AuditLog {
     node_id: u64,
     file: Mutex<File>,
+    syslog: Option<SyslogSink>,
 }
 
 impl AuditLog {
@@ -23,7 +32,21 @@ impl AuditLog {
         Ok(Self {
             node_id: node_id.0,
             file: Mutex::new(file),
+            syslog: None,
         })
+    }
+
+    /// Also forward every record to a remote syslog server over UDP (RFC 5424).
+    /// Binds an ephemeral local UDP socket; the target is the SIEM collector.
+    pub fn with_syslog(mut self, target: SocketAddr) -> io::Result<Self> {
+        let bind = if target.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let socket = UdpSocket::bind(bind)?;
+        self.syslog = Some(SyslogSink { socket, target });
+        Ok(self)
     }
 
     /// Record one client protocol operation. Best-effort: I/O errors are ignored.
@@ -46,15 +69,8 @@ impl AuditLog {
         auth_kind: &str,
         key_len: Option<usize>,
     ) -> io::Result<()> {
-        let line = format_audit_line(
-            &utc_timestamp_ms(),
-            self.node_id,
-            peer,
-            opcode,
-            status,
-            auth_kind,
-            key_len,
-        );
+        let ts = utc_timestamp_ms();
+        let line = format_audit_line(&ts, self.node_id, peer, opcode, status, auth_kind, key_len);
         let mut guard = self
             .file
             .lock()
@@ -62,8 +78,21 @@ impl AuditLog {
         guard.write_all(line.as_bytes())?;
         // Flush for durability without blocking on fsync.
         let _ = guard.flush();
+        drop(guard);
+        // Best-effort remote forward; a failed datagram must not fail the op.
+        if let Some(sink) = &self.syslog {
+            let datagram = format_syslog_5424(&ts, self.node_id, line.trim_end());
+            let _ = sink.socket.send_to(datagram.as_bytes(), sink.target);
+        }
         Ok(())
     }
+}
+
+/// Wrap a JSON audit line in an RFC 5424 syslog frame.
+/// `<PRI>VERSION TIMESTAMP HOSTNAME APP-NAME PROCID MSGID STRUCTURED-DATA MSG`.
+/// PRI 134 = facility local0 (16) × 8 + severity info (6).
+fn format_syslog_5424(ts: &str, node_id: u64, json: &str) -> String {
+    format!("<134>1 {ts} - kayadb {node_id} audit - {json}")
 }
 
 fn format_audit_line(
@@ -168,6 +197,46 @@ mod tests {
         assert_eq!(extract_json_u64(line, "status").unwrap(), 0);
         assert_eq!(extract_json_str(line, "auth").unwrap(), "client");
         assert_eq!(extract_json_u64(line, "key_len").unwrap(), 7);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn syslog_5424_frame_has_pri_version_and_json_msg() {
+        let frame = format_syslog_5424("2026-07-11T10:00:00.000Z", 3, r#"{"opcode":1}"#);
+        assert!(frame.starts_with("<134>1 2026-07-11T10:00:00.000Z - kayadb 3 audit - "));
+        assert!(frame.ends_with(r#"{"opcode":1}"#));
+    }
+
+    #[test]
+    fn audit_forwards_records_to_syslog_over_udp() {
+        use std::net::UdpSocket;
+        use std::time::Duration;
+
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let target = receiver.local_addr().unwrap();
+
+        let dir = std::env::temp_dir().join(format!("kaya-audit-syslog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let log = AuditLog::open(&dir, NodeId(9))
+            .unwrap()
+            .with_syslog(target)
+            .unwrap();
+        let peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 5000));
+        log.record(peer, 1, 0, "client", Some(4));
+
+        let mut buf = [0u8; 1024];
+        let n = receiver.recv(&mut buf).expect("syslog datagram received");
+        let msg = std::str::from_utf8(&buf[..n]).unwrap();
+        assert!(msg.starts_with("<134>1 "), "RFC 5424 PRI+version: {msg}");
+        assert!(msg.contains("kayadb 9 audit"));
+        assert!(msg.contains(r#""opcode":1"#));
+        assert!(msg.contains(r#""auth":"client""#));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
