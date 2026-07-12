@@ -18,6 +18,16 @@ fi
 
 echo "==> clang: $(clang --version | head -1)"
 
+# GitHub-hosted runners often disable unprivileged BPF map creation. Enable it
+# for the CAP-free object-load gate (test name: bpf_object_loads_without_cap_bpf).
+if [[ -w /proc/sys/kernel/unprivileged_bpf_disabled ]] || command -v sudo >/dev/null 2>&1; then
+  sudo sysctl -w kernel.unprivileged_bpf_disabled=0 2>/dev/null \
+    || sysctl -w kernel.unprivileged_bpf_disabled=0 2>/dev/null \
+    || echo "warn: could not set unprivileged_bpf_disabled=0 (continuing)"
+fi
+# Large maps need raised memlock; ignore if not permitted.
+ulimit -l unlimited 2>/dev/null || true
+
 echo "==> cargo build -p kaya-ebpf --features kernel-probes"
 # Force rebuild of build.rs so clang is re-invoked after apt install.
 cargo clean -p kaya-ebpf -q || true
