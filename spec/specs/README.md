@@ -14,6 +14,8 @@ Bu klasör küçük ama kritik invariant'lar için executable specification arte
 |---|---|
 | `wal/WalCrash.tla` | Strict ACK + durable prefix recovery model |
 | `wal/WalCrash.cfg` | TLC model checker config |
+| `txn/TxnCommit.tla` | Single-group SI intents + atomic commit model |
+| `txn/TxnCommit.cfg` | TLC config (2 txns, 2 keys) |
 
 ---
 
