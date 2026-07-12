@@ -11,6 +11,7 @@ categories.workspace = true
 
 [dependencies]
 kaya-client.workspace = true
+kaya-core.workspace = true
 kaya-net.workspace = true
 kaya-server = { path = "../kaya-server" }
 kaya-sim.workspace = true

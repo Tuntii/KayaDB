@@ -826,6 +826,7 @@ name = "kaya-jepsen-test"
 version = "0.1.47"
 dependencies = [
  "kaya-client",
+ "kaya-core",
  "kaya-net",
  "kaya-server",
  "kaya-sim",

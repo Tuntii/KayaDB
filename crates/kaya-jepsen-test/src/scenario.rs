@@ -11,6 +11,8 @@ pub enum VerifyMode {
     Sequential,
     /// WGL concurrent linearizability checker (nightly full gate).
     Concurrent,
+    /// M17 bank transfer invariant: sum of account balances is constant.
+    BankSum,
 }
 
 /// Timed workload actions fired during a scenario (e.g. T7 snapshot forcing).
@@ -254,7 +256,35 @@ pub fn rich_nemesis_scenario() -> Scenario {
     }
 }
 
-/// All registered scenarios (smoke + rich + T1–T7).
+
+/// M17 bank workload: multi-key transfers under kill + partition; sum invariant.
+pub fn bank_scenario() -> Scenario {
+    Scenario {
+        id: "bank",
+        workload: WorkloadConfig {
+            workload_type: WorkloadType::Bank,
+            clients: 5,
+            duration: Duration::from_secs(60),
+            rate_limit: 0,
+            verify_max_ops: None,
+        },
+        hooks: vec![],
+        duration_secs: 60,
+        verify: VerifyMode::BankSum,
+        topology: Topology::ThreeNode,
+        nemesis: Some(NemesisConfig {
+            nemesis_type: NemesisType::Composite(vec![
+                NemesisType::KillNode,
+                NemesisType::Partition,
+            ]),
+            interval: Duration::from_secs(15),
+            duration: Duration::from_secs(8),
+            probability: 1.0,
+        }),
+    }
+}
+
+/// All registered scenarios (smoke + rich + T1–T7 + bank).
 pub fn scenario_registry() -> Vec<Scenario> {
     vec![
         smoke_scenario(),
@@ -266,6 +296,7 @@ pub fn scenario_registry() -> Vec<Scenario> {
         t5_scenario(),
         t6_scenario(),
         t7_scenario(),
+        bank_scenario(),
     ]
 }
 
@@ -277,13 +308,26 @@ mod tests {
     use crate::workload::{WorkloadType, WGL_VERIFY_MAX_OPS};
 
     #[test]
-    fn registry_contains_smoke_rich_and_t1_through_t7() {
+    fn registry_contains_smoke_rich_t1_through_t7_and_bank() {
         let registry = scenario_registry();
-        assert_eq!(registry.len(), 9);
+        assert_eq!(registry.len(), 10);
         assert_eq!(registry[0].id, "smoke");
         assert_eq!(registry[1].id, "rich");
         assert_eq!(registry[2].id, "t1");
         assert_eq!(registry[8].id, "t7");
+        assert_eq!(registry[9].id, "bank");
+    }
+
+    #[test]
+    fn bank_scenario_uses_bank_sum_and_kill_partition() {
+        let s = bank_scenario();
+        assert_eq!(s.workload.workload_type, WorkloadType::Bank);
+        assert_eq!(s.verify, VerifyMode::BankSum);
+        assert!(scenario_uses_partition(s.nemesis.as_ref()));
+        assert!(matches!(
+            s.nemesis.as_ref().map(|n| &n.nemesis_type),
+            Some(NemesisType::Composite(_))
+        ));
     }
 
     #[test]
