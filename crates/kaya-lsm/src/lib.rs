@@ -24,7 +24,7 @@ pub use sstable::{
     inspect_sstable_path, SstEntry, SstFooter, SstInspection, SstableBuildOptions, SstableBuilder,
     SstableReader, COMPRESSION_CODEC_LZ4, COMPRESSION_CODEC_NONE, COMPRESSION_CODEC_ZSTD,
     SST_FOOTER_LEN, SST_FOOTER_LEN_V2, SST_FOOTER_LEN_V3, SST_MAGIC, SST_VERSION, SST_VERSION_V1,
-    SST_VERSION_V2,
+    SST_VERSION_V2, SST_VERSION_V4,
 };
 
 use std::collections::BTreeMap;

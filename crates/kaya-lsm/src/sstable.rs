@@ -5,11 +5,14 @@ use std::path::Path;
 use kaya_core::{crc32c, Bytes, KayaError, Result, SequenceNumber};
 
 use crate::block_cache::{BlockCache, BlockCacheStats};
+use crate::internal_key::InternalKey;
 
 pub const SST_MAGIC: u32 = 0x4b535354; // "KSST"
 pub const SST_VERSION: u16 = 3;
 pub const SST_VERSION_V1: u16 = 1;
 pub const SST_VERSION_V2: u16 = 2;
+/// Multi-version SSTable (user_key + sequence, InternalKey order).
+pub const SST_VERSION_V4: u16 = 4;
 /// Fixed size of the v1 SSTable footer in bytes (no bloom metadata).
 pub const SST_FOOTER_LEN: usize = 48;
 /// Fixed size of the v2 SSTable footer in bytes (includes bloom metadata).
@@ -35,6 +38,9 @@ pub struct SstableBuildOptions {
     pub compression_lz4: bool,
     pub compression_zstd: bool,
     pub prefix_compression: bool,
+    /// When true, write format_version 4 and allow multi-version keys sorted by
+    /// [`InternalKey`] order (user_key ASC, commit_ts DESC).
+    pub mvcc: bool,
 }
 
 impl Default for SstableBuildOptions {
@@ -45,6 +51,7 @@ impl Default for SstableBuildOptions {
             compression_lz4: false,
             compression_zstd: false,
             prefix_compression: false,
+            mvcc: false,
         }
     }
 }
@@ -57,6 +64,8 @@ impl From<&kaya_core::SstableConfig> for SstableBuildOptions {
             compression_lz4: cfg.compression_lz4,
             compression_zstd: cfg.compression_zstd,
             prefix_compression: cfg.prefix_compression,
+            // Options-only for now (Task 4 wires engine flush to mvcc).
+            mvcc: false,
         }
     }
 }
@@ -108,6 +117,7 @@ impl SstFooter {
         } else if self.format_version == SST_VERSION_V2 {
             SST_FOOTER_LEN_V2
         } else {
+            // v3 and v4 share the 72-byte footer layout.
             SST_FOOTER_LEN_V3
         }
     }
@@ -767,6 +777,7 @@ pub fn decode_footer(bytes: &[u8]) -> Result<SstFooter> {
     if format_version != SST_VERSION_V1
         && format_version != SST_VERSION_V2
         && format_version != SST_VERSION
+        && format_version != SST_VERSION_V4
     {
         return Err(KayaError::corruption(format!(
             "unsupported SSTable version: {format_version}"
@@ -840,6 +851,8 @@ pub struct SstableBuilder {
     table_min_seq: Option<u64>,
     table_max_seq: Option<u64>,
     total_entries: u64,
+    /// Previous entry's InternalKey for mvcc non-decreasing order checks.
+    last_internal_key: Option<InternalKey>,
 }
 
 impl SstableBuilder {
@@ -870,10 +883,26 @@ impl SstableBuilder {
             table_min_seq: None,
             table_max_seq: None,
             total_entries: 0,
+            last_internal_key: None,
         }
     }
 
     pub fn add(&mut self, entry: SstEntry) {
+        if self.options.mvcc {
+            let ik = InternalKey::from_seq(entry.key.clone(), entry.sequence);
+            if let Some(ref prev) = self.last_internal_key {
+                // Entries must be sorted by InternalKey (user_key ASC, ts DESC).
+                debug_assert!(
+                    prev <= &ik,
+                    "mvcc SSTable entries must be in non-decreasing InternalKey order; previous=({:?}, {}), current=({:?}, {})",
+                    prev.user_key,
+                    prev.commit_ts,
+                    ik.user_key,
+                    ik.commit_ts
+                );
+            }
+            self.last_internal_key = Some(ik);
+        }
         self.all_keys.push(entry.key.clone());
         self.current_entries.push(entry.clone());
         self.current_count += 1;
@@ -972,12 +1001,13 @@ impl SstableBuilder {
         }
 
         let compression_codec = resolve_compression_codec(&self.options);
-        let format_version =
-            if compression_codec != COMPRESSION_CODEC_NONE || self.options.prefix_compression {
-                SST_VERSION
-            } else {
-                SST_VERSION_V2
-            };
+        let format_version = if self.options.mvcc {
+            SST_VERSION_V4
+        } else if compression_codec != COMPRESSION_CODEC_NONE || self.options.prefix_compression {
+            SST_VERSION
+        } else {
+            SST_VERSION_V2
+        };
 
         // Footer
         let footer = SstFooter {
@@ -1076,43 +1106,78 @@ impl SstableReader {
         &self.footer
     }
 
-    /// Point lookup.  Returns the entry with the highest sequence for `key`
-    /// in the block that could contain it, or `None` if absent.
+    /// Point lookup at Latest (`read_ts = u64::MAX`).
     pub fn get(&self, key: &[u8]) -> Result<Option<SstEntry>> {
+        self.get_at(key, u64::MAX)
+    }
+
+    /// Snapshot point lookup: newest version of `user_key` with `sequence <= read_ts`.
+    ///
+    /// - **v1–v3:** single version per user_key; returns it only if
+    ///   `entry.sequence.get() <= read_ts`.
+    /// - **v4:** multi-version; entries for a user_key are ordered by sequence
+    ///   descending (newest first). Returns the first matching version, including
+    ///   deletes (`value = None`) so callers can apply visibility.
+    pub fn get_at(&self, key: &[u8], read_ts: u64) -> Result<Option<SstEntry>> {
         if let Some(bloom) = &self.bloom {
             if !bloom.might_contain(key) {
                 return Ok(None);
             }
         }
-        // The index is sorted by separator key (= last key of each block).
-        // The key lives in the first block whose separator_key >= key.
+        let multi_version = self.footer.format_version >= SST_VERSION_V4;
+        // Index is sorted by separator (= last user_key of each block).
+        // Start at the first block whose separator_key >= key.
+        let mut started = false;
         for ie in &self.index {
-            if ie.separator_key.as_slice() >= key {
-                let block = self.read_data_block(ie)?;
-                for entry in block {
-                    if entry.key.as_slice() == key {
-                        return Ok(Some(entry));
-                    }
-                }
-                return Ok(None);
+            if !started && ie.separator_key.as_slice() < key {
+                continue;
             }
-        }
-        // key may be larger than all separators; check the last block.
-        if let Some(ie) = self.index.last() {
+            started = true;
             let block = self.read_data_block(ie)?;
             for entry in block {
-                if entry.key.as_slice() == key {
+                if entry.key.as_slice() < key {
+                    continue;
+                }
+                if entry.key.as_slice() > key {
+                    return Ok(None);
+                }
+                // entry.key == key
+                if entry.sequence.get() <= read_ts {
                     return Ok(Some(entry));
                 }
+                // version too new for this snapshot
+                if !multi_version {
+                    return Ok(None);
+                }
+                // v4: keep scanning older versions (same user_key, lower sequence)
+            }
+            // End of block: v1–v3 has at most one version so key is absent.
+            // v4 may continue the same user_key into the next block when separator == key.
+            if !multi_version {
+                return Ok(None);
+            }
+            if ie.separator_key.as_slice() > key {
+                return Ok(None);
             }
         }
         Ok(None)
     }
 
-    /// Returns all entries whose key starts with `prefix`, in sorted order.
+    /// Prefix scan at Latest (`read_ts = u64::MAX`).
+    ///
+    /// For multi-version (v4) tables this returns one visible version per user_key.
+    /// Use [`Self::all_entries`] to inspect every version.
     pub fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<SstEntry>> {
+        self.scan_prefix_at(prefix, u64::MAX)
+    }
+
+    /// Snapshot prefix scan: for each user_key under `prefix`, emit the newest
+    /// version with `sequence <= read_ts` (Puts and Deletes). Order is
+    /// user_key ascending.
+    pub fn scan_prefix_at(&self, prefix: &[u8], read_ts: u64) -> Result<Vec<SstEntry>> {
         let mut result = Vec::new();
-        let mut started = false;
+        let mut current_key: Option<Bytes> = None;
+        let mut selected = false;
         for ie in &self.index {
             // Skip blocks whose separator is strictly before the prefix.
             if !ie.separator_key.is_empty() && ie.separator_key.as_slice() < prefix {
@@ -1122,12 +1187,24 @@ impl SstableReader {
             // (false negatives would drop prefix ranges). Point lookups use bloom in get().
             let block = self.read_data_block(ie)?;
             for entry in block {
-                if entry.key.starts_with(prefix) {
-                    result.push(entry);
-                    started = true;
-                } else if started {
-                    // Keys are sorted; once we leave the prefix range we are done.
+                if !prefix.is_empty() && !entry.key.starts_with(prefix) {
+                    if entry.key.as_slice() < prefix {
+                        continue;
+                    }
+                    // Past the prefix range (user_keys are sorted).
                     return Ok(result);
+                }
+                let is_new = current_key.as_deref() != Some(entry.key.as_slice());
+                if is_new {
+                    current_key = Some(entry.key.clone());
+                    selected = false;
+                }
+                if selected {
+                    continue;
+                }
+                if entry.sequence.get() <= read_ts {
+                    result.push(entry);
+                    selected = true;
                 }
             }
         }
@@ -1555,5 +1632,175 @@ mod tests {
         assert_eq!(reader.block_cache_stats().misses, 1);
         assert!(reader.get(&key).unwrap().is_some());
         assert_eq!(reader.block_cache_stats().hits, 1);
+    }
+
+    fn mvcc_builder() -> SstableBuilder {
+        SstableBuilder::with_options(SstableBuildOptions {
+            target_block_bytes: 64 * 1024,
+            bloom_bits_per_key: 0,
+            mvcc: true,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn v4_multi_version_roundtrip_get_at() {
+        // InternalKey order: (k, 3), (k, 1), (z, 2)
+        let mut builder = mvcc_builder();
+        builder.add(entry_put(b"k", b"v3", 3));
+        builder.add(entry_put(b"k", b"v1", 1));
+        builder.add(entry_put(b"z", b"vz", 2));
+        let bytes = builder.finish().unwrap();
+        let footer = decode_footer(&bytes).unwrap();
+        assert_eq!(footer.format_version, SST_VERSION_V4);
+        assert_eq!(footer.physical_len(), SST_FOOTER_LEN_V3);
+        assert_eq!(footer.entry_count, 3);
+
+        let reader = SstableReader::open(bytes).unwrap();
+        assert_eq!(
+            reader.get_at(b"k", 1).unwrap().unwrap().value,
+            Some(b"v1".to_vec())
+        );
+        assert_eq!(
+            reader.get_at(b"k", 2).unwrap().unwrap().value,
+            Some(b"v1".to_vec())
+        );
+        assert_eq!(
+            reader.get_at(b"k", 3).unwrap().unwrap().value,
+            Some(b"v3".to_vec())
+        );
+        assert_eq!(
+            reader.get(b"k").unwrap().unwrap().value,
+            Some(b"v3".to_vec())
+        );
+        assert!(reader.get_at(b"k", 0).unwrap().is_none());
+        assert_eq!(
+            reader.get_at(b"z", 2).unwrap().unwrap().value,
+            Some(b"vz".to_vec())
+        );
+    }
+
+    #[test]
+    fn v4_tombstone_at_higher_ts() {
+        let mut builder = mvcc_builder();
+        // (k, 2) delete, (k, 1) put
+        builder.add(entry_del(b"k", 2));
+        builder.add(entry_put(b"k", b"v1", 1));
+        let bytes = builder.finish().unwrap();
+        let reader = SstableReader::open(bytes).unwrap();
+
+        let at2 = reader.get_at(b"k", 2).unwrap().unwrap();
+        assert_eq!(at2.value, None);
+        assert_eq!(at2.sequence.get(), 2);
+
+        let at1 = reader.get_at(b"k", 1).unwrap().unwrap();
+        assert_eq!(at1.value, Some(b"v1".to_vec()));
+        assert_eq!(at1.sequence.get(), 1);
+
+        // Latest is the tombstone
+        assert_eq!(reader.get(b"k").unwrap().unwrap().value, None);
+    }
+
+    #[test]
+    fn v4_proper_prefix_user_keys_visible() {
+        // user_key order: a then aa (typed InternalKey, not wire encode)
+        let mut builder = mvcc_builder();
+        builder.add(entry_put(b"a", b"va", 2));
+        builder.add(entry_put(b"a", b"va-old", 1));
+        builder.add(entry_put(b"aa", b"vaa", 3));
+        let bytes = builder.finish().unwrap();
+        let reader = SstableReader::open(bytes).unwrap();
+
+        assert_eq!(
+            reader.get(b"a").unwrap().unwrap().value,
+            Some(b"va".to_vec())
+        );
+        assert_eq!(
+            reader.get(b"aa").unwrap().unwrap().value,
+            Some(b"vaa".to_vec())
+        );
+        assert_eq!(
+            reader.get_at(b"a", 1).unwrap().unwrap().value,
+            Some(b"va-old".to_vec())
+        );
+
+        let scan = reader.scan_prefix(b"a").unwrap();
+        assert_eq!(scan.len(), 2);
+        assert_eq!(scan[0].key, b"a");
+        assert_eq!(scan[0].value, Some(b"va".to_vec()));
+        assert_eq!(scan[1].key, b"aa");
+        assert_eq!(scan[1].value, Some(b"vaa".to_vec()));
+
+        let scan_at = reader.scan_prefix_at(b"a", 1).unwrap();
+        assert_eq!(scan_at.len(), 1);
+        assert_eq!(scan_at[0].key, b"a");
+        assert_eq!(scan_at[0].value, Some(b"va-old".to_vec()));
+    }
+
+    #[test]
+    fn legacy_v2_get_still_works() {
+        let mut builder = SstableBuilder::new(64 * 1024, 0);
+        builder.add(entry_put(b"aaa", b"v1", 1));
+        builder.add(entry_put(b"bbb", b"v2", 2));
+        let bytes = builder.finish().unwrap();
+        let footer = decode_footer(&bytes).unwrap();
+        assert_eq!(footer.format_version, SST_VERSION_V2);
+
+        let reader = SstableReader::open(bytes).unwrap();
+        assert_eq!(
+            reader.get(b"aaa").unwrap().unwrap().value,
+            Some(b"v1".to_vec())
+        );
+        assert_eq!(
+            reader.get_at(b"bbb", 2).unwrap().unwrap().value,
+            Some(b"v2".to_vec())
+        );
+        // Single-version: sequence > read_ts hides the entry
+        assert!(reader.get_at(b"bbb", 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn v4_scan_prefix_includes_visible_delete() {
+        let mut builder = mvcc_builder();
+        builder.add(entry_put(b"k1", b"v", 1));
+        builder.add(entry_del(b"k2", 2));
+        builder.add(entry_put(b"k2", b"old", 1));
+        let bytes = builder.finish().unwrap();
+        let reader = SstableReader::open(bytes).unwrap();
+        let scan = reader.scan_prefix_at(b"k", 2).unwrap();
+        assert_eq!(scan.len(), 2);
+        assert_eq!(scan[0].key, b"k1");
+        assert_eq!(scan[0].value, Some(b"v".to_vec()));
+        assert_eq!(scan[1].key, b"k2");
+        assert_eq!(scan[1].value, None);
+    }
+
+    #[test]
+    fn v4_multi_version_spanning_blocks() {
+        // Tiny blocks so versions of the same key split across blocks.
+        let mut builder = SstableBuilder::with_options(SstableBuildOptions {
+            target_block_bytes: 1,
+            bloom_bits_per_key: 0,
+            mvcc: true,
+            ..Default::default()
+        });
+        builder.add(entry_put(b"k", b"v3", 3));
+        builder.add(entry_put(b"k", b"v2", 2));
+        builder.add(entry_put(b"k", b"v1", 1));
+        let bytes = builder.finish().unwrap();
+        let reader = SstableReader::open(bytes).unwrap();
+        assert!(reader.footer().entry_count >= 3);
+        assert_eq!(
+            reader.get_at(b"k", 1).unwrap().unwrap().value,
+            Some(b"v1".to_vec())
+        );
+        assert_eq!(
+            reader.get_at(b"k", 2).unwrap().unwrap().value,
+            Some(b"v2".to_vec())
+        );
+        assert_eq!(
+            reader.get(b"k").unwrap().unwrap().value,
+            Some(b"v3".to_vec())
+        );
     }
 }
