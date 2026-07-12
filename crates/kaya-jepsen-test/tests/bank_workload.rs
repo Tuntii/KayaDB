@@ -8,9 +8,9 @@
 
 use kaya_jepsen_test::{
     bank_account_key, bank_expected_total, bank_scenario, bank_transfer, check_balances_sum,
-    check_transfer_history, encode_balance, parse_balance, seed_bank_accounts, verify_bank_sum_live,
-    BankModel, BankTransfer, ClusterController, TestConfig, TestRunner, WorkloadType,
-    BANK_INITIAL_BALANCE, BANK_NUM_ACCOUNTS,
+    check_transfer_history, encode_balance, parse_balance, seed_bank_accounts,
+    verify_bank_sum_live, BankModel, BankTransfer, ClusterController, TestConfig, TestRunner,
+    WorkloadType, BANK_INITIAL_BALANCE, BANK_NUM_ACCOUNTS,
 };
 use std::time::Duration;
 

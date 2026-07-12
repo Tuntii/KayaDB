@@ -532,10 +532,7 @@ impl Transaction<'_> {
             return Ok(local.clone());
         }
         let payload = encode_txn_op_payload(self.txn_id, TXN_OP_GET, key, None);
-        let (status, body) = self
-            .client
-            .send_with_retry(TXN_OP_OPCODE, &payload)
-            .await?;
+        let (status, body) = self.client.send_with_retry(TXN_OP_OPCODE, &payload).await?;
         if status == STATUS_OK {
             let val = decode_value_payload(&body).map_err(KayaError::corruption)?;
             Ok(Some(val))
@@ -553,10 +550,7 @@ impl Transaction<'_> {
     /// Stage a put intent (write-write conflicts may fail immediately).
     pub async fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let payload = encode_txn_op_payload(self.txn_id, TXN_OP_PUT, key, Some(value));
-        let (status, body) = self
-            .client
-            .send_with_retry(TXN_OP_OPCODE, &payload)
-            .await?;
+        let (status, body) = self.client.send_with_retry(TXN_OP_OPCODE, &payload).await?;
         if status == STATUS_OK {
             self.local.insert(key.to_vec(), Some(value.to_vec()));
             Ok(())
@@ -572,10 +566,7 @@ impl Transaction<'_> {
     /// Stage a delete intent.
     pub async fn delete(&mut self, key: &[u8]) -> Result<()> {
         let payload = encode_txn_op_payload(self.txn_id, TXN_OP_DELETE, key, None);
-        let (status, body) = self
-            .client
-            .send_with_retry(TXN_OP_OPCODE, &payload)
-            .await?;
+        let (status, body) = self.client.send_with_retry(TXN_OP_OPCODE, &payload).await?;
         if status == STATUS_OK {
             self.local.insert(key.to_vec(), None);
             Ok(())
@@ -705,7 +696,10 @@ mod tests {
 
         let put = encode_txn_op_payload(7, TXN_OP_PUT, b"k", Some(b"v"));
         let (id, op, key, val) = decode_txn_op_payload(&put).unwrap();
-        assert_eq!((id, op, key, val), (7, TXN_OP_PUT, b"k".to_vec(), Some(b"v".to_vec())));
+        assert_eq!(
+            (id, op, key, val),
+            (7, TXN_OP_PUT, b"k".to_vec(), Some(b"v".to_vec()))
+        );
 
         let commit = encode_txn_commit_response(99);
         assert_eq!(decode_txn_commit_response(&commit).unwrap(), 99);

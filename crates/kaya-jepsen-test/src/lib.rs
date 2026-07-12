@@ -49,9 +49,10 @@ pub mod scenario;
 pub mod workload;
 
 pub use bank::{
-    bank_account_key, bank_expected_total, bank_transfer, check_balances_sum, check_transfer_history,
-    encode_balance, parse_balance, read_bank_balances, seed_bank_accounts, verify_bank_sum_live,
-    BankModel, BankTransfer, BANK_INITIAL_BALANCE, BANK_KEY_PREFIX, BANK_NUM_ACCOUNTS,
+    bank_account_key, bank_expected_total, bank_transfer, check_balances_sum,
+    check_transfer_history, encode_balance, parse_balance, read_bank_balances, seed_bank_accounts,
+    verify_bank_sum_live, BankModel, BankTransfer, BANK_INITIAL_BALANCE, BANK_KEY_PREFIX,
+    BANK_NUM_ACCOUNTS,
 };
 pub use cluster_controller::{ClusterController, LeaderInfo, ManagedNode};
 pub use history::{History, Operation, OperationResult};
@@ -59,8 +60,10 @@ pub use nemesis::{MemberSpec, Nemesis, NemesisConfig, NemesisType};
 pub use partition::PartitionTracker;
 pub use runner::{scenario_uses_partition, TestConfig, TestResult, TestRunner};
 pub use scenario::{
-    bank_scenario, rich_nemesis_scenario, scenario_registry, smoke_scenario, t1_scenario, t2_scenario,
-    t3_scenario, t4_scenario, t5_scenario, t6_scenario, t7_scenario, Scenario, Topology,
-    VerifyMode, WorkloadHook,
+    bank_scenario, rich_nemesis_scenario, scenario_registry, smoke_scenario, t1_scenario,
+    t2_scenario, t3_scenario, t4_scenario, t5_scenario, t6_scenario, t7_scenario, Scenario,
+    Topology, VerifyMode, WorkloadHook,
 };
-pub use workload::{register_key, seed_bank_on_cluster, Workload, WorkloadConfig, WorkloadType, WGL_VERIFY_MAX_OPS};
+pub use workload::{
+    register_key, seed_bank_on_cluster, Workload, WorkloadConfig, WorkloadType, WGL_VERIFY_MAX_OPS,
+};

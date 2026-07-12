@@ -126,10 +126,7 @@ impl RefModel {
         self.versions
             .range(prefix.to_vec()..)
             .take_while(|(k, _)| k.starts_with(prefix))
-            .filter_map(|(k, _)| {
-                self.get_at(k, read_ts)
-                    .map(|v| (k.clone(), v.clone()))
-            })
+            .filter_map(|(k, _)| self.get_at(k, read_ts).map(|v| (k.clone(), v.clone())))
             .collect()
     }
 
@@ -163,8 +160,14 @@ mod tests {
         m.put(b"k".to_vec(), b"v1".to_vec(), 1);
         m.put(b"k".to_vec(), b"v2".to_vec(), 2);
 
-        assert_eq!(m.get_at(b"k", 1).map(|v| v.as_slice()), Some(b"v1".as_ref()));
-        assert_eq!(m.get_at(b"k", 2).map(|v| v.as_slice()), Some(b"v2".as_ref()));
+        assert_eq!(
+            m.get_at(b"k", 1).map(|v| v.as_slice()),
+            Some(b"v1".as_ref())
+        );
+        assert_eq!(
+            m.get_at(b"k", 2).map(|v| v.as_slice()),
+            Some(b"v2".as_ref())
+        );
         assert_eq!(m.get(b"k").map(|v| v.as_slice()), Some(b"v2".as_ref()));
         assert_eq!(m.get_at(b"k", 0), None);
     }
@@ -177,7 +180,10 @@ mod tests {
 
         assert_eq!(m.get(b"k"), None);
         assert_eq!(m.get_at(b"k", 2), None);
-        assert_eq!(m.get_at(b"k", 1).map(|v| v.as_slice()), Some(b"v1".as_ref()));
+        assert_eq!(
+            m.get_at(b"k", 1).map(|v| v.as_slice()),
+            Some(b"v1".as_ref())
+        );
     }
 
     #[test]
@@ -189,7 +195,10 @@ mod tests {
 
         assert_eq!(m.get(b"k").map(|v| v.as_slice()), Some(b"v3".as_ref()));
         assert_eq!(m.get_at(b"k", 2), None);
-        assert_eq!(m.get_at(b"k", 1).map(|v| v.as_slice()), Some(b"v1".as_ref()));
+        assert_eq!(
+            m.get_at(b"k", 1).map(|v| v.as_slice()),
+            Some(b"v1".as_ref())
+        );
     }
 
     #[test]
@@ -230,10 +239,7 @@ mod tests {
         assert_eq!(m.get(b"k").map(|v| v.as_slice()), Some(b"v".as_ref()));
         assert_eq!(m.versions_of(b"k"), vec![1]);
 
-        let del = RaftCommand::Delete {
-            key: b"k".to_vec(),
-        }
-        .encode();
+        let del = RaftCommand::Delete { key: b"k".to_vec() }.encode();
         m.apply_log_entry(&del).unwrap();
         assert_eq!(m.get(b"k"), None);
         assert_eq!(m.versions_of(b"k"), vec![1, 2]);

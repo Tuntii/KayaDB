@@ -162,7 +162,10 @@ fn print_sst_inspection_human(inspection: &SstInspection) {
                         v.len()
                     );
                 } else {
-                    println!("seq={seq} PUT key={user_key} value_len={}  {value}", v.len());
+                    println!(
+                        "seq={seq} PUT key={user_key} value_len={}  {value}",
+                        v.len()
+                    );
                 }
             }
             None => {

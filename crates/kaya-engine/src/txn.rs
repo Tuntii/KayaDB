@@ -207,7 +207,8 @@ impl<D: Disk> Engine<D> {
     /// the last sequence assigned, or current `last_sequence` if the txn wrote nothing.
     pub async fn txn_commit(&mut self, txn_id: TxnId) -> Result<SequenceNumber> {
         let mutations = self.txn_take_commit(txn_id)?;
-        self.apply_mutations(mutations, WriteOptions::default()).await
+        self.apply_mutations(mutations, WriteOptions::default())
+            .await
     }
 
     /// Discard all intents for `txn_id`.
@@ -235,13 +236,9 @@ impl<D: Disk> Engine<D> {
 
         self.check_write_conflict(txn_id, &key, snapshot_ts)?;
 
-        self.txn.intents.insert(
-            key.clone(),
-            Intent {
-                txn_id,
-                value,
-            },
-        );
+        self.txn
+            .intents
+            .insert(key.clone(), Intent { txn_id, value });
         if let Some(meta) = self.txn.txns.get_mut(&txn_id) {
             meta.keys.insert(key);
         }
@@ -249,12 +246,7 @@ impl<D: Disk> Engine<D> {
     }
 
     /// Intent conflict (other txn) or SI committed-version conflict (`seq > snapshot_ts`).
-    fn check_write_conflict(
-        &mut self,
-        txn_id: TxnId,
-        key: &[u8],
-        snapshot_ts: u64,
-    ) -> Result<()> {
+    fn check_write_conflict(&mut self, txn_id: TxnId, key: &[u8], snapshot_ts: u64) -> Result<()> {
         if let Some(intent) = self.txn.intents.get(key) {
             if intent.txn_id != txn_id {
                 return Err(KayaError::TxnConflict);
@@ -396,7 +388,10 @@ mod apply_mutations_tests {
                 Err(KayaError::InvalidArgument { .. })
             ));
             // Keys not yet materialised.
-            assert_eq!(engine.get(b"a", ReadOptions::default()).await.unwrap(), None);
+            assert_eq!(
+                engine.get(b"a", ReadOptions::default()).await.unwrap(),
+                None
+            );
 
             // Another txn can now stage the same keys.
             let (t2, _) = engine.begin_txn();

@@ -9,7 +9,6 @@ use crate::storage::{
     RaftStorageError,
 };
 
-
 /// Directory for a Raft group's persistent state under `data_dir`.
 ///
 /// - Group `0` keeps the legacy layout at `data_dir` root (`raft-hard-state`, `raft-log`)
@@ -146,10 +145,7 @@ mod tests {
     fn raft_group_dir_legacy_group_zero_at_root() {
         let root = PathBuf::from("/tmp/kayadb-data");
         assert_eq!(raft_group_dir(&root, 0), root);
-        assert_eq!(
-            raft_group_dir(&root, 7),
-            root.join("groups").join("7")
-        );
+        assert_eq!(raft_group_dir(&root, 7), root.join("groups").join("7"));
     }
 
     #[test]

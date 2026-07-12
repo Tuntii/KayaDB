@@ -327,7 +327,12 @@ pub fn decode_envelope(data: &[u8]) -> Result<Envelope, String> {
         t => return Err(format!("unknown Raft message type: {t}")),
     };
 
-    Ok(Envelope { from, to, group_id, message })
+    Ok(Envelope {
+        from,
+        to,
+        group_id,
+        message,
+    })
 }
 
 // ── client protocol payload helpers ──────────────────────────────────────────
@@ -580,7 +585,6 @@ pub fn decode_scan_response(data: &[u8]) -> Result<ScanItems, String> {
     }
     Ok(items)
 }
-
 
 // ── transaction (M17) payload helpers ────────────────────────────────────────
 
@@ -1229,7 +1233,6 @@ mod tests {
         assert!(presented.is_none());
     }
 
-
     #[test]
     fn round_trip_txn_begin_response() {
         let payload = encode_txn_begin_response(42, 7);
@@ -1266,7 +1269,10 @@ mod tests {
     fn round_trip_txn_op_delete() {
         let payload = encode_txn_op_payload(3, TXN_OP_DELETE, b"gone", None);
         let (txn_id, op, key, value) = decode_txn_op_payload(&payload).unwrap();
-        assert_eq!((txn_id, op, key, value), (3, TXN_OP_DELETE, b"gone".to_vec(), None));
+        assert_eq!(
+            (txn_id, op, key, value),
+            (3, TXN_OP_DELETE, b"gone".to_vec(), None)
+        );
     }
 
     #[test]
@@ -1317,5 +1323,4 @@ mod tests {
         assert!(decode_txn_commit_response(&[]).is_err());
         assert!(decode_txn_commit_response(&[1u8; 3]).is_err());
     }
-
 }

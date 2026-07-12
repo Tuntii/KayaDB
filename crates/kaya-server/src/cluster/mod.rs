@@ -33,8 +33,8 @@ use kaya_engine::Engine;
 use kaya_io::FileDisk;
 use kaya_net::{start_raft_listener, NodeRoster};
 use kaya_raft::{
-    multi_raft_group_dir, GroupId, LogIndex, MultiRaftHost, NodeId, RaftConfig,
-    RaftNode, StaticRange, StaticRangeTable,
+    multi_raft_group_dir, GroupId, LogIndex, MultiRaftHost, NodeId, RaftConfig, RaftNode,
+    StaticRange, StaticRangeTable,
 };
 
 #[cfg(feature = "tls")]
@@ -380,8 +380,8 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
             election_timeout_ticks: config.election_timeout_ticks,
             heartbeat_interval_ticks: config.heartbeat_interval_ticks,
         };
-        let mut persister = RaftPersister::open(&group_dir)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let mut persister =
+            RaftPersister::open(&group_dir).map_err(|e| std::io::Error::other(e.to_string()))?;
         let apply_path = group_dir.join("raft-apply-index.jsonl");
         let apply_floor = RaftApplyIndex::load_all(&apply_path)
             .map(|recs| {

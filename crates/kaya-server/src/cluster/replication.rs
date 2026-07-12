@@ -9,9 +9,7 @@ use crate::command::RaftCommand;
 use crate::membership::{apply_config_change_to_roster, decode_config_change, SharedRoster};
 
 use super::snapshot::{apply_installed_raft_snapshot, maybe_compact_raft_log};
-use super::{
-    SharedApplyIndexes, SharedEngine, SharedPending, SharedPendingReads, SharedRaftHost,
-};
+use super::{SharedApplyIndexes, SharedEngine, SharedPending, SharedPendingReads, SharedRaftHost};
 
 /// Drain freshly-applied Raft entries from all groups and execute them against the engine.
 #[allow(clippy::too_many_arguments)]

@@ -96,9 +96,7 @@ pub(crate) fn decode_meta_value(name: &str, value: &[u8]) -> Result<IndexDef> {
     let unique = value[1] != 0;
     let prefix_len = u32::from_be_bytes(value[2..6].try_into().unwrap()) as usize;
     if value.len() != 6 + prefix_len {
-        return Err(KayaError::corruption(
-            "index meta value length mismatch",
-        ));
+        return Err(KayaError::corruption("index meta value length mismatch"));
     }
     Ok(IndexDef {
         name: name.to_string(),
@@ -419,7 +417,10 @@ impl<D: Disk> Engine<D> {
         let durability = opts.durability.unwrap_or(self.config.durability.mode);
         let append = self
             .wal
-            .append(kaya_wal::WalPayload::Delete { key: key.clone() }, durability)
+            .append(
+                kaya_wal::WalPayload::Delete { key: key.clone() },
+                durability,
+            )
             .await?;
         self.memtable.delete(key, append.sequence);
         self.stats.delete_count += 1;

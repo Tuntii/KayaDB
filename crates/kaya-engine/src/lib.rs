@@ -21,10 +21,10 @@ mod stats;
 mod txn;
 
 pub use cdc::{CdcCursor, CdcEvent, CdcOp, CDC_CURSORS_DIR, CDC_LOG_PATH};
+pub use index::{IndexDef, INDEX_DATA_PREFIX, INDEX_META_PREFIX, INDEX_SYS_PREFIX};
 pub use recovery::recover;
 pub use snapshot::SnapshotView;
 pub use stats::{CompactionResult, EngineStats, FlushResult, WriteResult};
-pub use index::{IndexDef, INDEX_DATA_PREFIX, INDEX_META_PREFIX, INDEX_SYS_PREFIX};
 pub use txn::{Intent, TxnId};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1459,7 +1459,13 @@ mod tests {
                     .unwrap();
             }
             let result = engine
-                .scan_prefix(b"k", ScanOptions { limit: Some(10), ..Default::default() })
+                .scan_prefix(
+                    b"k",
+                    ScanOptions {
+                        limit: Some(10),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .unwrap();
             assert_eq!(result.len(), 3, "user limit above hard cap is clamped");
@@ -1563,10 +1569,7 @@ mod tests {
             assert!(w2.sequence.get() > w1.sequence.get());
 
             assert_eq!(
-                engine
-                    .get(b"k", read_at(w1.sequence.get()))
-                    .await
-                    .unwrap(),
+                engine.get(b"k", read_at(w1.sequence.get())).await.unwrap(),
                 Some(b"v1".to_vec())
             );
             assert_eq!(
@@ -1574,10 +1577,7 @@ mod tests {
                 Some(b"v2".to_vec())
             );
             assert_eq!(
-                engine
-                    .get(b"k", read_at(w2.sequence.get()))
-                    .await
-                    .unwrap(),
+                engine.get(b"k", read_at(w2.sequence.get())).await.unwrap(),
                 Some(b"v2".to_vec())
             );
         });
@@ -1603,10 +1603,7 @@ mod tests {
                 assert_eq!(engine.stats().memtable_entries, 0);
                 // Still visible from SST after flush
                 assert_eq!(
-                    engine
-                        .get(b"k", read_at(w1.sequence.get()))
-                        .await
-                        .unwrap(),
+                    engine.get(b"k", read_at(w1.sequence.get())).await.unwrap(),
                     Some(b"v1".to_vec())
                 );
                 assert_eq!(
@@ -1651,10 +1648,7 @@ mod tests {
                 None
             );
             assert_eq!(
-                engine
-                    .get(b"k", read_at(w1.sequence.get()))
-                    .await
-                    .unwrap(),
+                engine.get(b"k", read_at(w1.sequence.get())).await.unwrap(),
                 Some(b"v1".to_vec())
             );
 
@@ -1664,10 +1658,7 @@ mod tests {
                 None
             );
             assert_eq!(
-                engine
-                    .get(b"k", read_at(w1.sequence.get()))
-                    .await
-                    .unwrap(),
+                engine.get(b"k", read_at(w1.sequence.get())).await.unwrap(),
                 Some(b"v1".to_vec())
             );
         });
@@ -1693,10 +1684,7 @@ mod tests {
 
             // Before GC: both versions visible
             assert_eq!(
-                engine
-                    .get(b"k", read_at(w1.sequence.get()))
-                    .await
-                    .unwrap(),
+                engine.get(b"k", read_at(w1.sequence.get())).await.unwrap(),
                 Some(b"v1".to_vec())
             );
 
@@ -1714,18 +1702,12 @@ mod tests {
                 Some(b"v2".to_vec())
             );
             assert_eq!(
-                engine
-                    .get(b"k", read_at(w2.sequence.get()))
-                    .await
-                    .unwrap(),
+                engine.get(b"k", read_at(w2.sequence.get())).await.unwrap(),
                 Some(b"v2".to_vec())
             );
             // Old snapshot bound below watermark no longer sees dropped version
             assert_eq!(
-                engine
-                    .get(b"k", read_at(w1.sequence.get()))
-                    .await
-                    .unwrap(),
+                engine.get(b"k", read_at(w1.sequence.get())).await.unwrap(),
                 None
             );
         });
@@ -1752,17 +1734,11 @@ mod tests {
             engine.compact().await.unwrap();
 
             assert_eq!(
-                engine
-                    .get(b"k", read_at(w1.sequence.get()))
-                    .await
-                    .unwrap(),
+                engine.get(b"k", read_at(w1.sequence.get())).await.unwrap(),
                 Some(b"v1".to_vec())
             );
             assert_eq!(
-                engine
-                    .get(b"k", read_at(w2.sequence.get()))
-                    .await
-                    .unwrap(),
+                engine.get(b"k", read_at(w2.sequence.get())).await.unwrap(),
                 Some(b"v2".to_vec())
             );
         });
@@ -1851,7 +1827,10 @@ mod tests {
             engine.txn_put(t, b"k".to_vec(), b"mine".to_vec()).unwrap();
             assert_eq!(engine.txn_get(t, b"k").unwrap(), Some(b"mine".to_vec()));
             // Not visible to non-txn get until commit
-            assert_eq!(engine.get(b"k", ReadOptions::default()).await.unwrap(), None);
+            assert_eq!(
+                engine.get(b"k", ReadOptions::default()).await.unwrap(),
+                None
+            );
         });
     }
 
@@ -1887,7 +1866,9 @@ mod tests {
                 .unwrap();
             let (t1, _) = engine.begin_txn();
             let (t2, _) = engine.begin_txn();
-            engine.txn_put(t2, b"k".to_vec(), b"from-t2".to_vec()).unwrap();
+            engine
+                .txn_put(t2, b"k".to_vec(), b"from-t2".to_vec())
+                .unwrap();
             engine.txn_commit(t2).await.unwrap();
             assert_eq!(engine.txn_get(t1, b"k").unwrap(), Some(b"old".to_vec()));
             let err = engine.txn_put(t1, b"k".to_vec(), b"from-t1".to_vec());
@@ -1989,7 +1970,10 @@ mod tests {
             engine.txn_delete(t, b"k".to_vec()).unwrap();
             assert_eq!(engine.txn_get(t, b"k").unwrap(), None);
             engine.txn_commit(t).await.unwrap();
-            assert_eq!(engine.get(b"k", ReadOptions::default()).await.unwrap(), None);
+            assert_eq!(
+                engine.get(b"k", ReadOptions::default()).await.unwrap(),
+                None
+            );
         });
     }
 
@@ -2023,7 +2007,6 @@ mod tests {
         });
     }
 
-
     #[test]
     fn hlc_writes_use_packed_timestamps_and_increase_when_wall_stalls() {
         block_on(async {
@@ -2048,10 +2031,7 @@ mod tests {
                 .put(b"b".to_vec(), b"2".to_vec(), strict_opts())
                 .await
                 .unwrap();
-            let w3 = engine
-                .delete(b"a".to_vec(), strict_opts())
-                .await
-                .unwrap();
+            let w3 = engine.delete(b"a".to_vec(), strict_opts()).await.unwrap();
 
             assert!(w1.sequence.get() < w2.sequence.get());
             assert!(w2.sequence.get() < w3.sequence.get());
@@ -2115,7 +2095,11 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                engine.scan_by_index("by_val", b"alice").await.unwrap().len(),
+                engine
+                    .scan_by_index("by_val", b"alice")
+                    .await
+                    .unwrap()
+                    .len(),
                 1
             );
             engine
@@ -2214,5 +2198,4 @@ mod tests {
             assert_eq!(hits, vec![(b"alice".to_vec(), b"user:1".to_vec())]);
         });
     }
-
 }

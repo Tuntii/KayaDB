@@ -15,12 +15,13 @@ use std::sync::Arc;
 use kaya_engine::{ReadOptions, ScanOptions};
 use kaya_net::{
     decode_hello_request, decode_key_payload, decode_member_payload, decode_put_payload,
-    decode_remove_member_payload, decode_scan_payload, decode_txn_id_payload, decode_txn_op_payload,
-    encode_error_payload, encode_hello_response, encode_scan_response, encode_txn_begin_response,
-    encode_txn_commit_response, encode_value_payload, read_client_frame, send_envelopes,
-    write_client_response, NodeRoster, PROTO_VERSION, STATUS_ERROR, STATUS_INVALID_ARGUMENT,
-    STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK, STATUS_TXN_CONFLICT, TXN_BEGIN_OPCODE,
-    TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
+    decode_remove_member_payload, decode_scan_payload, decode_txn_id_payload,
+    decode_txn_op_payload, encode_error_payload, encode_hello_response, encode_scan_response,
+    encode_txn_begin_response, encode_txn_commit_response, encode_value_payload, read_client_frame,
+    send_envelopes, write_client_response, NodeRoster, PROTO_VERSION, STATUS_ERROR,
+    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK, STATUS_TXN_CONFLICT,
+    TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT,
+    TXN_ROLLBACK_OPCODE,
 };
 use kaya_raft::{ClusterMember, GroupId, NodeId, StaticRangeTable};
 use tokio::net::TcpListener;
@@ -581,12 +582,13 @@ async fn dispatch(
                 let mut eng = engine.lock().await;
                 match op {
                     TXN_OP_GET => match eng.txn_get(txn_id, &key) {
-                        Ok(Some(v)) => {
-                            outcome(STATUS_OK, encode_value_payload(&v), client_auth, Some(key_len))
-                        }
-                        Ok(None) => {
-                            outcome(STATUS_NOT_FOUND, vec![], client_auth, Some(key_len))
-                        }
+                        Ok(Some(v)) => outcome(
+                            STATUS_OK,
+                            encode_value_payload(&v),
+                            client_auth,
+                            Some(key_len),
+                        ),
+                        Ok(None) => outcome(STATUS_NOT_FOUND, vec![], client_auth, Some(key_len)),
                         Err(e) => map_txn_err(e, client_auth, Some(key_len)),
                     },
                     TXN_OP_PUT => {
@@ -680,9 +682,12 @@ fn map_txn_err(
     key_len: Option<usize>,
 ) -> DispatchOutcome {
     match err {
-        kaya_core::KayaError::TxnConflict => {
-            outcome(STATUS_TXN_CONFLICT, encode_error_payload("txn conflict"), client_auth, key_len)
-        }
+        kaya_core::KayaError::TxnConflict => outcome(
+            STATUS_TXN_CONFLICT,
+            encode_error_payload("txn conflict"),
+            client_auth,
+            key_len,
+        ),
         e @ kaya_core::KayaError::InvalidArgument { .. } => outcome(
             STATUS_INVALID_ARGUMENT,
             encode_error_payload(&e.to_string()),
@@ -718,10 +723,7 @@ async fn txn_commit_via_raft(
         match eng.txn_take_commit(txn_id) {
             Ok(writes) => writes,
             Err(kaya_core::KayaError::TxnConflict) => {
-                return (
-                    STATUS_TXN_CONFLICT,
-                    encode_error_payload("txn conflict"),
-                );
+                return (STATUS_TXN_CONFLICT, encode_error_payload("txn conflict"));
             }
             Err(e @ kaya_core::KayaError::InvalidArgument { .. }) => {
                 return (
@@ -735,10 +737,8 @@ async fn txn_commit_via_raft(
         }
     };
 
-    let mutations: Vec<(Vec<u8>, Option<Vec<u8>>)> = staged
-        .into_iter()
-        .map(|(k, v)| (k, v))
-        .collect();
+    let mutations: Vec<(Vec<u8>, Option<Vec<u8>>)> =
+        staged.into_iter().map(|(k, v)| (k, v)).collect();
 
     // Cross-group atomic txn is not supported in the multi-raft foundation.
     let mut groups = std::collections::BTreeSet::new();
@@ -758,11 +758,7 @@ async fn txn_commit_via_raft(
         .map(GroupId)
         .unwrap_or(GroupId::ZERO);
 
-    let cmd = RaftCommand::TxnCommit {
-        txn_id,
-        mutations,
-    }
-    .encode();
+    let cmd = RaftCommand::TxnCommit { txn_id, mutations }.encode();
 
     let (status, body) = propose_and_wait(raft, roster, propose_tx, group_id, cmd).await;
     if status != STATUS_OK {

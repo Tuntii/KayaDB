@@ -91,10 +91,12 @@ mod tests {
             logical: 1,
         };
         assert!(a < b);
-        assert!(b < Hlc {
-            physical_ms: 2,
-            logical: 0
-        });
+        assert!(
+            b < Hlc {
+                physical_ms: 2,
+                logical: 0
+            }
+        );
     }
 
     #[test]

@@ -1,13 +1,13 @@
 //! Test orchestration and verification.
 
+use crate::bank::{
+    bank_expected_total, verify_bank_sum_live, BANK_INITIAL_BALANCE, BANK_NUM_ACCOUNTS,
+};
 use crate::cluster_controller::{ClusterController, LeaderInfo};
 use crate::history::History;
 use crate::nemesis::{MemberSpec, Nemesis, NemesisAction, NemesisConfig, NemesisType};
 use crate::partition::PartitionTracker;
 use crate::scenario::{Scenario, Topology, VerifyMode, WorkloadHook};
-use crate::bank::{
-    bank_expected_total, verify_bank_sum_live, BANK_INITIAL_BALANCE, BANK_NUM_ACCOUNTS,
-};
 use crate::workload::{seed_bank_on_cluster, Workload, WorkloadConfig, WorkloadType};
 use kaya_client::KayaClient;
 use std::net::SocketAddr;

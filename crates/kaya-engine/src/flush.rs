@@ -2,7 +2,7 @@ use kaya_core::{Result, SequenceNumber};
 use kaya_io::{Disk, RelativePath};
 use kaya_lsm::{
     decode_footer, encode_manifest_edit, footer_stored_crc, ManifestEdit, Memtable, SstEntry,
-    SstableBuilder, SstableBuildOptions, SstableReader, TableMetadata, ValueRecord,
+    SstableBuildOptions, SstableBuilder, SstableReader, TableMetadata, ValueRecord,
     CURRENT_FILE_NAME, CURRENT_TMP_FILE_NAME, MANIFEST_FILE_NAME,
 };
 

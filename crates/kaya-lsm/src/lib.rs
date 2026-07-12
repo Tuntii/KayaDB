@@ -5,12 +5,12 @@ mod manifest;
 mod sstable;
 
 pub use block_cache::BlockCacheStats;
+pub use compaction::{
+    CompactionCandidate, CompactionPolicy, L0MergePolicy, LevelStrategy, TierStrategy,
+};
 pub use internal_key::{
     commit_ts_of, encode_internal_key, encode_internal_key_seq, matches_user_key, user_key_of,
     InternalKey, COMMIT_TS_LEN,
-};
-pub use compaction::{
-    CompactionCandidate, CompactionPolicy, L0MergePolicy, LevelStrategy, TierStrategy,
 };
 
 pub use manifest::{
@@ -403,7 +403,9 @@ mod tests {
         m.put(b"user:1".to_vec(), b"v1".to_vec(), SequenceNumber::new(1));
         m.put(b"user".to_vec(), b"v0".to_vec(), SequenceNumber::new(2));
         // get both
-        assert!(matches!(m.get(b"user"), Some(ValueRecordRef::Put { value, .. }) if value == b"v0"));
+        assert!(
+            matches!(m.get(b"user"), Some(ValueRecordRef::Put { value, .. }) if value == b"v0")
+        );
         assert!(
             matches!(m.get(b"user:1"), Some(ValueRecordRef::Put { value, .. }) if value == b"v1")
         );

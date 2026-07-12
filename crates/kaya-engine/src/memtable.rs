@@ -59,7 +59,11 @@ impl<D: Disk> Engine<D> {
         result
     }
 
-    pub(crate) fn get_inner(&mut self, key: &[u8], read_at: ReadTimestamp) -> Result<Option<Bytes>> {
+    pub(crate) fn get_inner(
+        &mut self,
+        key: &[u8],
+        read_at: ReadTimestamp,
+    ) -> Result<Option<Bytes>> {
         let read_ts = read_at.as_u64();
         // Memtable first: a hit (Put or Delete) at read_ts short-circuits.
         // No visible version → fall through to SSTs (may hold older versions).
@@ -88,7 +92,11 @@ impl<D: Disk> Engine<D> {
         result
     }
 
-    pub(crate) fn scan_prefix_inner(&mut self, prefix: &[u8], opts: ScanOptions) -> Result<Vec<KeyValue>> {
+    pub(crate) fn scan_prefix_inner(
+        &mut self,
+        prefix: &[u8],
+        opts: ScanOptions,
+    ) -> Result<Vec<KeyValue>> {
         self.validate_scan_prefix(prefix)?;
         self.stats.scan_count += 1;
         let max_results = self.config.limits.max_scan_results;

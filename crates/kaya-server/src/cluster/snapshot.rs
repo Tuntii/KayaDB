@@ -164,13 +164,7 @@ pub(crate) async fn maybe_compact_raft_log(
             guard
                 .get(GroupId::ZERO)
                 .and_then(|n| n.snapshot())
-                .and_then(|(_idx, _term, d)| {
-                    if d.is_empty() {
-                        None
-                    } else {
-                        Some(d)
-                    }
-                })
+                .and_then(|(_idx, _term, d)| if d.is_empty() { None } else { Some(d) })
         };
         if let Some(data) = old_data {
             let _ = engine.lock().await.release_snapshot(&data).await;

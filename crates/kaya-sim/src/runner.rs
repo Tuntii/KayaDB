@@ -538,10 +538,7 @@ mod mvcc_tests {
             let mut engine = Engine::open(engine_cfg, disk).await.expect("reopen");
 
             assert_eq!(
-                engine
-                    .get(&key, read_at(w1.sequence.get()))
-                    .await
-                    .unwrap(),
+                engine.get(&key, read_at(w1.sequence.get())).await.unwrap(),
                 Some(b"alive".to_vec())
             );
             assert_eq!(
@@ -549,13 +546,13 @@ mod mvcc_tests {
                 Some(b"alive".as_ref())
             );
             assert_eq!(
-                engine
-                    .get(&key, read_at(w2.sequence.get()))
-                    .await
-                    .unwrap(),
+                engine.get(&key, read_at(w2.sequence.get())).await.unwrap(),
                 None
             );
-            assert_eq!(engine.get(&key, ReadOptions::default()).await.unwrap(), None);
+            assert_eq!(
+                engine.get(&key, ReadOptions::default()).await.unwrap(),
+                None
+            );
             assert_eq!(model.get(&key), None);
         });
     }

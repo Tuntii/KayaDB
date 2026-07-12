@@ -687,7 +687,6 @@ async fn run_map_op<R: Rng>(
     }
 }
 
-
 async fn run_bank_op<R: Rng>(
     client: &mut KayaClient,
     client_id: usize,

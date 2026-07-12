@@ -256,7 +256,6 @@ pub fn rich_nemesis_scenario() -> Scenario {
     }
 }
 
-
 /// M17 bank workload: multi-key transfers under kill + partition; sum invariant.
 pub fn bank_scenario() -> Scenario {
     Scenario {

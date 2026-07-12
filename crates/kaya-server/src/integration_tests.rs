@@ -2,16 +2,16 @@
 mod tests {
     use crate::client_auth::encode_client_auth_payload;
     use crate::cluster::{ClusterConfig, ClusterNode};
-    use kaya_raft::{GroupId, StaticRange};
     use crate::operator_auth::encode_admin_payload;
     use kaya_net::{
         decode_hello_response, decode_txn_begin_response, decode_txn_commit_response,
         decode_value_payload, encode_hello_request, encode_key_payload, encode_member_payload,
         encode_put_payload, encode_remove_member_payload, encode_txn_id_payload,
         encode_txn_op_payload, roundtrip, HELLO_OPCODE, PROTO_VERSION, STATUS_INVALID_ARGUMENT,
-        STATUS_NOT_FOUND, STATUS_OK, TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_GET, TXN_OP_OPCODE,
-        TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
+        STATUS_NOT_FOUND, STATUS_OK, TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_GET,
+        TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
     };
+    use kaya_raft::{GroupId, StaticRange};
     use kaya_sim::{LinearizabilityChecker, Op, OpResult};
     use serial_test::serial;
     use std::net::SocketAddr;
@@ -1523,9 +1523,7 @@ mod tests {
         assert!(ready, "single-node leader not ready for TXN test");
 
         // BEGIN
-        let (status, body) = roundtrip(client_addr, TXN_BEGIN_OPCODE, &[])
-            .await
-            .unwrap();
+        let (status, body) = roundtrip(client_addr, TXN_BEGIN_OPCODE, &[]).await.unwrap();
         assert_eq!(status, STATUS_OK, "TXN_BEGIN should succeed");
         let (txn_id, _snapshot_ts) = decode_txn_begin_response(&body).unwrap();
         assert!(txn_id >= 1);
@@ -1576,7 +1574,6 @@ mod tests {
         handle.abort();
         let _ = std::fs::remove_dir_all(&data_dir);
     }
-
 
     /// Single-node multi-raft: two static ranges, puts route to independent groups.
     #[serial]
@@ -1658,7 +1655,11 @@ mod tests {
         // Per-group disk layout for non-zero groups.
         assert!(
             data_dir.join("groups").join("1").exists()
-                || data_dir.join("groups").join("1").join("raft-hard-state").exists()
+                || data_dir
+                    .join("groups")
+                    .join("1")
+                    .join("raft-hard-state")
+                    .exists()
                 || data_dir.join("groups").is_dir(),
             "expected groups/ directory for multi-raft layout"
         );
@@ -1666,6 +1667,4 @@ mod tests {
         handle.abort();
         let _ = std::fs::remove_dir_all(&data_dir);
     }
-
-
 }

@@ -267,7 +267,10 @@ impl MultiRaftHost {
     }
 
     /// Persist views for every group via the provided callback.
-    pub fn for_each_persist_view(&self, mut f: impl FnMut(GroupId, crate::storage::PersistedRaftState)) {
+    pub fn for_each_persist_view(
+        &self,
+        mut f: impl FnMut(GroupId, crate::storage::PersistedRaftState),
+    ) {
         for gid in self.sorted_group_ids() {
             if let Some(node) = self.groups.get(&gid) {
                 f(gid, node.persist_view());

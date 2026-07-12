@@ -6,15 +6,15 @@ pub use codec::{
     decode_admin_payload, decode_client_auth_payload, decode_envelope, decode_error_payload,
     decode_hello_request, decode_hello_response, decode_key_payload, decode_member_payload,
     decode_put_payload, decode_remove_member_payload, decode_scan_payload, decode_scan_response,
-    decode_value_payload, encode_admin_payload, encode_client_auth_payload, encode_envelope,
-    encode_error_payload, encode_hello_request, encode_hello_response, encode_key_payload,
-    encode_member_payload, encode_put_payload, encode_remove_member_payload, encode_scan_payload,
-    encode_scan_response, encode_value_payload, encode_txn_begin_response,
-    encode_txn_commit_response, encode_txn_id_payload, encode_txn_op_payload,
     decode_txn_begin_response, decode_txn_commit_response, decode_txn_id_payload,
-    decode_txn_op_payload, ADD_MEMBER_OPCODE, ADMIN_AUTH_PREFIX, CLIENT_AUTH_PREFIX,
-    HELLO_OPCODE, PROTO_VERSION, REMOVE_MEMBER_OPCODE, TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE,
-    TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
+    decode_txn_op_payload, decode_value_payload, encode_admin_payload, encode_client_auth_payload,
+    encode_envelope, encode_error_payload, encode_hello_request, encode_hello_response,
+    encode_key_payload, encode_member_payload, encode_put_payload, encode_remove_member_payload,
+    encode_scan_payload, encode_scan_response, encode_txn_begin_response,
+    encode_txn_commit_response, encode_txn_id_payload, encode_txn_op_payload, encode_value_payload,
+    ADD_MEMBER_OPCODE, ADMIN_AUTH_PREFIX, CLIENT_AUTH_PREFIX, HELLO_OPCODE, PROTO_VERSION,
+    REMOVE_MEMBER_OPCODE, TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET,
+    TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
 };
 pub use roster::NodeRoster;
 pub use transport::{

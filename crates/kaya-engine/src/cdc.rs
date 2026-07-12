@@ -33,9 +33,7 @@ impl CdcOp {
         match s {
             "put" => Ok(Self::Put),
             "delete" => Ok(Self::Delete),
-            other => Err(KayaError::corruption(format!(
-                "unknown cdc op {other:?}"
-            ))),
+            other => Err(KayaError::corruption(format!("unknown cdc op {other:?}"))),
         }
     }
 }
@@ -402,11 +400,7 @@ impl<D: Disk> Engine<D> {
     /// Subscribe a consumer. `from_seq` overrides the durable checkpoint when set
     /// (poll delivers events with `seq > from_seq`). When `None`, uses the last
     /// checkpointed / polled sequence for this consumer (or 0).
-    pub fn cdc_subscribe(
-        &self,
-        consumer_id: &str,
-        from_seq: Option<u64>,
-    ) -> Result<CdcCursor> {
+    pub fn cdc_subscribe(&self, consumer_id: &str, from_seq: Option<u64>) -> Result<CdcCursor> {
         if !self.config.enable_cdc {
             return Err(KayaError::invalid_argument(
                 "cdc is disabled (EngineConfig.enable_cdc = false)",
@@ -433,11 +427,7 @@ impl<D: Disk> Engine<D> {
     /// without a durable [`Self::cdc_checkpoint`], reopen may redeliver.
     ///
     /// Per-key order follows global sequence order (monotone per key).
-    pub fn cdc_poll(
-        &mut self,
-        cursor: &mut CdcCursor,
-        limit: usize,
-    ) -> Result<Vec<CdcEvent>> {
+    pub fn cdc_poll(&mut self, cursor: &mut CdcCursor, limit: usize) -> Result<Vec<CdcEvent>> {
         if !self.config.enable_cdc {
             return Err(KayaError::invalid_argument(
                 "cdc is disabled (EngineConfig.enable_cdc = false)",

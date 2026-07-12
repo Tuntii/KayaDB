@@ -17,21 +17,18 @@ use crate::raft_persister::RaftPersister;
 
 use super::client_ops::{ProposeReq, ReadIndexReq};
 use super::replication::drain_and_apply;
-use super::{
-    SharedApplyIndexes, SharedEngine, SharedPending, SharedPendingReads, SharedRaftHost,
-};
+use super::{SharedApplyIndexes, SharedEngine, SharedPending, SharedPendingReads, SharedRaftHost};
 
-fn persist_raft_state(host: &SharedRaftHost, persisters: &std::sync::Arc<std::sync::Mutex<HashMap<u64, RaftPersister>>>) {
+fn persist_raft_state(
+    host: &SharedRaftHost,
+    persisters: &std::sync::Arc<std::sync::Mutex<HashMap<u64, RaftPersister>>>,
+) {
     let views: Vec<(u64, _)> = {
         let guard = host.lock().unwrap();
         guard
             .sorted_group_ids()
             .into_iter()
-            .filter_map(|gid| {
-                guard
-                    .get(gid)
-                    .map(|n| (gid.0, n.persist_view()))
-            })
+            .filter_map(|gid| guard.get(gid).map(|n| (gid.0, n.persist_view())))
             .collect()
     };
     let mut map = persisters.lock().unwrap();
