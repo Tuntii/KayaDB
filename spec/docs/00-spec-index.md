@@ -33,6 +33,7 @@ KayaDB'nin ana tezi:
 | `engine-api-spec.md` | Embedded API, command semantics, errors | P1 |
 | `lsm-storage-format-spec.md` | Memtable, SSTable, manifest, compaction | P1 |
 | `mvcc-spec.md` | Multi-version keys, visibility, GC watermark | P1 |
+| `transactions-spec.md` | Snapshot Isolation, write intents, txn lifecycle (M17) | P1 |
 | `manifest-spec.md` | Manifest record format and publication rules | P1 |
 | `simulation-spec.md` | Seeded simulator, nemesis, trace replay | P1 |
 | `cli-ux-spec.md` | `kayactl` command UX and inspect outputs | P1 |
