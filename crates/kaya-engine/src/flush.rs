@@ -54,24 +54,29 @@ impl<D: Disk> Engine<D> {
     }
 
     async fn flush_nonempty(&mut self, flush_start: std::time::Instant) -> Result<FlushResult> {
-        let entry_count = self.memtable.len() as u64;
         let table_id = self.next_table_id;
         self.next_table_id += 1;
 
+        // Task 2: LWW flush temporarily — emit Latest user keys only so SST
+        // get(user_key) keeps working. Multi-version remains queryable in the
+        // memtable until flush. Task 3/4 will flush all versions as SST v4.
+        let latest: Vec<_> = self.memtable.iter_latest_user().collect();
+        let entry_count = latest.len() as u64;
+
         let mut builder =
             SstableBuilder::with_options(kaya_lsm::SstableBuildOptions::from(&self.config.sstable));
-        for (key, record) in self.memtable.iter() {
+        for (key, record) in latest {
             match record {
                 ValueRecord::Put { value, sequence } => {
                     builder.add(SstEntry {
-                        key: key.clone(),
+                        key,
                         value: Some(value.clone()),
                         sequence: *sequence,
                     });
                 }
                 ValueRecord::Delete { sequence } => {
                     builder.add(SstEntry {
-                        key: key.clone(),
+                        key,
                         value: None,
                         sequence: *sequence,
                     });

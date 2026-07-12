@@ -136,9 +136,17 @@ impl<D: Disk> Engine<D> {
             }
         }
         for (key, value, seq) in self.memtable.raw_scan_prefix(prefix) {
-            merged.insert(key, (seq.get(), value));
-            if merged.len() > max_results {
-                merged.pop_last();
+            // Multi-version memtable may yield several seqs per user key;
+            // keep the higher sequence (max seq wins), not last insert.
+            let seq_n = seq.get();
+            match merged.get(&key) {
+                Some((s, _)) if *s >= seq_n => {}
+                _ => {
+                    merged.insert(key, (seq_n, value));
+                    if merged.len() > max_results {
+                        merged.pop_last();
+                    }
+                }
             }
         }
         let effective_limit = opts.limit.map_or(max_results, |l| l.min(max_results));
