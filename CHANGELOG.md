@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - System keys under `\x00idx/meta|data/`; value-as-secondary for keys under `primary_prefix`
 - Automatic index maintenance on put/delete (covers txn_commit materialization)
 - Spec: `spec/docs/secondary-index-spec.md`
+- ROADMAP: M18 marked **✅ foundation** (2026-07-12). Known limitations deferred: value-as-secondary only (no field extractors), no online backfill pause/resume, no chaos index↔primary divergence gate, no `kayactl index`, no conformance vectors v2, index + primary not multi-record atomic
 
 ### Added (M17 — Single-group ACID transactions)
 - Snapshot Isolation write intents + single-node engine txn API (`begin`/`put`/`get`/`delete`/`commit`/`rollback`)
