@@ -17,7 +17,10 @@ if ! command -v clang >/dev/null 2>&1; then
 fi
 
 echo "==> cargo test -p kaya-ebpf --features kernel-probes (tier B: bpf load + injected decode)"
-cargo test -p kaya-ebpf --features kernel-probes bpf_object_loads_without_cap_bpf kernel_load_object_and_drain_injected_ringbuf -- --test-threads=1
+# Cargo accepts a single TESTNAME filter (substring match). Run the two tier-B
+# tests separately so newer cargo does not treat the second name as an unknown flag.
+cargo test -p kaya-ebpf --features kernel-probes bpf_object_loads_without_cap_bpf -- --test-threads=1
+cargo test -p kaya-ebpf --features kernel-probes kernel_load_object_and_drain_injected_ringbuf -- --test-threads=1
 echo "==> cargo test -p kaya-ebpf --features kernel-probes (full crate)"
 cargo test -p kaya-ebpf --features kernel-probes -- --test-threads=1
 
