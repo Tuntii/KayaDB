@@ -286,23 +286,34 @@ impl TestRunner {
                 return Err("WGL register scenarios must record ops on shared key=register".into());
             }
             let overlapping = history.overlapping_interval_pairs();
+            let distinct_clients = history.distinct_client_count();
             eprintln!(
-                "[Runner] register WGL audit: key=register ops={} overlapping_pairs={} clients={}",
+                "[Runner] register WGL audit: key=register ops={} overlapping_pairs={} distinct_clients={} clients={}",
                 history.len(),
                 overlapping,
+                distinct_clients,
                 scenario.workload.clients
             );
+            // Full buffer under multi-client WGL must show concurrent multi-client work.
+            // (Under heavy kill, history may end short of max_ops; linearizability still runs.)
             if scenario.workload.clients > 1
-                && overlapping == 0
                 && scenario
                     .workload
                     .verify_max_ops
                     .is_some_and(|max| history.len() >= max)
             {
-                return Err(
-                    "WGL register scenarios require overlapping multi-client intervals on shared key=register"
-                        .into(),
-                );
+                if distinct_clients < 2 {
+                    return Err(
+                        "WGL register scenarios require ops from at least two clients on shared key=register"
+                            .into(),
+                    );
+                }
+                if overlapping == 0 {
+                    return Err(
+                        "WGL register scenarios require overlapping multi-client intervals on shared key=register"
+                            .into(),
+                    );
+                }
             }
         }
 

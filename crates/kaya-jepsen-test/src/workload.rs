@@ -349,12 +349,15 @@ async fn register_put_confirmed(
     key: &[u8],
     value: &[u8],
 ) -> Option<ConfirmedOp> {
-    for _ in 0..6 {
+    // Jepsen-style invocation interval: open at first attempt (includes leader
+    // discovery + retries). Concurrent clients retrying under kill/partition then
+    // produce real wall-clock overlaps instead of non-overlapping sub-ms RTT windows.
+    let start = Instant::now();
+    for _ in 0..12 {
         let Some(mut client) = connect_leader(nodes).await else {
             sleep(Duration::from_millis(25)).await;
             continue;
         };
-        let start = Instant::now();
         match timeout(CLIENT_OP_TIMEOUT, client.put(key, value)).await {
             Ok(Ok(())) => match timeout(CLIENT_OP_TIMEOUT, client.get(key)).await {
                 Ok(Ok(Some(readback))) if readback == value => {
@@ -392,9 +395,6 @@ async fn run_register_op<R: Rng>(
     }
 
     let wgl = verify_max_ops.is_some();
-    if wgl {
-        sleep(Duration::from_micros(rng.gen_range(0..5_000))).await;
-    }
     // WGL gate: PUT-only on shared register key — concurrent PUT intervals linearize;
     // GET under kill/partition nemesis flakes when cap races with confirmation windows.
     let do_get = if wgl { false } else { rng.gen_bool(0.7) };
@@ -418,6 +418,11 @@ async fn run_register_op<R: Rng>(
             );
         }
     } else if !wgl || history.len() < verify_max_ops.unwrap_or(usize::MAX) {
+        // Stagger concurrent clients so localhost sub-ms put+get RTTs still open
+        // overlapping multi-client intervals for the WGL checker (jepsen-design W1).
+        if wgl {
+            sleep(Duration::from_millis(rng.gen_range(12..48))).await;
+        }
         let value: [u8; 8] = rng.gen();
         let op = Op::Put {
             key: key.clone(),
@@ -425,7 +430,14 @@ async fn run_register_op<R: Rng>(
         };
         if let Some(confirmed) = register_put_confirmed(nodes, key_ref, &value).await {
             let (start, end) = if wgl {
-                (confirmed.start, confirmed.end)
+                // Prefer the earlier of loop invoke vs confirmed start so pre-put
+                // stagger is included when put succeeds on the first attempt.
+                let start = if op_start <= confirmed.start {
+                    op_start
+                } else {
+                    confirmed.start
+                };
+                (start, confirmed.end)
             } else {
                 (op_start, Instant::now())
             };

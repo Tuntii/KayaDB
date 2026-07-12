@@ -71,6 +71,10 @@ impl History {
     }
 
     /// Record when under an optional cap; returns false if the cap is already reached.
+    ///
+    /// When `max_ops` is set (WGL concurrent verify), each client may contribute at most
+    /// `max(2, ceil(max_ops / 2))` ops so one lucky client under kill recovery cannot fill
+    /// the entire history alone (would yield non-overlapping sequential intervals).
     pub fn try_record_timed(
         &self,
         max_ops: Option<usize>,
@@ -81,8 +85,15 @@ impl History {
         end_time: Instant,
     ) -> bool {
         let mut ops = self.operations.lock().unwrap();
-        if max_ops.is_some_and(|max| ops.len() >= max) {
-            return false;
+        if let Some(max) = max_ops {
+            if ops.len() >= max {
+                return false;
+            }
+            let per_client = (max.div_ceil(2)).max(2);
+            let from_client = ops.iter().filter(|o| o.client_id == client_id).count();
+            if from_client >= per_client {
+                return false;
+            }
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         ops.push(Operation {
@@ -94,6 +105,18 @@ impl History {
             end_time,
         });
         true
+    }
+
+    /// Number of distinct client IDs present in the history.
+    pub fn distinct_client_count(&self) -> usize {
+        let ops = self.operations.lock().unwrap();
+        let mut seen = Vec::new();
+        for op in ops.iter() {
+            if !seen.contains(&op.client_id) {
+                seen.push(op.client_id);
+            }
+        }
+        seen.len()
     }
 
     /// Get the number of recorded operations.
@@ -344,6 +367,50 @@ mod tests {
     use kaya_sim::Op;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn try_record_timed_enforces_per_client_cap_under_wgl_max() {
+        let history = History::new();
+        let max = 14;
+        // per_client = max(2, ceil(14/2)) = 7
+        for _ in 0..7 {
+            assert!(history.try_record_timed(
+                Some(max),
+                0,
+                Op::Put {
+                    key: b"register".to_vec(),
+                    value: b"v".to_vec(),
+                },
+                OperationResult::Ok,
+                Instant::now(),
+                Instant::now(),
+            ));
+        }
+        assert!(!history.try_record_timed(
+            Some(max),
+            0,
+            Op::Put {
+                key: b"register".to_vec(),
+                value: b"v".to_vec(),
+            },
+            OperationResult::Ok,
+            Instant::now(),
+            Instant::now(),
+        ));
+        assert!(history.try_record_timed(
+            Some(max),
+            1,
+            Op::Put {
+                key: b"register".to_vec(),
+                value: b"v".to_vec(),
+            },
+            OperationResult::Ok,
+            Instant::now(),
+            Instant::now(),
+        ));
+        assert_eq!(history.len(), 8);
+        assert_eq!(history.distinct_client_count(), 2);
+    }
 
     #[test]
     fn check_concurrent_accepts_overlapping_register_key() {
