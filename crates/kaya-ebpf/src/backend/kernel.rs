@@ -109,11 +109,29 @@ impl KernelBackend {
         })
     }
 
-    /// Load BPF object without attaching (CAP_BPF-free verification).
+    /// Verify the compiled BPF object without attaching probes.
+    ///
+    /// Prefer a full `Ebpf::load` when the runner allows map creation. On
+    /// GitHub-hosted runners, unprivileged map create often fails even after
+    /// `unprivileged_bpf_disabled=0`; fall back to `aya_obj` parse so the
+    /// compile + object gate still holds without CAP_BPF.
     pub fn verify_object_loads(bytes: &[u8]) -> Result<(), String> {
         use aya::Ebpf;
-        let bpf = Ebpf::load(bytes).map_err(|e| format!("bpf load: {e}"))?;
-        verify_programs_present(&bpf)
+        match Ebpf::load(bytes) {
+            Ok(bpf) => verify_programs_present(&bpf),
+            Err(e) => {
+                let msg = e.to_string();
+                // Map creation denied (EPERM) or similar — still require a valid object.
+                if msg.contains("failed to create map")
+                    || msg.contains("Permission denied")
+                    || msg.contains("Operation not permitted")
+                {
+                    parse_object_programs(bytes)?;
+                    return Ok(());
+                }
+                Err(format!("bpf load: {msg}"))
+            }
+        }
     }
 
     pub fn is_attached(&self) -> bool {
@@ -154,6 +172,28 @@ pub fn parse_ringbuf_batch(items: &[RawFsyncEvent], start_seq: u64) -> Vec<Probe
         .enumerate()
         .map(|(idx, raw)| parse_raw_fsync_event(raw, start_seq + idx as u64))
         .collect()
+}
+
+#[cfg(all(target_os = "linux", feature = "kernel-probes"))]
+fn parse_object_programs(bytes: &[u8]) -> Result<(), String> {
+    use aya_obj::Object;
+    let obj = Object::parse(bytes).map_err(|e| format!("aya_obj parse: {e}"))?;
+    for name in [
+        "fsync_enter",
+        "fsync_exit",
+        "fdatasync_enter",
+        "fdatasync_exit",
+    ] {
+        if !obj.programs.contains_key(name) {
+            return Err(format!("missing bpf program {name} in object"));
+        }
+    }
+    for name in ["events", "start_ns", "target_pid"] {
+        if !obj.maps.contains_key(name) {
+            return Err(format!("missing bpf map {name} in object"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(all(target_os = "linux", feature = "kernel-probes"))]
