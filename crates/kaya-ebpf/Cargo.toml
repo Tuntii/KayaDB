@@ -20,14 +20,13 @@ serde_json = "1"
 thiserror = "1"
 parking_lot = "0.12"
 aya = { version = "0.14", default-features = false, optional = true }
-aya-obj = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 
 [features]
 default = []
-kernel-probes = ["dep:aya", "dep:aya-obj"]
+kernel-probes = ["dep:aya"]
 
 [lib]
 path = "src/lib.rs"
