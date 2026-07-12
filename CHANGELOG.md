@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (M17 — Single-group ACID transactions)
+- Snapshot Isolation write intents + single-node engine txn API (`begin`/`put`/`get`/`delete`/`commit`/`rollback`)
+- Wire `TXN_*` opcodes 9–12 with server SI transaction dispatch
+- Rust client transaction API
+- TLA+ model for single-group commit (`spec/specs/txn/`)
+- Jepsen bank workload helpers and transfer-sum invariant tests
+
 ### Added (M16 — MVCC)
 - Versioned storage: typed InternalKey, multi-version memtable, SSTable v4
 - Snapshot reads via ReadTimestamp::At / get_at

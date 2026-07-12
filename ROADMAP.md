@@ -85,7 +85,7 @@ Her milestone değişmez disiplini korur: **spec → sim → gerçek implementas
 ### Faz 1 — Transaction çekirdeği (tek Raft grubu)
 
 1. **M16 — MVCC storage foundation ✅** — Complete (2026-07-12): multi-version memtable (typed `InternalKey`), SSTable v4, engine `get_at` / `ReadTimestamp::At`, compaction GC watermark, versioned sim `RefModel` + MVCC crash properties, `kayactl inspect` v4. *Exit met:* snapshot-read + GC safety in sim; workspace tests green.
-2. **M17 — Single-group ACID transactions ⬜** — `spec/docs/transactions-spec.md` (snapshot isolation + write-conflict detection; serializable stretch). Write intent/lock kayıtları, Raft üzerinden atomic commit record, `TXN_*` opcode'ları, Rust client txn API. ⬅ *TLA+ genişletme (1/2):* commit protokolü modeli. *Exit:* Jepsen **bank workload** kill+partition altında yeşil.
+2. **M17 — Single-group ACID transactions ✅** — Complete (2026-07-12): SI write intents, TXN opcodes 9–12, Rust client txn API, TLA+ commit model (`spec/specs/txn/`), bank workload. Spec: `spec/docs/transactions-spec.md` (snapshot isolation + write-conflict detection). *Exit met:* SI intents + wire/client surface + TLA+ model + bank invariant tests green.
 3. **M18 — Secondary indexes ⬜** — Transaction'la atomik bakımı yapılan index'ler, online backfill (pause/resume), index-driven scan, `kayactl index`, conformance vectors v2. *Exit:* chaos altında index↔primary divergence checker temiz.
 4. **M19 — CDC / changefeeds ⬜** — Raft-log tabanlı changefeed: resumable per-consumer cursor, per-key sıralama, at-least-once kontrat; TCP + file sink; `backup --incremental` CDC checkpoint'lerine bağlanır; Rust+Go subscribe API. *Exit:* leader failover boyunca kayıp/kontrat-dışı duplike event yok.
 
