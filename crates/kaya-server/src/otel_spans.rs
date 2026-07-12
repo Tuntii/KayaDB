@@ -1,4 +1,9 @@
 //! Optional OpenTelemetry spans at WAL fsync and flush durability boundaries (Phase 2C).
+//!
+//! **M20 multi-raft tracing stub:** when multi-raft host paths are wired through
+//! ClusterNode, attach attribute kaya.raft.group_id on propose/handle/apply
+//! spans so node↔node↔client traces demux by group. Full W3C trace-context
+//! propagation remains follow-on (M20 v1 / M24 full).
 
 use std::sync::{Mutex, OnceLock};
 

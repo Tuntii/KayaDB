@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (M20 — Multi-raft foundation)
+- Hybrid logical clock: kaya_core::Hlc with update / 	ick / 	o_u64/rom_u64 packing for commit_ts
+- Raft Envelope.group_id (default 0) + codec field after 	o_id for transport multiplexing
+- Per-group storage paths: 
+aft_group_dir / DiskRaftStorage::open_group (groups/{id}/ for id!=0; group 0 keeps legacy root)
+- MultiRaftHost + GroupId + StaticRangeTable (key → group lookup; coalesced 	ick_all; per-group propose/handle)
+- Spec: spec/docs/multi-raft-spec.md
+- ROADMAP: M20 marked **✅ foundation** (2026-07-12). Known limitations deferred: ClusterNode still single group 0, no client key routing / RANGE_MOVED, no dynamic splits, no per-range Jepsen, OTel group_id stub only, no live clock-skew nemesis, HLC not yet engine commit_ts source
+
 ### Added (M19 — CDC / changefeeds foundation)
 - Engine CDC: change events on successful user put/delete after WAL (seq, key, value, op)
 - File sink cdc/log.jsonl + per-consumer cursors cdc/cursors/{id} (EngineConfig.enable_cdc, default on)

@@ -686,7 +686,6 @@ mod tests {
     use kaya_raft::{AppendRequest, LogEntry};
 
     #[test]
-    #[test]
     fn round_trip_group_id_nonzero() {
         let env = Envelope {
             from: NodeId(1),
