@@ -429,4 +429,41 @@ mod apply_mutations_tests {
             ));
         });
     }
+
+    /// Raft apply path uses put/delete, so index + CDC must fire for batch commits.
+    #[test]
+    fn apply_mutations_maintains_index_and_cdc() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut cfg = EngineConfig::default();
+            cfg.enable_cdc = true;
+            let mut engine = Engine::open(cfg, disk).await.unwrap();
+            engine.create_index("by_val", b"user:").await.unwrap();
+
+            engine
+                .apply_mutations(
+                    vec![
+                        (b"user:1".to_vec(), Some(b"alice".to_vec())),
+                        (b"user:2".to_vec(), Some(b"bob".to_vec())),
+                    ],
+                    strict_opts(),
+                )
+                .await
+                .unwrap();
+
+            let hits = engine.scan_by_index("by_val", b"alice").await.unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].1, b"user:1");
+
+            let mut cursor = engine.cdc_subscribe("raft-apply", None).unwrap();
+            let events = engine.cdc_poll(&mut cursor, 10).unwrap();
+            assert!(
+                events.len() >= 2,
+                "expected CDC events for batch mutations, got {}",
+                events.len()
+            );
+            assert!(events.iter().any(|e| e.key == b"user:1"));
+            assert!(events.iter().any(|e| e.key == b"user:2"));
+        });
+    }
 }
