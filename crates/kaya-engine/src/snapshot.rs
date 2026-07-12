@@ -1,6 +1,6 @@
 use kaya_core::{Bytes, KayaError, Result, SequenceNumber};
 use kaya_io::{Disk, RelativePath};
-use kaya_lsm::{user_key_of, Memtable, SstableReader, TableMetadata, ValueRecord};
+use kaya_lsm::{Memtable, SstableReader, TableMetadata, ValueRecord};
 
 use super::Engine;
 
@@ -57,7 +57,7 @@ impl<D: Disk> Engine<D> {
             .iter()
             .map(|(k, rec)| {
                 // Store user keys so install_snapshot put/delete re-encodes once.
-                let uk = user_key_of(k).to_vec();
+                let uk = k.user_key.clone();
                 match rec {
                     ValueRecord::Put { value, sequence } => (uk, Some(value.clone()), *sequence),
                     ValueRecord::Delete { sequence } => (uk, None, *sequence),

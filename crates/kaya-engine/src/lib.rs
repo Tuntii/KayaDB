@@ -603,6 +603,54 @@ mod tests {
     }
 
     #[test]
+    fn engine_flush_reopen_proper_prefix_user_keys() {
+        // Regression: user keys where one is a proper prefix of another must
+        // survive flush (sorted SST emission) and reopen.
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = EngineConfig::default();
+
+            {
+                let mut engine = Engine::open(config.clone(), disk.clone()).await.unwrap();
+                engine
+                    .put(b"aa".to_vec(), b"2".to_vec(), strict_opts())
+                    .await
+                    .unwrap();
+                engine
+                    .put(b"a".to_vec(), b"1".to_vec(), strict_opts())
+                    .await
+                    .unwrap();
+                engine.flush().await.unwrap();
+                assert_eq!(
+                    engine.get(b"a", ReadOptions::default()).await.unwrap(),
+                    Some(b"1".to_vec())
+                );
+                assert_eq!(
+                    engine.get(b"aa", ReadOptions::default()).await.unwrap(),
+                    Some(b"2".to_vec())
+                );
+            }
+
+            let mut engine2 = Engine::open(config, disk).await.unwrap();
+            assert_eq!(
+                engine2.get(b"a", ReadOptions::default()).await.unwrap(),
+                Some(b"1".to_vec())
+            );
+            assert_eq!(
+                engine2.get(b"aa", ReadOptions::default()).await.unwrap(),
+                Some(b"2".to_vec())
+            );
+            let items = engine2
+                .scan_prefix(b"a", ScanOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0].key, b"a");
+            assert_eq!(items[1].key, b"aa");
+        });
+    }
+
+    #[test]
     fn engine_flush_writes_sstable_and_reopen_reads_it() {
         block_on(async {
             let disk = Arc::new(SimDisk::new());

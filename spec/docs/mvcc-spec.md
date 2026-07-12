@@ -35,7 +35,7 @@ M16 tasks.
 |---|---|
 | user_key | Logical key as seen by clients and the WAL |
 | commit_ts | Monotonic timestamp of a version; for M16 equals `SequenceNumber` |
-| internal_key | Physical key used in memtable/SST BTree order: user_key + inverted ts |
+| internal_key | Version identity (user_key, commit_ts); memtable uses typed Ord; SST v4 wire form is user_key + inverted ts |
 | read_ts | Timestamp bound for a snapshot read (`ReadTimestamp::At`) |
 | Latest | Default visibility: highest committed version of each user_key |
 | tombstone | A `Delete` version recorded at a `commit_ts` |
@@ -94,38 +94,72 @@ Decoding rules for short / legacy keys:
   and return `commit_ts = 0` (legacy / dual-read path helper; production v4
   writers always append the full suffix).
 
-### 4.2 Ordering properties
+### 4.2 Ordering properties (logical)
 
-Because the inverted timestamp is appended as big-endian bytes:
+Logical order for multi-version keys:
 
 1. **Different user_keys** order by user_key lexicographic ASC (unsigned bytes).
 2. **Same user_key** orders by commit_ts DESC (newest first): higher commit_ts
-   sorts **before** lower commit_ts in BTree / SSTable block order.
+   sorts **before** lower commit_ts.
 
 Example for user_key `k`:
 
-| commit_ts | suffix bytes meaning | relative order |
-|---|---|---|
-| 20 | `u64::MAX - 20` | first (smaller internal key) |
-| 10 | `u64::MAX - 10` | later |
+| commit_ts | relative order |
+|---|---|
+| 20 | first (newest) |
+| 10 | later |
 
 This matches RocksDB-style "newest first" iteration within a key, so a point
 lookup can stop at the first version with `commit_ts ≤ read_ts`.
 
+### 4.2.1 In-memory memtable vs on-disk wire encoding
+
+**In-memory (Memtable):** uses a typed `InternalKey { user_key, commit_ts }` with
+a custom `Ord` implementing the logical order above. Raw suffix encoding is
+**not** used as the BTree key.
+
+**Why:** the wire form `user_key ‖ (u64::MAX - ts).to_be_bytes()` does **not**
+preserve user_key lexicographic order when one user_key is a proper prefix of
+another. Counter-example:
+
+```text
+encode(b"user:1", 1) < encode(b"user", 1)
+# because after "user", ':' (0x3A) < 0xFF from the inverted-ts suffix
+# but user_key b"user" < b"user:1"
+```
+
+That breaks `iter_latest_user` emission order (flush may emit unsorted SST keys),
+`scan_prefix` early-exit / result order, and `raw_scan_prefix` documented order.
+
+**On-disk (SST v4, Task 3):** still uses the suffix encoding for the entry key
+field, but builders and seekers **must** sort/compare with the same logical
+comparator (user_key ASC, commit_ts DESC) — not raw byte order of the encoded
+form — when building blocks or seeking. Wire encode/decode helpers remain for
+serialization only.
+
+Rust surface also exports:
+
+```rust
+pub struct InternalKey {
+    pub user_key: Bytes,
+    pub commit_ts: u64,
+}
+// Ord: user_key ASC, commit_ts DESC
+```
+
 ### 4.3 Comparison contract
 
-Ordering must be identical across:
+Logical ordering must be identical across:
 
-- multi-version memtable keys,
-- SSTable v4 data blocks (internal keys in entry key field),
+- multi-version memtable keys (typed `InternalKey` Ord),
+- SSTable v4 data blocks (logical comparator when building/seeking),
 - compaction merge iterators,
 - scan / prefix bounds built from user_key prefixes.
 
-Prefix scans over user_keys remain valid: every internal key for user_key `U`
-starts with `U`, so a BTree range starting at `U` (or the first internal key of
-`U`) and ending before the next user_key successor covers all versions of
-matching user_keys. Implementations must not treat the inverted-ts suffix as
-part of the logical prefix.
+Prefix scans over user_keys remain valid under the logical order: user_keys that
+share a prefix form a contiguous range when sorted by user_key ASC.
+Implementations must not treat the inverted-ts wire suffix as part of the
+logical prefix or rely on raw encoded-byte order for proper-prefix pairs.
 
 ---
 
@@ -142,9 +176,9 @@ pub enum ValueRecord {
 
 For versioned storage:
 
-- The map key is the **internal key** (user_key + inverted commit_ts).
-- `sequence` / commit_ts on the record must equal the commit_ts embedded in the
-  internal key.
+- The memtable map key is a typed `InternalKey { user_key, commit_ts }` (logical
+  Ord; see §4.2.1). On-disk SST v4 stores the wire-encoded form of the same pair.
+- `sequence` / commit_ts on the record must equal the commit_ts on the key.
 - A **tombstone** is a `Delete` version at some `commit_ts`. It does not remove
   older versions from storage; it only hides them from readers whose
   `read_ts ≥` that tombstone's commit_ts (see §6).

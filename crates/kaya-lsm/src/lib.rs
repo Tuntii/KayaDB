@@ -7,7 +7,7 @@ mod sstable;
 pub use block_cache::BlockCacheStats;
 pub use internal_key::{
     commit_ts_of, encode_internal_key, encode_internal_key_seq, matches_user_key, user_key_of,
-    COMMIT_TS_LEN,
+    InternalKey, COMMIT_TS_LEN,
 };
 pub use compaction::{
     CompactionCandidate, CompactionPolicy, L0MergePolicy, LevelStrategy, TierStrategy,
@@ -63,13 +63,13 @@ pub enum ValueRecordRef<'a> {
 
 /// In-memory multi-version map.
 ///
-/// Map keys are **internal keys** (`user_key ‖ inverted commit_ts`). `put` /
-/// `delete` take a user key and sequence and insert a new version; existing
-/// versions of the same user key are retained. Same internal key (same user
-/// key + sequence) replaces that version only.
+/// Map keys are typed [`InternalKey`] values ordered by (user_key ASC,
+/// commit_ts DESC). `put` / `delete` take a user key and sequence and insert a
+/// new version; existing versions of the same user key are retained. Same
+/// internal key (same user key + sequence) replaces that version only.
 #[derive(Debug, Clone, Default)]
 pub struct Memtable {
-    entries: BTreeMap<Bytes, ValueRecord>,
+    entries: BTreeMap<InternalKey, ValueRecord>,
     approximate_bytes: usize,
 }
 
@@ -80,7 +80,7 @@ impl Memtable {
 
     /// Insert a Put version for `user_key` at `sequence` (commit_ts).
     pub fn put(&mut self, key: Bytes, value: Bytes, sequence: SequenceNumber) {
-        let internal = encode_internal_key_seq(&key, sequence);
+        let internal = InternalKey::from_seq(key, sequence);
         let old_size = self
             .entries
             .get(&internal)
@@ -93,7 +93,7 @@ impl Memtable {
 
     /// Insert a Delete (tombstone) version for `user_key` at `sequence`.
     pub fn delete(&mut self, key: Bytes, sequence: SequenceNumber) {
-        let internal = encode_internal_key_seq(&key, sequence);
+        let internal = InternalKey::from_seq(key, sequence);
         let old_size = self
             .entries
             .get(&internal)
@@ -111,11 +111,12 @@ impl Memtable {
 
     /// Newest version of `user_key` with `commit_ts <= read_ts`.
     pub fn get_at(&self, key: &[u8], read_ts: u64) -> Option<ValueRecordRef<'_>> {
-        // Seek to the first internal key with this user_key and ts <= read_ts.
-        // Internal order is user_key ASC, commit_ts DESC, so the first match is newest.
-        let seek = encode_internal_key(key, read_ts);
+        // With Ord (user ASC, ts DESC): versions with ts > read_ts sort before
+        // InternalKey{key, read_ts}. range from that seek yields the first
+        // entry with user_key == key and ts <= read_ts.
+        let seek = InternalKey::new(key.to_vec(), read_ts);
         for (ik, record) in self.entries.range(seek..) {
-            if !matches_user_key(ik, key) {
+            if ik.user_key.as_slice() != key {
                 return None;
             }
             return Some(record_ref(record));
@@ -136,9 +137,9 @@ impl Memtable {
         let mut selected = false;
 
         for (ik, record) in Self::iter_prefix(&self.entries, prefix) {
-            let uk = user_key_of(ik);
+            let uk = ik.user_key.as_slice();
             if !prefix.is_empty() && !uk.starts_with(prefix) {
-                // Past the prefix range (user_key order follows BTree order).
+                // Past the prefix range (user_key order is BTree order).
                 break;
             }
 
@@ -151,8 +152,7 @@ impl Memtable {
                 continue;
             }
 
-            let ts = commit_ts_of(ik);
-            if ts > read_ts {
+            if ik.commit_ts > read_ts {
                 continue;
             }
             selected = true;
@@ -171,7 +171,7 @@ impl Memtable {
     pub fn raw_scan_prefix(&self, prefix: &[u8]) -> Vec<(Bytes, Option<Bytes>, SequenceNumber)> {
         let mut items = Vec::new();
         for (ik, record) in Self::iter_prefix(&self.entries, prefix) {
-            let uk = user_key_of(ik);
+            let uk = ik.user_key.as_slice();
             if !prefix.is_empty() && !uk.starts_with(prefix) {
                 break;
             }
@@ -187,9 +187,9 @@ impl Memtable {
         items
     }
 
-    /// Zero-copy iterator over all version entries (internal keys + records).
+    /// Zero-copy iterator over all version entries (typed keys + records).
     /// Preferred for internal full-table processing (snapshot capture).
-    pub fn iter(&self) -> impl Iterator<Item = (&Bytes, &ValueRecord)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&InternalKey, &ValueRecord)> {
         self.entries.iter()
     }
 
@@ -197,13 +197,14 @@ impl Memtable {
     ///
     /// Used by flush: SST v1–v3 still store user keys; multi-version remains
     /// queryable in the memtable until Task 3/4 flush all versions as SST v4.
+    /// Emission order is user_key ascending (safe for SST builders).
     pub fn iter_latest_user(&self) -> impl Iterator<Item = (Bytes, &ValueRecord)> + '_ {
         let mut out: Vec<(Bytes, &ValueRecord)> = Vec::new();
         let mut last_uk: Option<&[u8]> = None;
         for (ik, rec) in &self.entries {
-            let uk = user_key_of(ik);
+            let uk = ik.user_key.as_slice();
             if last_uk == Some(uk) {
-                continue; // older version of same user key
+                continue; // older version of same user key (ts DESC)
             }
             last_uk = Some(uk);
             out.push((uk.to_vec(), rec));
@@ -232,23 +233,27 @@ impl Memtable {
 
     /// Iterate entries possibly under a user-key prefix.
     ///
-    /// For a non-empty prefix, seeks to `prefix` so we skip keys that sort
-    /// before it. Caller must stop when `user_key_of(ik)` no longer starts
-    /// with `prefix`.
+    /// For a non-empty prefix, seeks to the first key with `user_key >= prefix`
+    /// (highest commit_ts for an exact prefix match). Caller must stop when
+    /// `ik.user_key` no longer starts with `prefix`.
     fn iter_prefix<'a>(
-        entries: &'a BTreeMap<Bytes, ValueRecord>,
+        entries: &'a BTreeMap<InternalKey, ValueRecord>,
         prefix: &[u8],
-    ) -> Box<dyn Iterator<Item = (&'a Bytes, &'a ValueRecord)> + 'a> {
+    ) -> Box<dyn Iterator<Item = (&'a InternalKey, &'a ValueRecord)> + 'a> {
         if prefix.is_empty() {
             Box::new(entries.iter())
         } else {
-            let start = prefix.to_vec();
+            // Highest commit_ts for exact user_key == prefix is the earliest
+            // map position among keys with user_key >= prefix.
+            let start = InternalKey::new(prefix.to_vec(), u64::MAX);
             Box::new(entries.range(start..))
         }
     }
 
-    fn entry_size(key: &[u8], record: &ValueRecord) -> usize {
-        key.len()
+    /// Size accounting mirrors wire encode: user_key + 8-byte ts + value.
+    fn entry_size(key: &InternalKey, record: &ValueRecord) -> usize {
+        key.user_key.len()
+            + COMMIT_TS_LEN
             + match record {
                 ValueRecord::Put { value, .. } => value.len(),
                 ValueRecord::Delete { .. } => 0,
@@ -270,7 +275,7 @@ fn record_ref(record: &ValueRecord) -> ValueRecordRef<'_> {
 
 #[derive(Debug, Clone)]
 pub struct ImmutableMemtable {
-    entries: BTreeMap<Bytes, ValueRecord>,
+    entries: BTreeMap<InternalKey, ValueRecord>,
     approximate_bytes: usize,
 }
 
@@ -287,8 +292,8 @@ impl ImmutableMemtable {
         self.approximate_bytes
     }
 
-    /// Iterate all version entries including tombstones, in internal-key order.
-    pub fn iter(&self) -> impl Iterator<Item = (&Bytes, &ValueRecord)> {
+    /// Iterate all version entries including tombstones, in InternalKey order.
+    pub fn iter(&self) -> impl Iterator<Item = (&InternalKey, &ValueRecord)> {
         self.entries.iter()
     }
 }
@@ -390,6 +395,43 @@ mod tests {
                 + (3 + COMMIT_TS_LEN)
                 + (3 + COMMIT_TS_LEN + 100)
         );
+    }
+
+    #[test]
+    fn prefix_user_keys_order_and_visibility() {
+        let mut m = Memtable::new();
+        m.put(b"user:1".to_vec(), b"v1".to_vec(), SequenceNumber::new(1));
+        m.put(b"user".to_vec(), b"v0".to_vec(), SequenceNumber::new(2));
+        // get both
+        assert!(matches!(m.get(b"user"), Some(ValueRecordRef::Put { value, .. }) if value == b"v0"));
+        assert!(
+            matches!(m.get(b"user:1"), Some(ValueRecordRef::Put { value, .. }) if value == b"v1")
+        );
+        let scan = m.scan_prefix(b"user");
+        // user then user:1 in user_key order
+        assert_eq!(scan.len(), 2);
+        assert_eq!(scan[0].key, b"user");
+        assert_eq!(scan[1].key, b"user:1");
+
+        // raw_scan also in user_key order
+        let raw = m.raw_scan_prefix(b"user");
+        assert_eq!(raw.len(), 2);
+        assert_eq!(raw[0].0, b"user");
+        assert_eq!(raw[1].0, b"user:1");
+    }
+
+    #[test]
+    fn iter_latest_user_sorted_for_flush() {
+        let mut m = Memtable::new();
+        m.put(b"aa".to_vec(), b"2".to_vec(), SequenceNumber::new(1));
+        m.put(b"a".to_vec(), b"1".to_vec(), SequenceNumber::new(2));
+        m.put(b"a".to_vec(), b"1b".to_vec(), SequenceNumber::new(3));
+        let keys: Vec<_> = m.iter_latest_user().map(|(k, _)| k).collect();
+        assert_eq!(keys, vec![b"a".to_vec(), b"aa".to_vec()]);
+        match m.get(b"a") {
+            Some(ValueRecordRef::Put { value, .. }) => assert_eq!(value, b"1b"),
+            _ => panic!("expected latest put for a"),
+        }
     }
 
     // KD-0503: malformed SSTable footer input must not panic.

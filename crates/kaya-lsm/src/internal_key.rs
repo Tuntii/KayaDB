@@ -1,16 +1,66 @@
-//! Internal key codec for MVCC (M16).
+//! Internal key codec and in-memory key type for MVCC (M16).
 //!
-//! Layout: `user_key ‖ (u64::MAX - commit_ts).to_be_bytes()`
-//! so BTree / SSTable order is user_key ASC, newest commit_ts first.
+//! Wire layout (SST v4 / on-disk): `user_key ‖ (u64::MAX - commit_ts).to_be_bytes()`
+//!
+//! In-memory memtable order uses the typed [`InternalKey`] with a custom `Ord`
+//! (user_key ASC, commit_ts DESC). Raw byte suffix encoding does **not** preserve
+//! user_key lexicographic order when one user_key is a proper prefix of another
+//! (e.g. `"user"` vs `"user:1"`), so memtable must not sort on encoded bytes.
 //!
 //! See `spec/docs/mvcc-spec.md`.
+
+use std::cmp::Ordering;
 
 use kaya_core::{Bytes, SequenceNumber};
 
 /// Length of the inverted commit-ts suffix in bytes.
 pub const COMMIT_TS_LEN: usize = 8;
 
+/// Typed multi-version key used as the memtable map key.
+///
+/// Ordering: `user_key` ascending, then `commit_ts` descending (newest first).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InternalKey {
+    pub user_key: Bytes,
+    pub commit_ts: u64,
+}
+
+impl InternalKey {
+    pub fn new(user_key: impl Into<Bytes>, commit_ts: u64) -> Self {
+        Self {
+            user_key: user_key.into(),
+            commit_ts,
+        }
+    }
+
+    pub fn from_seq(user_key: impl Into<Bytes>, seq: SequenceNumber) -> Self {
+        Self::new(user_key, seq.get())
+    }
+
+    /// Encode to the on-disk / wire form (for SST v4 later).
+    pub fn encode(&self) -> Bytes {
+        encode_internal_key(&self.user_key, self.commit_ts)
+    }
+}
+
+impl PartialOrd for InternalKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for InternalKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.user_key
+            .cmp(&other.user_key)
+            .then_with(|| other.commit_ts.cmp(&self.commit_ts))
+    }
+}
+
 /// Encode a versioned internal key: user_key + inverted big-endian commit_ts.
+///
+/// Kept for SST v4 / wire compatibility. Do **not** use raw encoded bytes as
+/// BTree keys for memtable ordering — use [`InternalKey`] instead.
 pub fn encode_internal_key(user_key: &[u8], commit_ts: u64) -> Bytes {
     let mut out = Vec::with_capacity(user_key.len() + COMMIT_TS_LEN);
     out.extend_from_slice(user_key);
@@ -120,5 +170,46 @@ mod tests {
         let ik = encode_internal_key(b"k", u64::MAX);
         assert_eq!(commit_ts_of(&ik), u64::MAX);
         assert_eq!(user_key_of(&ik), b"k");
+    }
+
+    /// Demonstrates the wire-encoding bug: raw suffix bytes do not preserve
+    /// user_key order when one key is a proper prefix of another.
+    #[test]
+    fn wire_encode_breaks_proper_prefix_user_key_order() {
+        let user = encode_internal_key(b"user", 1);
+        let user_1 = encode_internal_key(b"user:1", 1);
+        // user_key b"user" < b"user:1", but encoded order is reversed:
+        assert!(user_1 < user);
+        // Typed InternalKey preserves logical user_key order:
+        let t_user = InternalKey::new(b"user".to_vec(), 1);
+        let t_user_1 = InternalKey::new(b"user:1".to_vec(), 1);
+        assert!(t_user < t_user_1);
+    }
+
+    #[test]
+    fn typed_internal_key_orders_user_asc_ts_desc() {
+        let a100 = InternalKey::new(b"a".to_vec(), 100);
+        let a50 = InternalKey::new(b"a".to_vec(), 50);
+        let b1 = InternalKey::new(b"b".to_vec(), 1);
+        assert!(a100 < a50); // same user: higher ts first
+        assert!(a50 < b1); // different user: user_key ASC
+        assert!(a100 < b1);
+    }
+
+    #[test]
+    fn typed_get_at_seek_lands_on_visible_version() {
+        // For user K versions ts=100,50,10 and read_ts=60, seek (K,60) should
+        // land so that the first entry >= seek is (K,50).
+        let seek = InternalKey::new(b"k".to_vec(), 60);
+        let v100 = InternalKey::new(b"k".to_vec(), 100);
+        let v50 = InternalKey::new(b"k".to_vec(), 50);
+        let v10 = InternalKey::new(b"k".to_vec(), 10);
+        assert!(v100 < seek);
+        assert!(seek <= v50);
+        assert!(v50 < v10);
+        let mut keys = vec![v100, v50.clone(), v10];
+        keys.sort();
+        let first_ge = keys.iter().find(|k| *k >= &seek).unwrap();
+        assert_eq!(first_ge, &v50);
     }
 }
