@@ -8,8 +8,6 @@
 
 **Tech Stack:** Rust workspace (kaya-core, kaya-lsm, kaya-engine, kaya-wal, kaya-sim, kaya-raft, kaya-net, kaya-server, kaya-client, kaya-jepsen-test, kayactl).
 
-**Design spec:** [`docs/superpowers/specs/2026-07-12-m16-m25-roadmap-design.md`](../specs/2026-07-12-m16-m25-roadmap-design.md)
-
 **Worktree:** `.worktrees/feat-m16-m20` on branch `feat/m16-m20-transactional-kv`
 
 **Validation (every landing task):**

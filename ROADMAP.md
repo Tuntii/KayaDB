@@ -76,8 +76,6 @@ Goal: close post-M14 parallel-track gaps across security, client ecosystem, obse
 
 ## Next arc: M16–M25 — Distributed Transactional KV
 
-**Approved design:** [`docs/superpowers/specs/2026-07-12-m16-m25-roadmap-design.md`](docs/superpowers/specs/2026-07-12-m16-m25-roadmap-design.md) (2026-07-12).
-
 **Status (2026-07-12):** **M16–M20 production path closed** on branch work (atomic multi-key `TxnCommit`, HLC commit timestamps, multi-raft `ClusterNode` + static ranges). M21–M25 remain open. We still do **not** claim full v0.2.0 / north-star production readiness until M24–M25 exit gates.
 
 **Hedef kimlik (M25):** range sharding + multi-raft + **cross-shard transaction** (Raft üzerine 2PC) — CockroachDB/TiKV çekirdeği sınıfında, adım adım kanıtlanarak. API yüzeyi programatik kalır: **KV + txn + secondary index** (SQL yok; post-M25 v2 adayı). Sıralama: **önce transaction, sonra sharding** — cross-shard txn zaten MVCC + timestamp altyapısı ister; önce tek grupta Jepsen'le kanıtla, sonra dağıt.
