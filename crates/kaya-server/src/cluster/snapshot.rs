@@ -1,22 +1,25 @@
-//! Raft snapshot install and log compaction.
+//! Raft snapshot install and log compaction (group-aware).
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use kaya_raft::{ClusterMember, ConfigChangePhase, NodeId};
+use kaya_raft::{ClusterMember, ConfigChangePhase, GroupId, NodeId};
 
 use crate::membership::{
     apply_config_change_to_roster, build_raft_snapshot_payload, parse_raft_snapshot_payload,
     SharedRoster,
 };
 
-use super::{SharedEngine, SharedRaft};
+use super::{SharedEngine, SharedRaftHost};
 
 /// Load persisted Raft snapshot once at startup (before the event loop applies entries).
+///
+/// Engine + membership snapshots live at the data-dir root (shared across groups).
+/// Group 0's Raft node receives membership restore.
 pub(crate) async fn install_persisted_snapshot_at_startup(
     data_dir: &Path,
     shared_engine: &SharedEngine,
-    shared_raft: &SharedRaft,
+    shared_host: &SharedRaftHost,
     shared_roster: &SharedRoster,
     node_id: NodeId,
     raft_addr: SocketAddr,
@@ -43,8 +46,13 @@ pub(crate) async fn install_persisted_snapshot_at_startup(
                             client_addr,
                         )
                         .await;
-                        let mut rg = shared_raft.lock().unwrap();
-                        rg.restore_config_from_snapshot(mems);
+                        let mut host = shared_host.lock().unwrap();
+                        // Restore membership on every group so effective configs stay aligned.
+                        for gid in host.sorted_group_ids() {
+                            if let Some(node) = host.get_mut(gid) {
+                                node.restore_config_from_snapshot(mems.clone());
+                            }
+                        }
                     }
                 }
                 Err(_) => {
@@ -60,7 +68,7 @@ pub(crate) async fn install_persisted_snapshot_at_startup(
 
 /// Handle any snapshot that was just installed on us (via InstallSnapshot).
 pub(crate) async fn apply_installed_raft_snapshot(
-    raft: &SharedRaft,
+    host: &SharedRaftHost,
     engine: &SharedEngine,
     roster: &SharedRoster,
     data_dir: &Path,
@@ -68,11 +76,21 @@ pub(crate) async fn apply_installed_raft_snapshot(
     self_raft: SocketAddr,
     self_client: SocketAddr,
 ) {
-    let installed_snapshot = {
-        let mut guard = raft.lock().unwrap();
-        guard.drain_installed_snapshot()
+    // Drain installed snapshots from every group.
+    let installed: Vec<(GroupId, _, _, Vec<u8>)> = {
+        let mut guard = host.lock().unwrap();
+        let mut out = Vec::new();
+        for gid in guard.sorted_group_ids() {
+            if let Some(node) = guard.get_mut(gid) {
+                if let Some((idx, term, data)) = node.drain_installed_snapshot() {
+                    out.push((gid, idx, term, data));
+                }
+            }
+        }
+        out
     };
-    if let Some((_idx, _term, data)) = installed_snapshot {
+
+    for (_gid, _idx, _term, data) in installed {
         match parse_raft_snapshot_payload(&data) {
             Ok((eng, mems)) => {
                 if !eng.is_empty() {
@@ -91,8 +109,12 @@ pub(crate) async fn apply_installed_raft_snapshot(
                         self_client,
                     )
                     .await;
-                    let mut rg = raft.lock().unwrap();
-                    rg.restore_config_from_snapshot(mems);
+                    let mut guard = host.lock().unwrap();
+                    for gid in guard.sorted_group_ids() {
+                        if let Some(node) = guard.get_mut(gid) {
+                            node.restore_config_from_snapshot(mems.clone());
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -106,91 +128,109 @@ pub(crate) async fn apply_installed_raft_snapshot(
 }
 
 /// Periodic Raft log compaction using real pinned manifest-anchored MVCC snapshot.
+///
+/// Compacts each group independently when its last_applied crosses a threshold.
 pub(crate) async fn maybe_compact_raft_log(
-    raft: &SharedRaft,
+    host: &SharedRaftHost,
     engine: &SharedEngine,
     roster: &SharedRoster,
     data_dir: &Path,
 ) {
-    let compaction_target = {
-        let guard = raft.lock().unwrap();
-        let status = guard.status();
-        if status.last_applied.0 > 0 && status.last_applied.0 % 64 == 0 {
-            Some((status.last_applied, status.current_term))
-        } else {
-            None
-        }
+    let compaction_targets: Vec<(GroupId, _, _)> = {
+        let guard = host.lock().unwrap();
+        guard
+            .sorted_group_ids()
+            .into_iter()
+            .filter_map(|gid| {
+                let status = guard.status_of(gid)?;
+                if status.last_applied.0 > 0 && status.last_applied.0 % 64 == 0 {
+                    Some((gid, status.last_applied, status.current_term))
+                } else {
+                    None
+                }
+            })
+            .collect()
     };
-    if let Some((last, term)) = compaction_target {
-        // Before replacing the Raft snapshot with a newer one, release pins held
-        // by the *previous* snapshot view on this node. Only the latest snapshot
-        // that Raft can send needs its tables protected.
-        {
-            let old_data = {
-                let guard = raft.lock().unwrap();
-                guard.snapshot().and_then(
-                    |(_idx, _term, d)| {
-                        if d.is_empty() {
-                            None
-                        } else {
-                            Some(d)
-                        }
-                    },
-                )
-            };
-            if let Some(data) = old_data {
-                let _ = engine.lock().await.release_snapshot(&data).await;
-            }
-        }
 
-        let engine_data = match engine.lock().await.create_snapshot().await {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("warning: engine snapshot failed for compaction: {e}");
-                vec![]
-            }
-        };
+    if compaction_targets.is_empty() {
+        return;
+    }
 
-        // Capture current membership so snapshot receivers (new nodes or lagging
-        // followers) can restore the correct effective config and roster even if
-        // they jump over config-change log entries.
-        let members_snapshot: Vec<ClusterMember> = {
-            let roster_guard = roster.read().await;
-            let voters: Vec<NodeId> = raft
-                .lock()
-                .unwrap()
-                .effective_config()
-                .stable_config()
-                .voters
-                .iter()
-                .copied()
-                .collect();
-            voters
-                .into_iter()
-                .filter_map(|id| {
-                    if let (Some(r), Some(c)) =
-                        (roster_guard.addr(id), roster_guard.client_addr(id))
-                    {
-                        Some(ClusterMember {
-                            id,
-                            raft_addr: r.to_string(),
-                            client_addr: c.to_string(),
-                        })
-                    } else {
+    // One engine snapshot for all groups (shared state machine).
+    // Release previous pins once (using group 0 snapshot if present).
+    {
+        let old_data = {
+            let guard = host.lock().unwrap();
+            guard
+                .get(GroupId::ZERO)
+                .and_then(|n| n.snapshot())
+                .and_then(|(_idx, _term, d)| {
+                    if d.is_empty() {
                         None
+                    } else {
+                        Some(d)
                     }
                 })
-                .collect()
         };
-
-        let snap_data = build_raft_snapshot_payload(&engine_data, &members_snapshot);
-        raft.lock().unwrap().compact(last, term, snap_data.clone());
-
-        // Persisted snapshot for fast restart. Written atomically (tmp + rename + fsync)
-        // so that a crash leaves either the old complete snapshot or the new one.
-        if !snap_data.is_empty() {
-            persist_raft_snapshot_atomically(data_dir, &snap_data);
+        if let Some(data) = old_data {
+            let _ = engine.lock().await.release_snapshot(&data).await;
         }
+    }
+
+    let engine_data = match engine.lock().await.create_snapshot().await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("warning: engine snapshot failed for compaction: {e}");
+            vec![]
+        }
+    };
+
+    // Capture current membership so snapshot receivers can restore config.
+    let members_snapshot: Vec<ClusterMember> = {
+        let roster_guard = roster.read().await;
+        let voters: Vec<NodeId> = {
+            let guard = host.lock().unwrap();
+            // Prefer group 0 membership; fall back to any group.
+            let cfg = guard
+                .get(GroupId::ZERO)
+                .or_else(|| {
+                    guard
+                        .sorted_group_ids()
+                        .into_iter()
+                        .find_map(|g| guard.get(g))
+                })
+                .map(|n| n.effective_config().stable_config().voters.clone())
+                .unwrap_or_default();
+            cfg.into_iter().collect()
+        };
+        voters
+            .into_iter()
+            .filter_map(|id| {
+                if let (Some(r), Some(c)) = (roster_guard.addr(id), roster_guard.client_addr(id)) {
+                    Some(ClusterMember {
+                        id,
+                        raft_addr: r.to_string(),
+                        client_addr: c.to_string(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    let snap_data = build_raft_snapshot_payload(&engine_data, &members_snapshot);
+
+    for (gid, last, term) in compaction_targets {
+        host.lock()
+            .unwrap()
+            .get_mut(gid)
+            .map(|n| n.compact(last, term, snap_data.clone()));
+    }
+
+    // Persisted snapshot for fast restart (shared engine+membership at root).
+    if !snap_data.is_empty() {
+        persist_raft_snapshot_atomically(data_dir, &snap_data);
     }
 }
 

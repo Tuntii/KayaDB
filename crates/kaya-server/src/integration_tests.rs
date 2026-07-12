@@ -2,6 +2,7 @@
 mod tests {
     use crate::client_auth::encode_client_auth_payload;
     use crate::cluster::{ClusterConfig, ClusterNode};
+    use kaya_raft::{GroupId, StaticRange};
     use crate::operator_auth::encode_admin_payload;
     use kaya_net::{
         decode_hello_response, decode_txn_begin_response, decode_txn_commit_response,
@@ -1575,5 +1576,96 @@ mod tests {
         handle.abort();
         let _ = std::fs::remove_dir_all(&data_dir);
     }
+
+
+    /// Single-node multi-raft: two static ranges, puts route to independent groups.
+    #[serial]
+    #[tokio::test]
+    async fn test_multi_raft_static_ranges_put_get() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_multi_raft_{}", test_id));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let r = get_free_port().await;
+        let c = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{}", r).parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{}", c).parse().unwrap();
+
+        let ranges = vec![
+            StaticRange {
+                start_key: b"a".to_vec(),
+                end_key: b"m".to_vec(),
+                group_id: GroupId(1),
+            },
+            StaticRange {
+                start_key: b"m".to_vec(),
+                end_key: b"z".to_vec(),
+                group_id: GroupId(2),
+            },
+        ];
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![])
+            .with_static_ranges(ranges);
+
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        // Wait for single-node election on all groups.
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "single-node multi-raft should elect a leader");
+
+        // Key in group 1 range [a, m)
+        let put_a = encode_put_payload(b"apple", b"red");
+        let (status, _) = roundtrip(client_addr, 1, &put_a).await.unwrap();
+        assert_eq!(status, STATUS_OK, "put apple should commit on group 1");
+
+        // Key in group 2 range [m, z)
+        let put_m = encode_put_payload(b"mango", b"yellow");
+        let (status, _) = roundtrip(client_addr, 1, &put_m).await.unwrap();
+        assert_eq!(status, STATUS_OK, "put mango should commit on group 2");
+
+        let (status, body) = roundtrip(client_addr, 2, &encode_key_payload(b"apple"))
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(decode_value_payload(&body).unwrap(), b"red");
+
+        let (status, body) = roundtrip(client_addr, 2, &encode_key_payload(b"mango"))
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(decode_value_payload(&body).unwrap(), b"yellow");
+
+        // Stats should report multiple raft groups (0 always + 1 + 2).
+        let (status, body) = roundtrip(client_addr, 6, &[]).await.unwrap();
+        assert_eq!(status, STATUS_OK);
+        let stats = String::from_utf8(body).unwrap();
+        assert!(
+            stats.contains("\"raft_groups\":3") || stats.contains("\"raft_groups\": 3"),
+            "expected 3 raft groups in stats, got: {stats}"
+        );
+
+        // Per-group disk layout for non-zero groups.
+        assert!(
+            data_dir.join("groups").join("1").exists()
+                || data_dir.join("groups").join("1").join("raft-hard-state").exists()
+                || data_dir.join("groups").is_dir(),
+            "expected groups/ directory for multi-raft layout"
+        );
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
 
 }

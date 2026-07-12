@@ -4,9 +4,10 @@
 //! Transport multiplexing uses [`crate::Envelope::group_id`]; this module
 //! stamps outgoing envelopes and demuxes by group.
 //!
-//! **Production note:** `kaya-server::ClusterNode` still defaults to a single
-//! Raft group (`GroupId(0)`). Full multi-group ClusterNode wiring, dynamic
-//! splits, and per-range Jepsen are follow-on work.
+//! **Production note:** `kaya-server::ClusterNode` always hosts a
+//! [`MultiRaftHost`] with at least group 0. Multi-group static ranges are
+//! configured via `ClusterConfig::with_static_ranges`. Dynamic splits and
+//! per-range Jepsen remain follow-on work.
 //!
 //! **Tracing (v1 stub):** when OTel is enabled at the server layer, attach a
 //! `kaya.raft.group_id` attribute on spans that touch multi-raft propose/handle
@@ -181,6 +182,104 @@ impl MultiRaftHost {
     pub fn handle_group(&mut self, group_id: GroupId, mut env: Envelope) -> Vec<Envelope> {
         env.group_id = group_id.0;
         self.handle(env)
+    }
+
+    /// Unique group ids currently hosted, sorted.
+    pub fn sorted_group_ids(&self) -> Vec<GroupId> {
+        let mut ids: Vec<GroupId> = self.groups.keys().copied().collect();
+        ids.sort();
+        ids
+    }
+
+    /// Whether the local node is leader of `group_id`.
+    pub fn is_leader_of(&self, group_id: GroupId) -> bool {
+        self.groups
+            .get(&group_id)
+            .map(|n| n.is_leader())
+            .unwrap_or(false)
+    }
+
+    /// True if this process is leader of any hosted group.
+    pub fn is_leader_any(&self) -> bool {
+        self.groups.values().any(|n| n.is_leader())
+    }
+
+    /// Status of group 0 when present (legacy single-group metrics/health).
+    pub fn primary_status(&self) -> Option<crate::node::RaftStatus> {
+        self.groups.get(&GroupId::ZERO).map(|n| n.status())
+    }
+
+    /// Status of an arbitrary group.
+    pub fn status_of(&self, group_id: GroupId) -> Option<crate::node::RaftStatus> {
+        self.groups.get(&group_id).map(|n| n.status())
+    }
+
+    /// Propose on `group_id`.
+    pub fn propose_group(&mut self, group_id: GroupId, cmd: Vec<u8>) -> Option<LogIndex> {
+        self.propose(group_id, cmd)
+    }
+
+    /// Read-index on `group_id`.
+    pub fn propose_read_group(&mut self, group_id: GroupId, request_id: u64) -> Option<LogIndex> {
+        self.groups.get_mut(&group_id)?.propose_read(request_id)
+    }
+
+    /// Broadcast AppendEntries for one group (stamps group_id).
+    pub fn broadcast_group(&mut self, group_id: GroupId) -> Vec<Envelope> {
+        let Some(node) = self.groups.get_mut(&group_id) else {
+            return Vec::new();
+        };
+        node.broadcast()
+            .into_iter()
+            .map(|mut e| {
+                e.group_id = group_id.0;
+                e
+            })
+            .collect()
+    }
+
+    /// Drain applied entries from every group as `(group_id, index, term, cmd)`.
+    pub fn drain_all_applied(&mut self) -> Vec<(GroupId, LogIndex, crate::types::Term, Vec<u8>)> {
+        let mut out = Vec::new();
+        for gid in self.sorted_group_ids() {
+            let Some(node) = self.groups.get_mut(&gid) else {
+                continue;
+            };
+            for (idx, term, cmd) in node.drain_applied() {
+                out.push((gid, idx, term, cmd));
+            }
+        }
+        out
+    }
+
+    /// Drain ready read-index ids from every group as `(group_id, request_id)`.
+    pub fn drain_all_ready_reads(&mut self) -> Vec<(GroupId, u64)> {
+        let mut out = Vec::new();
+        for gid in self.sorted_group_ids() {
+            let Some(node) = self.groups.get_mut(&gid) else {
+                continue;
+            };
+            for req_id in node.drain_ready_reads() {
+                out.push((gid, req_id));
+            }
+        }
+        out
+    }
+
+    /// Persist views for every group via the provided callback.
+    pub fn for_each_persist_view(&self, mut f: impl FnMut(GroupId, crate::storage::PersistedRaftState)) {
+        for gid in self.sorted_group_ids() {
+            if let Some(node) = self.groups.get(&gid) {
+                f(gid, node.persist_view());
+            }
+        }
+    }
+
+    /// True if `from` is a voter in any group's effective config.
+    pub fn is_voter_anywhere(&self, from: crate::types::NodeId) -> bool {
+        self.groups
+            .values()
+            .any(|n| n.effective_config().all_voters().contains(&from))
     }
 }
 
