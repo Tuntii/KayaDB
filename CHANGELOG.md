@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (M16 — MVCC)
+- Versioned storage: typed InternalKey, multi-version memtable, SSTable v4
+- Snapshot reads via ReadTimestamp::At / get_at
+- Compaction GC watermark
+- Versioned sim RefModel + MVCC crash property
+
 ### Added (Roadmap)
 - ROADMAP: new **M16–M25 "Distributed Transactional KV" arc** — txn-first sequencing (M16 MVCC → M17 single-group ACID txn → M18 secondary indexes → M19 CDC), then distribution (M20 multi-raft + HLC → M21 range metadata/splits → M22 rebalancing/placement → M23 cross-shard 2PC), then hardening + scale proof (M24 encryption-at-rest/ACL/observability, M25 grand-matrix Jepsen + ecosystem close-out → v0.2.0). API stays KV + txn + index (no SQL this arc). Every v0.1.47 deferred item is now mapped to a concrete milestone. Approved design spec: `docs/superpowers/specs/2026-07-12-m16-m25-roadmap-design.md`
 

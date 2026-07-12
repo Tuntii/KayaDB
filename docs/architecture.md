@@ -98,10 +98,12 @@ Write-ahead log layer:
 
 LSM-tree storage layer:
 
-- **Memtable** — in-memory sorted map; accumulates writes until flush threshold
-- **SSTable** — immutable sorted file: data blocks → index block → footer with bloom/CRC metadata
+- **Memtable** — in-memory sorted map of versioned keys (`InternalKey`: user_key + commit_ts); accumulates writes until flush threshold
+- **SSTable** — immutable sorted file: data blocks → index block → footer with bloom/CRC metadata (v4 stores multi-version rows per user_key)
 - **Manifest** — append-only log of LSM state transitions (flush events, compaction results)
-- **Compaction** — L0 compaction merges all L0 SSTables into a single sorted output atomically via manifest
+- **Compaction** — L0 compaction merges all L0 SSTables into a single sorted output atomically via manifest; may drop obsolete versions below the GC watermark
+
+**MVCC (M16):** Logical versions are ordered by commit timestamp (`commit_ts == SequenceNumber` for M16). Default reads remain LWW-latest; snapshot reads use `ReadTimestamp::At(ts)` / `get_at`. Compaction never drops a version with `commit_ts >= watermark`.
 
 ### `kaya-engine`
 
@@ -109,11 +111,11 @@ Public embedded API:
 
 - `Engine::open(dir, config, disk)` — opens or creates a database
 - `Engine::put(key, value)` — writes to WAL then memtable
-- `Engine::get(key)` — reads memtable first, then SSTables
-- `Engine::delete(key)` — writes a tombstone record
+- `Engine::get(key)` / `get` with `ReadOptions { read_at }` — memtable first, then SSTables (latest or snapshot)
+- `Engine::delete(key)` — writes a tombstone record at a new commit_ts
 - `Engine::scan(from, to)` — returns an iterator over a key range
 
-On restart, the engine replays the WAL into a fresh memtable, then applies the manifest to locate live SSTables.
+On restart, the engine replays the WAL into a fresh memtable, then applies the manifest to locate live SSTables. Multi-version history is reconstructed from WAL sequences and SST v4 tables.
 
 ### `kaya-sim`
 
