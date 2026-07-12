@@ -10,11 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added (M19 — CDC / changefeeds foundation)
-- Engine CDC: change events on successful user put/delete after WAL (seq, key, alue, op)
+- Engine CDC: change events on successful user put/delete after WAL (seq, key, value, op)
 - File sink cdc/log.jsonl + per-consumer cursors cdc/cursors/{id} (EngineConfig.enable_cdc, default on)
 - API: cdc_subscribe / cdc_poll / cdc_checkpoint (at-least-once; per-key order by seq)
 - Spec: spec/docs/cdc-spec.md
-- Note: kayactl backup --incremental stays file-tree based; CDC checkpoints are available for a later watermark link
+- ROADMAP: M19 marked **✅ foundation** (2026-07-12). Known limitations deferred: not Raft-log-based cluster CDC, no TCP/Go subscribe API, kayactl backup --incremental still file-tree (CDC checkpoints available for later watermark link), no leader-failover chaos / Jepsen gate, no CDC log segment compaction
 
 ### Added (M18 — Secondary indexes foundation)
 - Engine secondary indexes: `create_index` / `list_indexes` / `drop_index` / `scan_by_index`
