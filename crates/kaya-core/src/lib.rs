@@ -1,4 +1,5 @@
 mod histogram;
+mod hlc;
 mod probe_markers;
 
 use std::fmt;
@@ -6,6 +7,7 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 
 pub use histogram::{LatencyHistogram, LATENCY_BUCKET_BOUNDS_US};
+pub use hlc::Hlc;
 pub use probe_markers::{
     emit_probe_marker, set_probe_marker_callback, set_probe_span_callback, ProbeMarkerPhase,
     ProbeMarkerSite,
@@ -43,6 +45,10 @@ pub enum KayaError {
     UnsupportedVersion { found: u16 },
     #[error("data directory lock conflict")]
     LockConflict,
+    /// Write-write or intent conflict under Snapshot Isolation (M17).
+    /// Protocol status code suggested: 3 (`TXN_CONFLICT`).
+    #[error("transaction conflict")]
+    TxnConflict,
     #[error("invariant violation {id}: {message}")]
     InvariantViolation { id: String, message: String },
     #[error("internal error: {message}")]
@@ -75,6 +81,7 @@ impl KayaError {
             Self::InvalidArgument { .. } | Self::UnsupportedVersion { .. } => 4,
             Self::InvariantViolation { .. } => 5,
             Self::LockConflict => 6,
+            Self::TxnConflict => 7,
             Self::Io { .. } | Self::DiskFull | Self::FsyncFailed | Self::Internal { .. } => 1,
         }
     }
@@ -92,6 +99,10 @@ impl KayaError {
             Self::LockConflict => Some(
                 "Another process holds the data-directory lock. Stop the other KayaDB \
                  instance (or clear a stale lock) and retry.",
+            ),
+            Self::TxnConflict => Some(
+                "A concurrent transaction wrote the same key (or holds an intent). Retry \
+                 the transaction from BEGIN.",
             ),
             Self::DiskFull => Some(
                 "Free space on the data volume (compact or archive old SSTables) and retry; \
@@ -379,6 +390,11 @@ pub struct EngineConfig {
     pub limits: LimitsConfig,
     pub compaction: CompactionConfig,
     pub disable_locking: bool,
+    /// When true (default), successful user put/delete append CDC events to `cdc/log.jsonl`.
+    pub enable_cdc: bool,
+    /// When true, assign commit sequences from a hybrid logical clock (HLC) packed as
+    /// `(physical_ms << 16) | logical`. When false (default), use plain monotonic sequences.
+    pub use_hlc: bool,
 }
 
 impl Default for EngineConfig {
@@ -392,6 +408,8 @@ impl Default for EngineConfig {
             limits: LimitsConfig::default(),
             compaction: CompactionConfig::default(),
             disable_locking: false,
+            enable_cdc: true,
+            use_hlc: false,
         }
     }
 }

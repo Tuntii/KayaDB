@@ -81,7 +81,9 @@ log "==> cargo build -p kaya-ebpf --features kernel-probes"
 cargo build -p kaya-ebpf --features kernel-probes 2>&1 | tee -a "$SCRATCH/kernel-probes-build.log"
 
 log "==> tier B: bpf_object_loads + kernel_load_object_and_drain_injected_ringbuf"
-cargo test -p kaya-ebpf --features kernel-probes bpf_object_loads_without_cap_bpf kernel_load_object_and_drain_injected_ringbuf -- --test-threads=1 2>&1 | tee "$SCRATCH/kernel-ringbuf-tier-b.log"
+# One TESTNAME filter per cargo invocation (modern cargo rejects multiple names).
+cargo test -p kaya-ebpf --features kernel-probes bpf_object_loads_without_cap_bpf -- --test-threads=1 2>&1 | tee "$SCRATCH/kernel-ringbuf-tier-b.log"
+cargo test -p kaya-ebpf --features kernel-probes kernel_load_object_and_drain_injected_ringbuf -- --test-threads=1 2>&1 | tee -a "$SCRATCH/kernel-ringbuf-tier-b.log"
 
 log "==> full kaya-ebpf kernel-probes tests"
 cargo test -p kaya-ebpf --features kernel-probes -- --test-threads=1 2>&1 | tee "$SCRATCH/kernel-ringbuf-kernel-probes.log"

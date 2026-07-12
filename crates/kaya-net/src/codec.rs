@@ -6,6 +6,7 @@
 //! frame_len : u32 LE   (byte count of everything that follows)
 //! from_id   : u64 LE
 //! to_id     : u64 LE
+//! group_id  : u64 LE   (multi-raft group; 0 = single-group / legacy)
 //! msg_type  : u8       (1 = VoteRequest, 2 = VoteResponse,
 //!                       3 = AppendRequest, 4 = AppendResponse)
 //! <message-specific fields>
@@ -42,6 +43,22 @@ pub const HELLO_OPCODE: u8 = 0;
 /// client protocol opcodes and Opcode enum values.
 pub const ADD_MEMBER_OPCODE: u8 = 7;
 pub const REMOVE_MEMBER_OPCODE: u8 = 8;
+
+/// TXN_BEGIN — start a Snapshot Isolation transaction.
+pub const TXN_BEGIN_OPCODE: u8 = 9;
+/// TXN_OP — get/put/delete within a transaction.
+pub const TXN_OP_OPCODE: u8 = 10;
+/// TXN_COMMIT — commit staged intents.
+pub const TXN_COMMIT_OPCODE: u8 = 11;
+/// TXN_ROLLBACK — discard staged intents.
+pub const TXN_ROLLBACK_OPCODE: u8 = 12;
+
+/// TXN_OP kind: point get under the txn snapshot (with RYW).
+pub const TXN_OP_GET: u8 = 1;
+/// TXN_OP kind: stage a put intent.
+pub const TXN_OP_PUT: u8 = 2;
+/// TXN_OP kind: stage a delete intent.
+pub const TXN_OP_DELETE: u8 = 3;
 
 /// Prefix used to optionally frame an operator token before admin opcode+payload.
 /// Format when present: ADMIN\x00 | token_len(u16 LE) | token_bytes | opcode(u8) | inner
@@ -122,6 +139,7 @@ pub fn encode_envelope(env: &Envelope) -> Vec<u8> {
     let mut body = Vec::new();
     push_u64(&mut body, env.from.0);
     push_u64(&mut body, env.to.0);
+    push_u64(&mut body, env.group_id);
     match &env.message {
         Message::VoteRequest(m) => {
             push_u8(&mut body, MSG_VOTE_REQUEST);
@@ -201,6 +219,7 @@ pub fn decode_envelope(data: &[u8]) -> Result<Envelope, String> {
     let mut cur = data;
     let from = NodeId(take_u64(&mut cur)?);
     let to = NodeId(take_u64(&mut cur)?);
+    let group_id = take_u64(&mut cur)?;
     let msg_type = take_u8(&mut cur)?;
 
     let message = match msg_type {
@@ -308,7 +327,12 @@ pub fn decode_envelope(data: &[u8]) -> Result<Envelope, String> {
         t => return Err(format!("unknown Raft message type: {t}")),
     };
 
-    Ok(Envelope { from, to, message })
+    Ok(Envelope {
+        from,
+        to,
+        group_id,
+        message,
+    })
 }
 
 // ── client protocol payload helpers ──────────────────────────────────────────
@@ -562,6 +586,88 @@ pub fn decode_scan_response(data: &[u8]) -> Result<ScanItems, String> {
     Ok(items)
 }
 
+// ── transaction (M17) payload helpers ────────────────────────────────────────
+
+/// Encode TXN_BEGIN OK response: `txn_id(u64 LE) | snapshot_ts(u64 LE)`.
+pub fn encode_txn_begin_response(txn_id: u64, snapshot_ts: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16);
+    out.extend_from_slice(&txn_id.to_le_bytes());
+    out.extend_from_slice(&snapshot_ts.to_le_bytes());
+    out
+}
+
+/// Decode TXN_BEGIN OK response.
+pub fn decode_txn_begin_response(data: &[u8]) -> Result<(u64, u64), String> {
+    let mut cur = data;
+    let txn_id = take_u64(&mut cur)?;
+    let snapshot_ts = take_u64(&mut cur)?;
+    Ok((txn_id, snapshot_ts))
+}
+
+/// Encode TXN_OP request:
+/// `txn_id(u64 LE) | op(u8) | key_len(u32 LE) | key | [value_len(u32 LE) | value for put]`.
+///
+/// `op`: [`TXN_OP_GET`]=1, [`TXN_OP_PUT`]=2, [`TXN_OP_DELETE`]=3.
+/// For put, `value` must be `Some`; for get/delete it is ignored.
+pub fn encode_txn_op_payload(txn_id: u64, op: u8, key: &[u8], value: Option<&[u8]>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + 1 + 4 + key.len() + 4 + value.map_or(0, |v| v.len()));
+    out.extend_from_slice(&txn_id.to_le_bytes());
+    out.push(op);
+    out.extend_from_slice(&(key.len() as u32).to_le_bytes());
+    out.extend_from_slice(key);
+    if op == TXN_OP_PUT {
+        let v = value.unwrap_or(&[]);
+        out.extend_from_slice(&(v.len() as u32).to_le_bytes());
+        out.extend_from_slice(v);
+    }
+    out
+}
+
+/// Decoded TXN_OP request: `(txn_id, op, key, value)` — `value` is `Some` only for put.
+pub type TxnOpPayload = (u64, u8, Vec<u8>, Option<Vec<u8>>);
+
+/// Decode TXN_OP request. Returns `(txn_id, op, key, value)` where `value` is
+/// `Some` only for put.
+pub fn decode_txn_op_payload(data: &[u8]) -> Result<TxnOpPayload, String> {
+    let mut cur = data;
+    let txn_id = take_u64(&mut cur)?;
+    let op = take_u8(&mut cur)?;
+    let key_len = take_u32(&mut cur)? as usize;
+    let key = take_bytes(&mut cur, key_len)?;
+    let value = if op == TXN_OP_PUT {
+        let value_len = take_u32(&mut cur)? as usize;
+        Some(take_bytes(&mut cur, value_len)?)
+    } else {
+        None
+    };
+    match op {
+        TXN_OP_GET | TXN_OP_PUT | TXN_OP_DELETE => Ok((txn_id, op, key, value)),
+        other => Err(format!("unknown TXN_OP kind: {other}")),
+    }
+}
+
+/// Encode TXN_COMMIT / TXN_ROLLBACK request: `txn_id(u64 LE)`.
+pub fn encode_txn_id_payload(txn_id: u64) -> Vec<u8> {
+    txn_id.to_le_bytes().to_vec()
+}
+
+/// Decode TXN_COMMIT / TXN_ROLLBACK request.
+pub fn decode_txn_id_payload(data: &[u8]) -> Result<u64, String> {
+    let mut cur = data;
+    take_u64(&mut cur)
+}
+
+/// Encode TXN_COMMIT OK response: `commit_ts(u64 LE)`.
+pub fn encode_txn_commit_response(commit_ts: u64) -> Vec<u8> {
+    commit_ts.to_le_bytes().to_vec()
+}
+
+/// Decode TXN_COMMIT OK response.
+pub fn decode_txn_commit_response(data: &[u8]) -> Result<u64, String> {
+    let mut cur = data;
+    take_u64(&mut cur)
+}
+
 /// Encode an error string as a response payload: `msg_len(u32) | msg_bytes`.
 pub fn encode_error_payload(msg: &str) -> Vec<u8> {
     let bytes = msg.as_bytes();
@@ -587,10 +693,29 @@ mod tests {
     use kaya_raft::{AppendRequest, LogEntry};
 
     #[test]
+    fn round_trip_group_id_nonzero() {
+        let env = Envelope {
+            from: NodeId(1),
+            to: NodeId(2),
+            group_id: 42,
+            message: Message::VoteResponse(VoteResponse {
+                term: Term(1),
+                vote_granted: false,
+            }),
+        };
+        let encoded = encode_envelope(&env);
+        let decoded = decode_envelope(&encoded[4..]).unwrap();
+        assert_eq!(decoded.group_id, 42);
+        assert_eq!(decoded.from, NodeId(1));
+        assert_eq!(decoded.to, NodeId(2));
+    }
+
+    #[test]
     fn round_trip_vote_request() {
         let env = Envelope {
             from: NodeId(1),
             to: NodeId(2),
+            group_id: 0,
             message: Message::VoteRequest(VoteRequest {
                 term: Term(3),
                 candidate_id: NodeId(1),
@@ -616,6 +741,7 @@ mod tests {
         let env = Envelope {
             from: NodeId(2),
             to: NodeId(1),
+            group_id: 0,
             message: Message::VoteResponse(VoteResponse {
                 term: Term(3),
                 vote_granted: true,
@@ -645,6 +771,7 @@ mod tests {
         let env = Envelope {
             from: NodeId(1),
             to: NodeId(3),
+            group_id: 0,
             message: Message::AppendRequest(AppendRequest {
                 term: Term(2),
                 leader_id: NodeId(1),
@@ -673,6 +800,7 @@ mod tests {
         let env = Envelope {
             from: NodeId(1),
             to: NodeId(3),
+            group_id: 0,
             message: Message::InstallSnapshotRequest(InstallSnapshotRequest {
                 term: Term(4),
                 leader_id: NodeId(1),
@@ -698,6 +826,7 @@ mod tests {
         let env = Envelope {
             from: NodeId(3),
             to: NodeId(1),
+            group_id: 0,
             message: Message::InstallSnapshotResponse(InstallSnapshotResponse {
                 term: Term(4),
                 success: true,
@@ -719,6 +848,7 @@ mod tests {
         let env = Envelope {
             from: NodeId(1),
             to: NodeId(2),
+            group_id: 0,
             message: Message::ConfigChangeRequest(ConfigChangeRequest {
                 term: Term(7),
                 old_peers: vec![NodeId(1), NodeId(2)],
@@ -743,6 +873,7 @@ mod tests {
         let env = Envelope {
             from: NodeId(2),
             to: NodeId(1),
+            group_id: 0,
             message: Message::ConfigChangeResponse(ConfigChangeResponse {
                 term: Term(7),
                 success: true,
@@ -762,6 +893,7 @@ mod tests {
         let env = Envelope {
             from: NodeId(2),
             to: NodeId(1),
+            group_id: 0,
             message: Message::AppendResponse(AppendResponse {
                 term: Term(2),
                 success: true,
@@ -1053,6 +1185,10 @@ mod tests {
             let _ = decode_scan_response(input);
             let _ = decode_error_payload(input);
             let _ = decode_envelope(input);
+            let _ = decode_txn_begin_response(input);
+            let _ = decode_txn_op_payload(input);
+            let _ = decode_txn_id_payload(input);
+            let _ = decode_txn_commit_response(input);
         }
     }
 
@@ -1098,5 +1234,96 @@ mod tests {
         let (decoded_inner, presented) = decode_client_auth_payload(&payload).unwrap();
         assert_eq!(decoded_inner, inner);
         assert!(presented.is_none());
+    }
+
+    #[test]
+    fn round_trip_txn_begin_response() {
+        let payload = encode_txn_begin_response(42, 7);
+        assert_eq!(decode_txn_begin_response(&payload).unwrap(), (42, 7));
+    }
+
+    #[test]
+    fn decode_txn_begin_response_truncated() {
+        assert!(decode_txn_begin_response(&[]).is_err());
+        assert!(decode_txn_begin_response(&[1u8; 8]).is_err());
+    }
+
+    #[test]
+    fn round_trip_txn_op_get() {
+        let payload = encode_txn_op_payload(9, TXN_OP_GET, b"key", None);
+        let (txn_id, op, key, value) = decode_txn_op_payload(&payload).unwrap();
+        assert_eq!(txn_id, 9);
+        assert_eq!(op, TXN_OP_GET);
+        assert_eq!(key, b"key");
+        assert!(value.is_none());
+    }
+
+    #[test]
+    fn round_trip_txn_op_put() {
+        let payload = encode_txn_op_payload(1, TXN_OP_PUT, b"k", Some(b"v"));
+        let (txn_id, op, key, value) = decode_txn_op_payload(&payload).unwrap();
+        assert_eq!(txn_id, 1);
+        assert_eq!(op, TXN_OP_PUT);
+        assert_eq!(key, b"k");
+        assert_eq!(value.as_deref(), Some(b"v".as_ref()));
+    }
+
+    #[test]
+    fn round_trip_txn_op_delete() {
+        let payload = encode_txn_op_payload(3, TXN_OP_DELETE, b"gone", None);
+        let (txn_id, op, key, value) = decode_txn_op_payload(&payload).unwrap();
+        assert_eq!(
+            (txn_id, op, key, value),
+            (3, TXN_OP_DELETE, b"gone".to_vec(), None)
+        );
+    }
+
+    #[test]
+    fn round_trip_txn_op_put_empty_value() {
+        let payload = encode_txn_op_payload(2, TXN_OP_PUT, b"k", Some(b""));
+        let (_, op, key, value) = decode_txn_op_payload(&payload).unwrap();
+        assert_eq!(op, TXN_OP_PUT);
+        assert_eq!(key, b"k");
+        assert_eq!(value.as_deref(), Some(b"".as_ref()));
+    }
+
+    #[test]
+    fn decode_txn_op_unknown_kind() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.push(99);
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.push(b'x');
+        assert!(decode_txn_op_payload(&data).is_err());
+    }
+
+    #[test]
+    fn decode_txn_op_truncated() {
+        assert!(decode_txn_op_payload(&[]).is_err());
+        assert!(decode_txn_op_payload(&[0u8; 8]).is_err());
+    }
+
+    #[test]
+    fn round_trip_txn_id_payload() {
+        let payload = encode_txn_id_payload(12345);
+        assert_eq!(decode_txn_id_payload(&payload).unwrap(), 12345);
+    }
+
+    #[test]
+    fn decode_txn_id_payload_truncated() {
+        assert!(decode_txn_id_payload(&[]).is_err());
+        assert!(decode_txn_id_payload(&[1u8; 4]).is_err());
+    }
+
+    #[test]
+    fn round_trip_txn_commit_response() {
+        let payload = encode_txn_commit_response(99);
+        assert_eq!(decode_txn_commit_response(&payload).unwrap(), 99);
+    }
+
+    #[test]
+    fn decode_txn_commit_response_truncated() {
+        assert!(decode_txn_commit_response(&[]).is_err());
+        assert!(decode_txn_commit_response(&[1u8; 3]).is_err());
     }
 }

@@ -1,7 +1,12 @@
 //! Concurrent client workload generators.
 
+use crate::bank::{
+    bank_account_key, bank_expected_total, bank_transfer, seed_bank_accounts, BANK_INITIAL_BALANCE,
+    BANK_NUM_ACCOUNTS,
+};
 use crate::history::{History, OperationResult};
 use kaya_client::KayaClient;
+use kaya_core::KayaError;
 use kaya_sim::Op;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -107,6 +112,8 @@ pub enum WorkloadType {
     Set,
     /// Multi-key map operations
     Map,
+    /// Multi-key bank transfers via SI txn API (M17)
+    Bank,
 }
 
 /// A workload generator.
@@ -233,6 +240,17 @@ async fn run_client(
             }
             WorkloadType::Map => {
                 run_map_op(
+                    &mut client,
+                    client_id,
+                    &history,
+                    &mut rng,
+                    verify_max_ops,
+                    op_start,
+                )
+                .await;
+            }
+            WorkloadType::Bank => {
+                run_bank_op(
                     &mut client,
                     client_id,
                     &history,
@@ -667,6 +685,101 @@ async fn run_map_op<R: Rng>(
             Err(_) => {}
         }
     }
+}
+
+async fn run_bank_op<R: Rng>(
+    client: &mut KayaClient,
+    client_id: usize,
+    history: &Arc<History>,
+    rng: &mut R,
+    verify_max_ops: Option<usize>,
+    op_start: Instant,
+) {
+    let from = rng.gen_range(0..BANK_NUM_ACCOUNTS);
+    let mut to = rng.gen_range(0..BANK_NUM_ACCOUNTS);
+    if to == from {
+        to = (from + 1) % BANK_NUM_ACCOUNTS;
+    }
+    let amount: i64 = rng.gen_range(1..=20);
+    let from_key = bank_account_key(from);
+    // Record as Put on debit key; verification uses sum invariant, not WGL.
+    let meta = format!("xfer:{from}->{to}:{amount}").into_bytes();
+    let op = Op::Put {
+        key: from_key,
+        value: meta,
+    };
+
+    match timeout(CLIENT_OP_TIMEOUT, bank_transfer(client, from, to, amount)).await {
+        Ok(Ok(true)) => {
+            record_completed(
+                history,
+                client_id,
+                op,
+                OperationResult::Ok,
+                op_start,
+                verify_max_ops,
+                Instant::now(),
+            );
+        }
+        Ok(Ok(false)) => {
+            record_completed(
+                history,
+                client_id,
+                op,
+                OperationResult::Error("insufficient funds or no-op".into()),
+                op_start,
+                verify_max_ops,
+                Instant::now(),
+            );
+        }
+        Ok(Err(KayaError::TxnConflict)) => {
+            record_completed(
+                history,
+                client_id,
+                op,
+                OperationResult::Error("txn conflict".into()),
+                op_start,
+                verify_max_ops,
+                Instant::now(),
+            );
+        }
+        Ok(Err(e)) => {
+            record_completed(
+                history,
+                client_id,
+                op,
+                OperationResult::Error(e.to_string()),
+                op_start,
+                verify_max_ops,
+                Instant::now(),
+            );
+        }
+        Err(_) => {}
+    }
+}
+
+/// Seed bank accounts on a live leader (read-back checks the initial sum).
+pub async fn seed_bank_on_cluster(nodes: &[SocketAddr]) -> Result<(), String> {
+    let Some(mut client) = connect_leader(nodes).await else {
+        return Err("no leader available to seed bank accounts".into());
+    };
+    seed_bank_accounts(&mut client, BANK_NUM_ACCOUNTS, BANK_INITIAL_BALANCE).await?;
+    let expected = bank_expected_total(BANK_NUM_ACCOUNTS, BANK_INITIAL_BALANCE);
+    let mut total = 0i64;
+    for i in 0..BANK_NUM_ACCOUNTS {
+        let key = bank_account_key(i);
+        match client.get(&key).await {
+            Ok(Some(v)) => {
+                total += crate::bank::parse_balance(&v)?;
+            }
+            Ok(None) => return Err(format!("seed missing acct:{i}")),
+            Err(e) => return Err(format!("seed readback acct:{i}: {e}")),
+        }
+    }
+    if total != expected {
+        return Err(format!("seed sum {total} != expected {expected}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

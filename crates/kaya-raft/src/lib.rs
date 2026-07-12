@@ -2,6 +2,7 @@ mod cluster_config;
 mod command;
 mod log;
 mod message;
+mod multi_raft;
 mod node;
 mod storage;
 mod types;
@@ -12,12 +13,13 @@ mod disk_storage;
 pub use cluster_config::{ClusterConfiguration, EffectiveConfig};
 pub use command::{ClusterMember, ConfigChangePhase, RaftCommand};
 #[cfg(feature = "disk-storage")]
-pub use disk_storage::DiskRaftStorage;
+pub use disk_storage::{raft_group_dir, DiskRaftStorage};
 pub use log::{LogEntry, MemLog};
 pub use message::{
     AppendRequest, AppendResponse, ConfigChangeRequest, ConfigChangeResponse, Envelope,
     InstallSnapshotRequest, InstallSnapshotResponse, Message, VoteRequest, VoteResponse,
 };
+pub use multi_raft::{multi_raft_group_dir, GroupId, MultiRaftHost, StaticRange, StaticRangeTable};
 pub use node::{RaftConfig, RaftNode, RaftStatus, Role};
 pub use storage::{
     decode_hard_state, decode_log_file, default_hard_state, encode_hard_state, encode_log_file,

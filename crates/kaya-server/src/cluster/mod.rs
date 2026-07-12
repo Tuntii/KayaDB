@@ -6,11 +6,11 @@
 //! 1. The engine is opened from `config.data_dir`.
 //! 2. A TCP listener is bound for Raft peer messages.
 //! 3. A TCP listener is bound for client connections.
-//! 4. A *Raft loop* task drives [`RaftNode::tick`] on a timer and reacts to
-//!    incoming peer messages and client proposals.
+//! 4. A *Raft loop* task drives [`MultiRaftHost::tick_all`] on a timer and
+//!    reacts to incoming peer messages (demux by `group_id`) and client proposals.
 //! 5. A *client accept loop* task handles incoming `kayactl`/protocol
-//!    connections: GET/SCAN are served directly from the engine; PUT/DELETE
-//!    are routed through Raft and acknowledged once committed.
+//!    connections: GET/SCAN/PUT/DELETE route via the static range table to the
+//!    owning Raft group; writes are acknowledged once committed on that group.
 
 mod client_ops;
 mod election;
@@ -32,7 +32,10 @@ use kaya_core::{DurabilityConfig, DurabilityMode, EngineConfig};
 use kaya_engine::Engine;
 use kaya_io::FileDisk;
 use kaya_net::{start_raft_listener, NodeRoster};
-use kaya_raft::{LogIndex, NodeId, RaftConfig, RaftNode};
+use kaya_raft::{
+    multi_raft_group_dir, GroupId, LogIndex, MultiRaftHost, NodeId, RaftConfig, RaftNode,
+    StaticRange, StaticRangeTable,
+};
 
 #[cfg(feature = "tls")]
 use kaya_net::start_raft_listener_tls;
@@ -107,6 +110,11 @@ pub struct ClusterConfig {
     /// When true, emit OpenTelemetry spans at durability boundaries (`otel` feature).
     #[cfg(feature = "otel")]
     pub otel_enabled: bool,
+    /// When true, engine commit sequences are assigned from a hybrid logical clock.
+    /// Default false for back-compat; enabled automatically when multi-group ranges are configured.
+    pub use_hlc: bool,
+    /// Static key-range -> Raft group routing. Default is single group 0 (whole keyspace).
+    pub range_table: StaticRangeTable,
 }
 
 impl ClusterConfig {
@@ -153,6 +161,8 @@ impl ClusterConfig {
             ebpf_seed: 0,
             #[cfg(feature = "otel")]
             otel_enabled: false,
+            use_hlc: false,
+            range_table: StaticRangeTable::single_group(GroupId::ZERO),
         }
     }
 
@@ -232,6 +242,18 @@ impl ClusterConfig {
         self.otel_enabled = true;
         self
     }
+
+    /// Enable hybrid-logical-clock commit timestamps on the local engine.
+    pub fn with_use_hlc(mut self) -> Self {
+        self.use_hlc = true;
+        self
+    }
+
+    /// Configure static key-range -> Raft group routing (multi-raft production path).
+    pub fn with_static_ranges(mut self, ranges: Vec<StaticRange>) -> Self {
+        self.range_table = StaticRangeTable::from_ranges(ranges);
+        self
+    }
 }
 
 /// A running cluster node.
@@ -254,16 +276,18 @@ impl ClusterNode {
 
 // ── internal types ────────────────────────────────────────────────────────────
 
-pub(crate) type SharedRaft = Arc<Mutex<RaftNode>>;
-pub(crate) type SharedPersister = Arc<Mutex<RaftPersister>>;
+/// Always a MultiRaftHost (at least group 0).
+pub(crate) type SharedRaftHost = Arc<Mutex<MultiRaftHost>>;
+pub(crate) type SharedPersisters = Arc<Mutex<HashMap<u64, RaftPersister>>>;
 pub(crate) type SharedEngine = Arc<tokio::sync::Mutex<Engine<FileDisk>>>;
-// LogIndex → oneshot channel for the client waiting on that proposal.
-pub(crate) type PendingMap = HashMap<LogIndex, tokio::sync::oneshot::Sender<Result<(), String>>>;
+// (group_id, LogIndex) → oneshot channel for the client waiting on that proposal.
+pub(crate) type PendingKey = (u64, LogIndex);
+pub(crate) type PendingMap = HashMap<PendingKey, tokio::sync::oneshot::Sender<Result<(), String>>>;
 pub(crate) type SharedPending = Arc<Mutex<PendingMap>>;
 
 pub(crate) type PendingReadsMap = HashMap<u64, tokio::sync::oneshot::Sender<Result<(), String>>>;
 pub(crate) type SharedPendingReads = Arc<Mutex<PendingReadsMap>>;
-pub(crate) type SharedApplyIndex = Arc<Mutex<RaftApplyIndex>>;
+pub(crate) type SharedApplyIndexes = Arc<Mutex<HashMap<u64, RaftApplyIndex>>>;
 
 // ── startup ───────────────────────────────────────────────────────────────────
 
@@ -278,6 +302,16 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     #[cfg(not(feature = "ebpf"))]
     let durability_mode = DurabilityMode::Relaxed;
 
+    let multi_group = {
+        let ids: std::collections::BTreeSet<u64> = config
+            .range_table
+            .ranges()
+            .iter()
+            .map(|r| r.group_id.0)
+            .collect();
+        ids.len() > 1
+    };
+
     let engine_cfg = {
         // `mut` is only exercised when the ebpf feature shrinks the memtable below.
         #[cfg_attr(not(feature = "ebpf"), allow(unused_mut))]
@@ -287,6 +321,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
                 mode: durability_mode,
                 ..DurabilityConfig::default()
             },
+            use_hlc: config.use_hlc || multi_group,
             ..EngineConfig::default()
         };
         #[cfg(feature = "ebpf")]
@@ -308,44 +343,76 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let shared_engine: SharedEngine = Arc::new(tokio::sync::Mutex::new(engine));
 
-    // ── raft node ─────────────────────────────────────────────────────────────
+    // ── multi-raft host (always ≥ group 0) ────────────────────────────────────
     let peers: Vec<NodeId> = config
         .roster
         .all_ids()
         .into_iter()
         .filter(|&id| id != config.node_id)
         .collect();
-    let raft_cfg = RaftConfig {
-        id: config.node_id,
-        peers,
-        election_timeout_ticks: config.election_timeout_ticks,
-        heartbeat_interval_ticks: config.heartbeat_interval_ticks,
-    };
 
-    let mut persister =
-        RaftPersister::open(&config.data_dir).map_err(|e| std::io::Error::other(e.to_string()))?;
-    let apply_path = config.data_dir.join("raft-apply-index.jsonl");
-    let apply_floor = RaftApplyIndex::load_all(&apply_path)
-        .map(|recs| {
-            recs.into_iter()
-                .map(|r| r.index)
-                .max()
-                .unwrap_or(LogIndex(0))
-        })
-        .unwrap_or(LogIndex(0));
+    let mut group_ids: std::collections::BTreeSet<u64> = config
+        .range_table
+        .ranges()
+        .iter()
+        .map(|r| r.group_id.0)
+        .collect();
+    if group_ids.is_empty() {
+        group_ids.insert(0);
+    }
+    // Always host group 0 for membership / legacy clients.
+    group_ids.insert(0);
 
-    let raft_node = match persister.load_state().map_err(std::io::Error::other)? {
-        Some(state) => {
-            let seed = state.clone();
-            let mut node = RaftNode::recover(raft_cfg, state);
-            node.set_recovered_apply_floor(apply_floor);
-            persister.seed_last_persisted(seed);
-            node
+    let mut host = MultiRaftHost::new();
+    let mut persister_map: HashMap<u64, RaftPersister> = HashMap::new();
+    let mut apply_map: HashMap<u64, RaftApplyIndex> = HashMap::new();
+
+    for gid in group_ids {
+        let group_dir = multi_raft_group_dir(&config.data_dir, GroupId(gid));
+        if gid != 0 {
+            std::fs::create_dir_all(&group_dir).map_err(|e| {
+                std::io::Error::other(format!("create group dir {}: {e}", group_dir.display()))
+            })?;
         }
-        None => RaftNode::new(raft_cfg),
-    };
-    let shared_raft: SharedRaft = Arc::new(Mutex::new(raft_node));
-    let shared_persister: SharedPersister = Arc::new(Mutex::new(persister));
+        let raft_cfg = RaftConfig {
+            id: config.node_id,
+            peers: peers.clone(),
+            election_timeout_ticks: config.election_timeout_ticks,
+            heartbeat_interval_ticks: config.heartbeat_interval_ticks,
+        };
+        let mut persister =
+            RaftPersister::open(&group_dir).map_err(|e| std::io::Error::other(e.to_string()))?;
+        let apply_path = group_dir.join("raft-apply-index.jsonl");
+        let apply_floor = RaftApplyIndex::load_all(&apply_path)
+            .map(|recs| {
+                recs.into_iter()
+                    .map(|r| r.index)
+                    .max()
+                    .unwrap_or(LogIndex(0))
+            })
+            .unwrap_or(LogIndex(0));
+        let raft_node = match persister.load_state().map_err(std::io::Error::other)? {
+            Some(state) => {
+                let seed = state.clone();
+                let mut node = RaftNode::recover(raft_cfg, state);
+                node.set_recovered_apply_floor(apply_floor);
+                persister.seed_last_persisted(seed);
+                node
+            }
+            None => RaftNode::new(raft_cfg),
+        };
+        host.insert(GroupId(gid), raft_node);
+        persister_map.insert(gid, persister);
+        apply_map.insert(
+            gid,
+            RaftApplyIndex::open(&group_dir).map_err(|e| std::io::Error::other(e.to_string()))?,
+        );
+    }
+
+    let shared_raft: SharedRaftHost = Arc::new(Mutex::new(host));
+    let shared_persisters: SharedPersisters = Arc::new(Mutex::new(persister_map));
+    let apply_indexes: SharedApplyIndexes = Arc::new(Mutex::new(apply_map));
+    let shared_range_table = Arc::new(config.range_table.clone());
 
     let mut roster = config.roster.clone();
     load_persisted_roster(&config.data_dir, &mut roster);
@@ -365,9 +432,6 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
 
     let shared_pending: SharedPending = Arc::new(Mutex::new(HashMap::new()));
     let shared_pending_reads: SharedPendingReads = Arc::new(Mutex::new(HashMap::new()));
-    let apply_index = Arc::new(Mutex::new(
-        RaftApplyIndex::open(&config.data_dir).map_err(|e| std::io::Error::other(e.to_string()))?,
-    ));
 
     // ── raft listener ─────────────────────────────────────────────────────────
     let (incoming_tx, incoming_rx) = mpsc::channel(512);
@@ -554,6 +618,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         rtx,
         next_id,
         ros.clone(),
+        shared_range_table,
         self_id,
         self_raft,
         self_client,
@@ -577,11 +642,11 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
 
     let raft_fut = election::raft_event_loop(
         shared_raft,
-        shared_persister,
+        shared_persisters,
         shared_engine,
         shared_roster,
         config.data_dir.clone(),
-        apply_index,
+        apply_indexes,
         incoming_rx,
         propose_rx,
         read_propose_rx,
@@ -704,7 +769,7 @@ async fn shutdown_signal(node_id: u64) {
 #[cfg(feature = "ebpf")]
 async fn metrics_accept_loop(
     listener: TcpListener,
-    raft: SharedRaft,
+    raft: SharedRaftHost,
     engine: SharedEngine,
     ebpf: Option<SharedProbeManager>,
 ) -> std::io::Result<()> {
@@ -722,7 +787,7 @@ async fn metrics_accept_loop(
 #[cfg(not(feature = "ebpf"))]
 async fn metrics_accept_loop(
     listener: TcpListener,
-    raft: SharedRaft,
+    raft: SharedRaftHost,
     engine: SharedEngine,
 ) -> std::io::Result<()> {
     loop {
@@ -738,7 +803,7 @@ async fn metrics_accept_loop(
 #[cfg(feature = "ebpf")]
 async fn handle_metrics_connection(
     mut stream: TcpStream,
-    raft: SharedRaft,
+    raft: SharedRaftHost,
     engine: SharedEngine,
     ebpf: Option<SharedProbeManager>,
 ) -> std::io::Result<()> {
@@ -750,7 +815,24 @@ async fn handle_metrics_connection(
         let snapshot = {
             let (status, is_leader) = {
                 let guard = raft.lock().unwrap();
-                (guard.status(), guard.is_leader())
+                let status = guard
+                    .primary_status()
+                    .or_else(|| {
+                        guard
+                            .sorted_group_ids()
+                            .into_iter()
+                            .find_map(|g| guard.status_of(g))
+                    })
+                    .unwrap_or(kaya_raft::RaftStatus {
+                        id: kaya_raft::NodeId(0),
+                        role: kaya_raft::Role::Follower,
+                        current_term: kaya_raft::Term(0),
+                        commit_index: kaya_raft::LogIndex(0),
+                        last_applied: kaya_raft::LogIndex(0),
+                        leader_id: None,
+                    });
+                let is_leader = guard.is_leader_any();
+                (status, is_leader)
             };
             let engine_stats = engine.lock().await.stats();
             if let Some(ref mgr) = ebpf {
@@ -779,7 +861,7 @@ async fn handle_metrics_connection(
 #[cfg(not(feature = "ebpf"))]
 async fn handle_metrics_connection(
     mut stream: TcpStream,
-    raft: SharedRaft,
+    raft: SharedRaftHost,
     engine: SharedEngine,
 ) -> std::io::Result<()> {
     let mut buf = [0u8; 1024];
@@ -790,7 +872,24 @@ async fn handle_metrics_connection(
         let snapshot = {
             let (status, is_leader) = {
                 let guard = raft.lock().unwrap();
-                (guard.status(), guard.is_leader())
+                let status = guard
+                    .primary_status()
+                    .or_else(|| {
+                        guard
+                            .sorted_group_ids()
+                            .into_iter()
+                            .find_map(|g| guard.status_of(g))
+                    })
+                    .unwrap_or(kaya_raft::RaftStatus {
+                        id: kaya_raft::NodeId(0),
+                        role: kaya_raft::Role::Follower,
+                        current_term: kaya_raft::Term(0),
+                        commit_index: kaya_raft::LogIndex(0),
+                        last_applied: kaya_raft::LogIndex(0),
+                        leader_id: None,
+                    });
+                let is_leader = guard.is_leader_any();
+                (status, is_leader)
             };
             let engine_stats = engine.lock().await.stats();
             crate::metrics::MetricsSnapshot::from_engine_and_raft(engine_stats, &status, is_leader)

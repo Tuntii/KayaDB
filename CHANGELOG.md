@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (M16–M20 production path close-out)
+- **Atomic multi-key SI commit:** `RaftCommand::TxnCommit` (type 4) — single Raft log entry; `txn_take_commit` + `Engine::apply_mutations`; no sequential N Put/Delete proposes
+- **HLC commit timestamps:** `EngineConfig.use_hlc` + `WalWriter::ensure_min_sequence`; multi-group ClusterNode auto-enables HLC
+- **Multi-raft ClusterNode:** always hosts `MultiRaftHost` (≥ group 0); `StaticRangeTable` client routing; per-group persist/apply-index; IT `test_multi_raft_static_ranges_put_get`
+- Index + CDC fire on Raft apply (shared put/delete path with `apply_mutations` / `TxnCommit`)
+- ROADMAP: M16–M20 marked production path closed; M21+ still open; no full v0.2.0 / north-star claim yet
+
+### Added (M20 — Multi-raft foundation)
+- Hybrid logical clock: `kaya_core::Hlc` with update / tick / to_u64 / from_u64 packing for commit_ts
+- Raft `Envelope.group_id` (default 0) + codec field after `to_id` for transport multiplexing
+- Per-group storage paths: `raft_group_dir` / `DiskRaftStorage::open_group` (`groups/{id}/` for id≠0; group 0 keeps legacy root)
+- `MultiRaftHost` + `GroupId` + `StaticRangeTable` (key → group lookup; coalesced `tick_all`; per-group propose/handle)
+- Spec: `spec/docs/multi-raft-spec.md`
+
+### Added (M19 — CDC / changefeeds foundation)
+- Engine CDC: change events on successful user put/delete after WAL (seq, key, value, op)
+- File sink `cdc/log.jsonl` + per-consumer cursors `cdc/cursors/{id}` (`EngineConfig.enable_cdc`, default on)
+- API: `cdc_subscribe` / `cdc_poll` / `cdc_checkpoint` (at-least-once; per-key order by seq)
+- Spec: `spec/docs/cdc-spec.md`
+
+### Added (M18 — Secondary indexes foundation)
+- Engine secondary indexes: `create_index` / `list_indexes` / `drop_index` / `scan_by_index`
+- System keys under `\x00idx/meta|data/`; value-as-secondary for keys under `primary_prefix`
+- Automatic index maintenance on put/delete (covers txn_commit materialization)
+- Spec: `spec/docs/secondary-index-spec.md`
+
+### Added (M17 — Single-group ACID transactions)
+- Snapshot Isolation write intents + single-node engine txn API (`begin`/`put`/`get`/`delete`/`commit`/`rollback`)
+- Wire `TXN_*` opcodes 9–12 with server SI transaction dispatch
+- Rust client transaction API
+- TLA+ model for single-group commit (`spec/specs/txn/`)
+- Jepsen bank workload helpers and transfer-sum invariant tests
+
+### Added (M16 — MVCC)
+- Versioned storage: typed InternalKey, multi-version memtable, SSTable v4
+- Snapshot reads via ReadTimestamp::At / get_at
+- Compaction GC watermark
+- Versioned sim RefModel + MVCC crash property
+
 ## [0.1.47] — 2026-07-11
 
 Roadmap parallel-track close-out: durable directory-entry semantics (Track B), richer deterministic chaos faults (Track C), Rust client retry/pooling/observability + a new Python client (Track D), latency histograms + error guidance (Tracks F/G), SLO envelope, incremental backup, and SIEM syslog export (Track E).

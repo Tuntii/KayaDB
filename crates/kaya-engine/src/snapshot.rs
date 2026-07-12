@@ -55,9 +55,13 @@ impl<D: Disk> Engine<D> {
         let memtable_snapshot: Vec<(Bytes, Option<Bytes>, SequenceNumber)> = self
             .memtable
             .iter()
-            .map(|(k, rec)| match rec {
-                ValueRecord::Put { value, sequence } => (k.clone(), Some(value.clone()), *sequence),
-                ValueRecord::Delete { sequence } => (k.clone(), None, *sequence),
+            .map(|(k, rec)| {
+                // Store user keys so install_snapshot put/delete re-encodes once.
+                let uk = k.user_key.clone();
+                match rec {
+                    ValueRecord::Put { value, sequence } => (uk, Some(value.clone()), *sequence),
+                    ValueRecord::Delete { sequence } => (uk, None, *sequence),
+                }
             })
             .collect();
 

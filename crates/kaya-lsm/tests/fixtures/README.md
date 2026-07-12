@@ -1,6 +1,6 @@
 # SSTable and manifest format fixtures
 
-Golden fixtures for the SSTable (v2/v3) and manifest (v1) formats, per the
+Golden fixtures for the SSTable (v2/v3/v4) and manifest (v1) formats, per the
 fixture policy in `spec/docs/format-versioning-spec.md` section 6. The
 committed binaries are the source of truth for the on-disk byte layout;
 `tests/format_fixtures.rs` must fail if the encoders or decoders drift from
@@ -20,6 +20,7 @@ cargo test -p kaya-lsm --test format_fixtures -- --ignored regenerate_lsm_fixtur
 | `sstable_v2_valid_bloom.sst` | valid (v2, bloom) | Same entries built with `bloom_bits_per_key=10`; footer carries bloom offset/len/hash_count |
 | `sstable_v3_valid_prefix.sst` | valid (v3, prefix) | 20 entries `shared:prefix:key:NN` built with prefix compression (v3 footer, codec NONE) |
 | `sstable_v3_valid_lz4.sst` | valid (v3, LZ4) | 8 compressible entries built with LZ4 block compression. Decode-only: compressed bytes depend on the `lz4_flex` version, so no byte-for-byte re-encode assertion |
+| `sstable_v4_valid.sst` | valid (v4, mvcc) | Multi-version: `aaa=v2@2`, `aaa=v1@1`, `bbb=vb@3` (InternalKey order); footer format_version=4, physical layout same as v3 |
 | `sstable_v2_bad_magic.sst` | bad-magic | Valid v2 fixture with the trailing 4 magic bytes zeroed; open must fail with a bad-magic corruption error |
 | `sstable_v2_unsupported_version.sst` | unsupported-version | Valid v2 fixture with footer `format_version` set to 9 and the footer CRC recomputed (only the version is wrong); open must fail with an unsupported-version error |
 | `sstable_v2_bad_checksum.sst` | bad-checksum | Valid v2 fixture with a CRC-covered footer byte flipped; open must fail with a footer CRC mismatch |

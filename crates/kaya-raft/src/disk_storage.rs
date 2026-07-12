@@ -9,6 +9,20 @@ use crate::storage::{
     RaftStorageError,
 };
 
+/// Directory for a Raft group's persistent state under `data_dir`.
+///
+/// - Group `0` keeps the legacy layout at `data_dir` root (`raft-hard-state`, `raft-log`)
+///   for single-group backward compatibility.
+/// - Non-zero groups use `data_dir/groups/{group_id}/`.
+pub fn raft_group_dir(data_dir: impl AsRef<Path>, group_id: u64) -> PathBuf {
+    let data_dir = data_dir.as_ref();
+    if group_id == 0 {
+        data_dir.to_path_buf()
+    } else {
+        data_dir.join("groups").join(group_id.to_string())
+    }
+}
+
 /// On-disk Raft persistence under `data_dir/raft-hard-state` and `data_dir/raft-log`.
 pub struct DiskRaftStorage {
     data_dir: PathBuf,
@@ -19,6 +33,13 @@ impl DiskRaftStorage {
         Self {
             data_dir: data_dir.into(),
         }
+    }
+
+    /// Open storage for a multi-raft group under the group-specific directory.
+    ///
+    /// Equivalent to `DiskRaftStorage::open(raft_group_dir(data_dir, group_id))`.
+    pub fn open_group(data_dir: impl AsRef<Path>, group_id: u64) -> Self {
+        Self::open(raft_group_dir(data_dir, group_id))
     }
 
     fn hard_state_path(&self) -> PathBuf {
@@ -118,6 +139,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn raft_group_dir_legacy_group_zero_at_root() {
+        let root = PathBuf::from("/tmp/kayadb-data");
+        assert_eq!(raft_group_dir(&root, 0), root);
+        assert_eq!(raft_group_dir(&root, 7), root.join("groups").join("7"));
+    }
+
+    #[test]
+    fn open_group_uses_per_group_path() {
+        let dir = temp_data_dir("open_group_paths");
+        let mut storage = DiskRaftStorage::open_group(&dir, 3);
+        let hs = HardState {
+            current_term: Term(2),
+            voted_for: Some(NodeId(1)),
+            last_included_index: LogIndex(0),
+            last_included_term: Term(0),
+        };
+        storage.save_hard_state(&hs).unwrap();
+        let expected = dir.join("groups").join("3").join("raft-hard-state");
+        assert!(expected.exists(), "expected {}", expected.display());
+        // legacy root path must not be used for group 3
+        assert!(!dir.join("raft-hard-state").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -27,7 +27,7 @@ use kaya_lsm::{
     encode_manifest_edit, replay_manifest, ManifestEdit, ManifestWarning, SstEntry, SstFooter,
     SstableBuildOptions, SstableBuilder, SstableReader, TableMetadata, COMPRESSION_CODEC_LZ4,
     COMPRESSION_CODEC_NONE, MANIFEST_HEADER_LEN, MANIFEST_MAGIC, MANIFEST_VERSION,
-    SST_FOOTER_LEN_V2, SST_VERSION, SST_VERSION_V2,
+    SST_FOOTER_LEN_V2, SST_VERSION, SST_VERSION_V2, SST_VERSION_V4,
 };
 
 const UNSUPPORTED_VERSION: u16 = 9;
@@ -36,6 +36,7 @@ const FIXTURE_SST_V2_VALID: &str = "sstable_v2_valid.sst";
 const FIXTURE_SST_V2_VALID_BLOOM: &str = "sstable_v2_valid_bloom.sst";
 const FIXTURE_SST_V3_VALID_PREFIX: &str = "sstable_v3_valid_prefix.sst";
 const FIXTURE_SST_V3_VALID_LZ4: &str = "sstable_v3_valid_lz4.sst";
+const FIXTURE_SST_V4_VALID: &str = "sstable_v4_valid.sst";
 const FIXTURE_SST_BAD_MAGIC: &str = "sstable_v2_bad_magic.sst";
 const FIXTURE_SST_UNSUPPORTED_VERSION: &str = "sstable_v2_unsupported_version.sst";
 const FIXTURE_SST_BAD_CHECKSUM: &str = "sstable_v2_bad_checksum.sst";
@@ -161,6 +162,40 @@ fn build_sst_v3_valid_lz4() -> Vec<u8> {
     )
 }
 
+/// Multi-version v4 fixture: two versions of `aaa` (seq 2 then 1, InternalKey order)
+/// plus a second key `bbb`.
+fn sst_v4_entries() -> Vec<SstEntry> {
+    vec![
+        SstEntry {
+            key: b"aaa".to_vec(),
+            value: Some(b"v2".to_vec()),
+            sequence: SequenceNumber::new(2),
+        },
+        SstEntry {
+            key: b"aaa".to_vec(),
+            value: Some(b"v1".to_vec()),
+            sequence: SequenceNumber::new(1),
+        },
+        SstEntry {
+            key: b"bbb".to_vec(),
+            value: Some(b"vb".to_vec()),
+            sequence: SequenceNumber::new(3),
+        },
+    ]
+}
+
+fn build_sst_v4_valid() -> Vec<u8> {
+    build_sstable(
+        SstableBuildOptions {
+            target_block_bytes: 64 * 1024,
+            bloom_bits_per_key: 0,
+            mvcc: true,
+            ..Default::default()
+        },
+        &sst_v4_entries(),
+    )
+}
+
 fn build_sst_bad_magic() -> Vec<u8> {
     let mut bytes = build_sst_v2_valid();
     let len = bytes.len();
@@ -281,10 +316,42 @@ fn sstable_v3_lz4_fixture_decodes_to_expected_contents() {
 }
 
 #[test]
+fn sstable_v4_valid_fixture_decodes_to_expected_contents() {
+    let reader = SstableReader::open(read_fixture(FIXTURE_SST_V4_VALID)).expect("fixture opens");
+    let footer = reader.footer();
+    assert_eq!(footer.format_version, SST_VERSION_V4);
+    assert_eq!(footer.entry_count, 3);
+    assert_eq!(footer.compression_codec, COMPRESSION_CODEC_NONE);
+    assert_eq!(reader.all_entries().unwrap(), sst_v4_entries());
+    assert_eq!(
+        reader.get_at(b"aaa", 1).unwrap().unwrap().value,
+        Some(b"v1".to_vec())
+    );
+    assert_eq!(
+        reader.get_at(b"aaa", 2).unwrap().unwrap().value,
+        Some(b"v2".to_vec())
+    );
+    assert_eq!(
+        reader.get(b"bbb").unwrap().unwrap().value,
+        Some(b"vb".to_vec())
+    );
+}
+
+#[test]
+fn sstable_v4_valid_fixture_matches_encoder_byte_for_byte() {
+    assert_eq!(
+        read_fixture(FIXTURE_SST_V4_VALID),
+        build_sst_v4_valid(),
+        "SSTable v4 encoder output drifted from the committed golden fixture"
+    );
+}
+
+#[test]
 fn sstable_encoding_is_deterministic() {
     assert_eq!(build_sst_v2_valid(), build_sst_v2_valid());
     assert_eq!(build_sst_v2_valid_bloom(), build_sst_v2_valid_bloom());
     assert_eq!(build_sst_v3_valid_prefix(), build_sst_v3_valid_prefix());
+    assert_eq!(build_sst_v4_valid(), build_sst_v4_valid());
 }
 
 #[test]
@@ -553,6 +620,7 @@ fn regenerate_lsm_fixtures() {
         (FIXTURE_SST_V2_VALID_BLOOM, build_sst_v2_valid_bloom()),
         (FIXTURE_SST_V3_VALID_PREFIX, build_sst_v3_valid_prefix()),
         (FIXTURE_SST_V3_VALID_LZ4, build_sst_v3_valid_lz4()),
+        (FIXTURE_SST_V4_VALID, build_sst_v4_valid()),
         (FIXTURE_SST_BAD_MAGIC, build_sst_bad_magic()),
         (
             FIXTURE_SST_UNSUPPORTED_VERSION,

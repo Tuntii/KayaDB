@@ -1,11 +1,14 @@
 //! Test orchestration and verification.
 
+use crate::bank::{
+    bank_expected_total, verify_bank_sum_live, BANK_INITIAL_BALANCE, BANK_NUM_ACCOUNTS,
+};
 use crate::cluster_controller::{ClusterController, LeaderInfo};
 use crate::history::History;
 use crate::nemesis::{MemberSpec, Nemesis, NemesisAction, NemesisConfig, NemesisType};
 use crate::partition::PartitionTracker;
 use crate::scenario::{Scenario, Topology, VerifyMode, WorkloadHook};
-use crate::workload::{Workload, WorkloadConfig, WorkloadType};
+use crate::workload::{seed_bank_on_cluster, Workload, WorkloadConfig, WorkloadType};
 use kaya_client::KayaClient;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -191,6 +194,36 @@ impl TestRunner {
         };
         eprintln!("  Endpoints: {:?}", endpoints);
 
+        if scenario.workload.workload_type == WorkloadType::Bank
+            || scenario.verify == VerifyMode::BankSum
+        {
+            eprintln!("[Runner] Seeding bank accounts...");
+            // Retry seed while leadership stabilizes.
+            let mut seeded = false;
+            let mut last_err = String::new();
+            for _ in 0..10 {
+                match seed_bank_on_cluster(&endpoints).await {
+                    Ok(()) => {
+                        seeded = true;
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = e;
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                }
+            }
+            if !seeded {
+                return Err(format!("bank seed failed: {last_err}"));
+            }
+            eprintln!(
+                "[Runner] Bank seeded: {} accounts x {} = {}",
+                BANK_NUM_ACCOUNTS,
+                BANK_INITIAL_BALANCE,
+                bank_expected_total(BANK_NUM_ACCOUNTS, BANK_INITIAL_BALANCE)
+            );
+        }
+
         let history = Arc::new(History::new());
         let partition_tracker = Arc::new(PartitionTracker::default());
         let (stop_tx, stop_rx) = watch::channel(false);
@@ -274,6 +307,11 @@ impl TestRunner {
         }
 
         eprintln!("[Runner] {}", partition_tracker.summary());
+
+        if scenario.verify == VerifyMode::BankSum {
+            return Self::verify_bank_sum(&endpoints, &history, &partition_tracker).await;
+        }
+
         Self::verify_history(&history, scenario.verify, &partition_tracker)
     }
 
@@ -289,6 +327,8 @@ impl TestRunner {
         let verify_result = match verify {
             VerifyMode::Sequential => history.check_linearizability(),
             VerifyMode::Concurrent => history.check_concurrent(),
+            // Bank sum is verified live against the cluster in verify_bank_sum.
+            VerifyMode::BankSum => Ok(()),
         };
 
         let partition_attempted = partition_tracker.attempted();
@@ -338,6 +378,87 @@ impl TestRunner {
                     partition_failed,
                 })
             }
+        }
+    }
+
+    async fn verify_bank_sum(
+        endpoints: &[SocketAddr],
+        history: &History,
+        partition_tracker: &PartitionTracker,
+    ) -> Result<TestResult, String> {
+        let expected = bank_expected_total(BANK_NUM_ACCOUNTS, BANK_INITIAL_BALANCE);
+        eprintln!(
+            "Verifying bank sum invariant (expected total={expected}, ops={})...",
+            history.len()
+        );
+        let stats = history.stats();
+        eprintln!("{}", stats);
+
+        // After kill/partition, a node may have partially applied a TxnCommit
+        // before crash. Raft re-applies the entry once leadership/commit is
+        // re-established; allow time for that before failing the invariant.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let mut last_err = String::new();
+        let mut ok = false;
+        for attempt in 0..24 {
+            // Prefer any reachable node; leader preferred via redirects.
+            for addr in endpoints {
+                match timeout(Duration::from_secs(3), KayaClient::connect(*addr)).await {
+                    Ok(Ok(mut client)) => {
+                        client.set_max_redirects(16);
+                        match verify_bank_sum_live(
+                            &mut client,
+                            BANK_NUM_ACCOUNTS,
+                            expected,
+                            Duration::from_secs(5),
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                ok = true;
+                                break;
+                            }
+                            Err(e) => last_err = e,
+                        }
+                    }
+                    _ => last_err = format!("connect failed to {addr}"),
+                }
+            }
+            if ok {
+                break;
+            }
+            let backoff_ms = 250u64.saturating_mul(1 + (attempt as u64 / 4));
+            tokio::time::sleep(Duration::from_millis(backoff_ms.min(1500))).await;
+        }
+
+        let partition_attempted = partition_tracker.attempted();
+        let partition_applied = partition_tracker.applied();
+        let partition_failed = partition_tracker.failed();
+
+        if ok {
+            eprintln!("✓ Bank sum invariant holds (total={expected})");
+            Ok(TestResult {
+                passed: true,
+                violations: vec![],
+                stats,
+                trace: None,
+                partition_attempted,
+                partition_applied,
+                partition_failed,
+            })
+        } else {
+            let msg = format!("bank sum invariant failed: {last_err}");
+            eprintln!("✗ {msg}");
+            Ok(TestResult {
+                passed: false,
+                violations: vec![msg],
+                stats,
+                trace: None,
+                partition_attempted,
+                partition_applied,
+                partition_failed,
+            })
         }
     }
 }

@@ -4,8 +4,11 @@
 
 use kaya_net::{
     decode_admin_payload, decode_client_auth_payload, decode_error_payload, decode_key_payload,
-    decode_put_payload, decode_scan_response, encode_admin_payload, encode_client_auth_payload,
-    encode_error_payload, encode_key_payload, encode_put_payload, encode_scan_response,
+    decode_put_payload, decode_scan_response, decode_txn_begin_response,
+    decode_txn_commit_response, decode_txn_id_payload, decode_txn_op_payload, encode_admin_payload,
+    encode_client_auth_payload, encode_error_payload, encode_key_payload, encode_put_payload,
+    encode_scan_response, encode_txn_begin_response, encode_txn_commit_response,
+    encode_txn_id_payload, encode_txn_op_payload, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_PUT,
 };
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -32,6 +35,10 @@ struct VectorInput {
     token: Option<String>,
     items: Option<Vec<ScanItemInput>>,
     raw_hex: Option<String>,
+    txn_id: Option<u64>,
+    snapshot_ts: Option<u64>,
+    commit_ts: Option<u64>,
+    op: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +107,10 @@ fn run_vector(vector: &ConformanceVector) {
         "client_roundtrip" => run_client_roundtrip(&vector.input),
         "scan_roundtrip" => run_scan_roundtrip(&vector.input),
         "error_roundtrip" => run_error_roundtrip(&vector.input),
+        "txn_begin_roundtrip" => run_txn_begin_roundtrip(&vector.input),
+        "txn_op_roundtrip" => run_txn_op_roundtrip(&vector.input),
+        "txn_id_roundtrip" => run_txn_id_roundtrip(&vector.input),
+        "txn_commit_roundtrip" => run_txn_commit_roundtrip(&vector.input),
         other => panic!("unknown fn '{other}' in vector '{}'", vector.name),
     };
 
@@ -241,4 +252,80 @@ fn conformance_vectors_run_all() {
     for vector in &vectors {
         run_vector(vector);
     }
+}
+
+fn run_txn_begin_roundtrip(input: &VectorInput) -> Result<(), String> {
+    if let Some(raw) = &input.raw_hex {
+        return decode_txn_begin_response(&decode_hex(raw)?).map(|_| ());
+    }
+    let txn_id = input.txn_id.unwrap_or(1);
+    let snapshot_ts = input.snapshot_ts.unwrap_or(0);
+    let encoded = encode_txn_begin_response(txn_id, snapshot_ts);
+    let (d_id, d_ts) = decode_txn_begin_response(&encoded)?;
+    if d_id != txn_id || d_ts != snapshot_ts {
+        return Err(format!(
+            "txn_begin mismatch: got ({d_id},{d_ts}), want ({txn_id},{snapshot_ts})"
+        ));
+    }
+    Ok(())
+}
+
+fn run_txn_op_roundtrip(input: &VectorInput) -> Result<(), String> {
+    if let Some(raw) = &input.raw_hex {
+        return decode_txn_op_payload(&decode_hex(raw)?).map(|_| ());
+    }
+    let txn_id = input.txn_id.unwrap_or(1);
+    let op_name = input.op.as_deref().unwrap_or("get");
+    let op = match op_name {
+        "get" => TXN_OP_GET,
+        "put" => TXN_OP_PUT,
+        "delete" => TXN_OP_DELETE,
+        other => return Err(format!("unknown op '{other}'")),
+    };
+    let key = bytes_from_fields(input.key.as_deref(), input.key_hex.as_deref(), "key")?;
+    let value = if op == TXN_OP_PUT {
+        Some(bytes_from_fields(
+            input.value.as_deref(),
+            input.value_hex.as_deref(),
+            "value",
+        )?)
+    } else {
+        None
+    };
+    let encoded = encode_txn_op_payload(txn_id, op, &key, value.as_deref());
+    let (d_id, d_op, d_key, d_val) = decode_txn_op_payload(&encoded)?;
+    if d_id != txn_id || d_op != op || d_key != key || d_val != value {
+        return Err(format!(
+            "txn_op mismatch: got ({d_id},{d_op},{d_key:?},{d_val:?})"
+        ));
+    }
+    Ok(())
+}
+
+fn run_txn_id_roundtrip(input: &VectorInput) -> Result<(), String> {
+    if let Some(raw) = &input.raw_hex {
+        return decode_txn_id_payload(&decode_hex(raw)?).map(|_| ());
+    }
+    let txn_id = input.txn_id.unwrap_or(1);
+    let encoded = encode_txn_id_payload(txn_id);
+    let decoded = decode_txn_id_payload(&encoded)?;
+    if decoded != txn_id {
+        return Err(format!("txn_id mismatch: got {decoded}, want {txn_id}"));
+    }
+    Ok(())
+}
+
+fn run_txn_commit_roundtrip(input: &VectorInput) -> Result<(), String> {
+    if let Some(raw) = &input.raw_hex {
+        return decode_txn_commit_response(&decode_hex(raw)?).map(|_| ());
+    }
+    let commit_ts = input.commit_ts.unwrap_or(1);
+    let encoded = encode_txn_commit_response(commit_ts);
+    let decoded = decode_txn_commit_response(&encoded)?;
+    if decoded != commit_ts {
+        return Err(format!(
+            "commit_ts mismatch: got {decoded}, want {commit_ts}"
+        ));
+    }
+    Ok(())
 }

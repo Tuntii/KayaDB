@@ -39,5 +39,13 @@
   {"name": "put_decode_truncated", "fn": "put_roundtrip", "input": {"raw_hex": "0500"}, "expect_ok": false},
   {"name": "key_decode_truncated", "fn": "key_roundtrip", "input": {"raw_hex": "64000000"}, "expect_ok": false},
   {"name": "scan_decode_oversized_count", "fn": "scan_roundtrip", "input": {"raw_hex": "00842e45"}, "expect_ok": false},
-  {"name": "error_decode_invalid_utf8", "fn": "error_roundtrip", "input": {"raw_hex": "03000000fffefd"}, "expect_ok": false}
+  {"name": "error_decode_invalid_utf8", "fn": "error_roundtrip", "input": {"raw_hex": "03000000fffefd"}, "expect_ok": false},
+  {"name": "txn_begin_basic", "fn": "txn_begin_roundtrip", "input": {"txn_id": 1, "snapshot_ts": 0}, "expect_ok": true},
+  {"name": "txn_begin_nonzero_snapshot", "fn": "txn_begin_roundtrip", "input": {"txn_id": 42, "snapshot_ts": 99}, "expect_ok": true},
+  {"name": "txn_op_get", "fn": "txn_op_roundtrip", "input": {"txn_id": 1, "op": "get", "key": "k"}, "expect_ok": true},
+  {"name": "txn_op_put", "fn": "txn_op_roundtrip", "input": {"txn_id": 2, "op": "put", "key": "k", "value": "v"}, "expect_ok": true},
+  {"name": "txn_op_delete", "fn": "txn_op_roundtrip", "input": {"txn_id": 3, "op": "delete", "key": "k"}, "expect_ok": true},
+  {"name": "txn_id_basic", "fn": "txn_id_roundtrip", "input": {"txn_id": 7}, "expect_ok": true},
+  {"name": "txn_commit_ts", "fn": "txn_commit_roundtrip", "input": {"commit_ts": 12}, "expect_ok": true},
+  {"name": "txn_op_decode_truncated", "fn": "txn_op_roundtrip", "input": {"raw_hex": "01000000"}, "expect_ok": false}
 ]

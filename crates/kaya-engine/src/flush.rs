@@ -2,8 +2,8 @@ use kaya_core::{Result, SequenceNumber};
 use kaya_io::{Disk, RelativePath};
 use kaya_lsm::{
     decode_footer, encode_manifest_edit, footer_stored_crc, ManifestEdit, Memtable, SstEntry,
-    SstableBuilder, SstableReader, TableMetadata, ValueRecord, CURRENT_FILE_NAME,
-    CURRENT_TMP_FILE_NAME, MANIFEST_FILE_NAME,
+    SstableBuildOptions, SstableBuilder, SstableReader, TableMetadata, ValueRecord,
+    CURRENT_FILE_NAME, CURRENT_TMP_FILE_NAME, MANIFEST_FILE_NAME,
 };
 
 use super::{Engine, FlushResult};
@@ -54,29 +54,34 @@ impl<D: Disk> Engine<D> {
     }
 
     async fn flush_nonempty(&mut self, flush_start: std::time::Instant) -> Result<FlushResult> {
-        let entry_count = self.memtable.len() as u64;
         let table_id = self.next_table_id;
         self.next_table_id += 1;
 
-        let mut builder =
-            SstableBuilder::with_options(kaya_lsm::SstableBuildOptions::from(&self.config.sstable));
-        for (key, record) in self.memtable.iter() {
-            match record {
-                ValueRecord::Put { value, sequence } => {
-                    builder.add(SstEntry {
-                        key: key.clone(),
-                        value: Some(value.clone()),
-                        sequence: *sequence,
-                    });
-                }
-                ValueRecord::Delete { sequence } => {
-                    builder.add(SstEntry {
-                        key: key.clone(),
-                        value: None,
-                        sequence: *sequence,
-                    });
-                }
-            }
+        // Multi-version flush (SST v4): emit ALL versions from the memtable.
+        // Memtable iter is already InternalKey order (user_key ASC, seq DESC).
+        let versions: Vec<SstEntry> = self
+            .memtable
+            .iter()
+            .map(|(ik, record)| match record {
+                ValueRecord::Put { value, sequence } => SstEntry {
+                    key: ik.user_key.clone(),
+                    value: Some(value.clone()),
+                    sequence: *sequence,
+                },
+                ValueRecord::Delete { sequence } => SstEntry {
+                    key: ik.user_key.clone(),
+                    value: None,
+                    sequence: *sequence,
+                },
+            })
+            .collect();
+        let entry_count = versions.len() as u64;
+
+        let mut build_opts = SstableBuildOptions::from(&self.config.sstable);
+        build_opts.mvcc = true;
+        let mut builder = SstableBuilder::with_options(build_opts);
+        for entry in versions {
+            builder.add(entry);
         }
         let sst_bytes = builder.finish()?;
         let sst_file_size = sst_bytes.len() as u64;

@@ -46,6 +46,20 @@ pub struct WalWriter<D: Disk> {
 }
 
 impl<D: Disk> WalWriter<D> {
+    /// Ensure the next assigned sequence is at least `min_seq` (for HLC packing).
+    /// No-op when `min_seq` is already `<= next_sequence`.
+    pub async fn ensure_min_sequence(&self, min_seq: u64) {
+        let mut inner = self.inner.lock().await;
+        if min_seq > inner.next_sequence.get() {
+            inner.next_sequence = SequenceNumber::new(min_seq);
+        }
+    }
+
+    /// Peek at the next sequence that will be assigned on the following append.
+    pub async fn next_sequence(&self) -> SequenceNumber {
+        self.inner.lock().await.next_sequence
+    }
+
     pub async fn open(config: WalConfig, disk: Arc<D>) -> Result<Self> {
         Self::open_at(config, disk, Lsn::FIRST, SequenceNumber::FIRST).await
     }

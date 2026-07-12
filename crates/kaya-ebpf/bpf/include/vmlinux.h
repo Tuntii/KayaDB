@@ -3,6 +3,11 @@
 #ifndef __VMLINUX_H__
 #define __VMLINUX_H__
 
+/* Clang BPF target does not pull in linux/compiler.h; keep helpers local. */
+#ifndef __always_inline
+#define __always_inline inline __attribute__((always_inline))
+#endif
+
 typedef unsigned char __u8;
 typedef signed char __s8;
 typedef unsigned short __u16;
