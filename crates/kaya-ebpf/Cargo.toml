@@ -11,7 +11,8 @@ readme = "README.md"
 rust-version.workspace = true
 keywords = ["kaya", "ebpf", "observability"]
 categories = ["development-tools::debugging"]
-publish = false
+# Published so kaya-server/kayactl optional `ebpf` feature can resolve on crates.io.
+# Default feature set is userspace-only; `kernel-probes` stays Linux/clang optional.
 
 [dependencies]
 kaya-core.workspace = true

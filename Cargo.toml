@@ -18,7 +18,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.47"
+version = "0.1.109"
 description = "Correctness-first, inspectable, embeddable storage engine with deterministic fault injection, LSM-tree storage, and Raft consensus"
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -42,6 +42,7 @@ kaya-sim = { path = "crates/kaya-sim", version = "0.1.47" }
 kaya-net = { path = "crates/kaya-net", version = "0.1.47" }
 kaya-client = { path = "crates/kaya-client", version = "0.1.47" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal"] }
+
 
 
 

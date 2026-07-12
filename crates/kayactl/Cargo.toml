@@ -16,12 +16,12 @@ kaya-io.workspace = true
 kaya-lsm.workspace = true
 kaya-wal.workspace = true
 kaya-net.workspace = true
-kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.47", optional = true }
+kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.109", optional = true }
 serde_json = "1"
 tokio.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.47", optional = true, features = ["kernel-probes"] }
+kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.109", optional = true, features = ["kernel-probes"] }
 libc = "0.2"
 
 [features]
@@ -31,7 +31,7 @@ tls = ["kaya-net/tls"]
 
 [dev-dependencies]
 tempfile = "3"
-kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.47" }
+kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.109" }
 
 [[bin]]
 name = "kayactl"

@@ -18,7 +18,7 @@ kaya-engine.workspace = true
 kaya-io.workspace = true
 kaya-net.workspace = true
 kaya-raft = { workspace = true, features = ["disk-storage"] }
-kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.46", optional = true }
+kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.109", optional = true }
 opentelemetry = { version = "0.28", optional = true }
 opentelemetry_sdk = { version = "0.28", features = ["trace", "testing"], optional = true }
 opentelemetry-stdout = { version = "0.28", features = ["trace"], optional = true }
@@ -26,7 +26,7 @@ parking_lot = "0.12"
 tokio.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.46", optional = true, features = ["kernel-probes"] }
+kaya-ebpf = { path = "../kaya-ebpf", version = "0.1.109", optional = true, features = ["kernel-probes"] }
 
 [features]
 default = []

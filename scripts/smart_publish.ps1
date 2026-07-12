@@ -20,6 +20,8 @@ $Crates = @(
     @{ Name = "kaya-net"; Path = "crates/kaya-net" },
     @{ Name = "kaya-sim"; Path = "crates/kaya-sim" },
     @{ Name = "kaya-client"; Path = "crates/kaya-client" },
+    # Unpublished-no-longer: optional dep of server/kayactl `ebpf` feature
+    @{ Name = "kaya-ebpf"; Path = "crates/kaya-ebpf" },
     @{ Name = "kaya-server"; Path = "crates/kaya-server" },
     @{ Name = "kayactl"; Path = "crates/kayactl" }
 )
