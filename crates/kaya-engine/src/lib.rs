@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use kaya_core::{Bytes, DurabilityMode, EngineConfig, KayaError, Lsn, Result, SequenceNumber};
+use kaya_core::{Bytes, DurabilityMode, EngineConfig, Hlc, KayaError, Lsn, Result, SequenceNumber};
 use kaya_io::{Disk, RelativePath};
 use kaya_lsm::{
     decode_footer, encode_manifest_edit, footer_stored_crc, CompactionPolicy, ManifestEdit,
@@ -115,8 +115,17 @@ pub struct Engine<D: Disk> {
     indexes: std::collections::BTreeMap<String, index::IndexDef>,
     /// CDC changefeed state (M19 foundation); loaded from `cdc/log.jsonl` when enabled.
     cdc: cdc::CdcState,
+    /// Hybrid logical clock used when `config.use_hlc` is true.
+    hlc: Hlc,
     #[allow(dead_code)]
     lock_file: Option<std::fs::File>,
+}
+
+fn wall_clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn acquire_directory_lock(config: &EngineConfig) -> Result<Option<std::fs::File>> {
@@ -269,6 +278,7 @@ impl<D: Disk> Engine<D> {
             txn: txn::TxnTables::new(),
             indexes: std::collections::BTreeMap::new(),
             cdc: cdc::CdcState::new(),
+            hlc: Hlc::zero(),
             lock_file,
         };
         // Load durable index metadata after the engine is constructed.
@@ -281,6 +291,41 @@ impl<D: Disk> Engine<D> {
     pub async fn close(&mut self) -> Result<()> {
         let _ = &self.disk;
         Ok(())
+    }
+
+    /// Current hybrid logical clock state (meaningful when use_hlc is enabled).
+    pub fn hlc(&self) -> Hlc {
+        self.hlc
+    }
+
+    /// Whether this engine assigns sequences from HLC packing.
+    pub fn use_hlc(&self) -> bool {
+        self.config.use_hlc
+    }
+
+    /// Ensure the next WAL sequence is at least min_seq (for external HLC sync).
+    pub async fn ensure_min_sequence(&mut self, min_seq: u64) {
+        self.wal.ensure_min_sequence(min_seq).await;
+    }
+
+    /// Advance the HLC with an optional remote sample and bump WAL sequence to match.
+    ///
+    /// Used to align local commit timestamps with a remote HLC observation.
+    pub async fn sync_clock(&mut self, hlc_u64: u64) {
+        let now_ms = wall_clock_ms();
+        let remote = Hlc::from_u64(hlc_u64);
+        let ts = self.hlc.update(now_ms, Some(remote)).to_u64().max(1);
+        self.wal.ensure_min_sequence(ts).await;
+    }
+
+    /// When use_hlc, tick the local HLC and ensure the next WAL sequence equals the packed ts.
+    pub(crate) async fn prepare_hlc_write_sequence(&mut self) {
+        if !self.config.use_hlc {
+            return;
+        }
+        let now_ms = wall_clock_ms();
+        let ts = self.hlc.tick(now_ms).to_u64().max(1);
+        self.wal.ensure_min_sequence(ts).await;
     }
 
     /// Current GC watermark (versions with seq < watermark may be dropped by compaction).
@@ -1975,6 +2020,87 @@ mod tests {
 
             let all = engine.scan_by_index("by_val", b"").await.unwrap();
             assert_eq!(all.len(), 2);
+        });
+    }
+
+
+    #[test]
+    fn hlc_writes_use_packed_timestamps_and_increase_when_wall_stalls() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut config = EngineConfig::default();
+            config.use_hlc = true;
+            let mut engine = Engine::open(config, disk).await.unwrap();
+            assert!(engine.use_hlc());
+
+            // Force a fixed physical component via sync_clock so wall stalls.
+            let base = Hlc {
+                physical_ms: 5_000_000_000_000,
+                logical: 0,
+            };
+            engine.sync_clock(base.to_u64()).await;
+
+            let w1 = engine
+                .put(b"a".to_vec(), b"1".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            let w2 = engine
+                .put(b"b".to_vec(), b"2".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            let w3 = engine
+                .delete(b"a".to_vec(), strict_opts())
+                .await
+                .unwrap();
+
+            assert!(w1.sequence.get() < w2.sequence.get());
+            assert!(w2.sequence.get() < w3.sequence.get());
+
+            // Sequences should be HLC-scale (physical << 16), not plain 1,2,3.
+            assert!(
+                w1.sequence.get() >= (5_000_000_000_000u64 << 16),
+                "seq={} expected HLC-packed",
+                w1.sequence.get()
+            );
+
+            // Logical must advance while physical is held (wall stall path).
+            let h1 = Hlc::from_u64(w1.sequence.get());
+            let h2 = Hlc::from_u64(w2.sequence.get());
+            let h3 = Hlc::from_u64(w3.sequence.get());
+            assert_eq!(h1.physical_ms, 5_000_000_000_000);
+            assert_eq!(h2.physical_ms, 5_000_000_000_000);
+            assert_eq!(h3.physical_ms, 5_000_000_000_000);
+            assert!(h1.logical < h2.logical);
+            assert!(h2.logical < h3.logical);
+
+            // Visibility still works under HLC sequences.
+            assert_eq!(
+                engine.get(b"b", ReadOptions::default()).await.unwrap(),
+                Some(b"2".to_vec())
+            );
+            assert_eq!(
+                engine.get(b"a", ReadOptions::default()).await.unwrap(),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn ensure_min_sequence_bumps_next_assignment() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine.ensure_min_sequence(1000).await;
+            let w = engine
+                .put(b"k".to_vec(), b"v".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            assert_eq!(w.sequence.get(), 1000);
+            let w2 = engine
+                .put(b"k2".to_vec(), b"v2".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            assert_eq!(w2.sequence.get(), 1001);
         });
     }
 

@@ -375,6 +375,7 @@ impl<D: Disk> Engine<D> {
     ) -> Result<WriteResult> {
         self.validate_key(&key)?;
         self.validate_value(&value)?;
+        self.prepare_hlc_write_sequence().await;
         let durability = opts.durability.unwrap_or(self.config.durability.mode);
         let append = self
             .wal
@@ -414,6 +415,7 @@ impl<D: Disk> Engine<D> {
         opts: WriteOptions,
     ) -> Result<WriteResult> {
         self.validate_key(&key)?;
+        self.prepare_hlc_write_sequence().await;
         let durability = opts.durability.unwrap_or(self.config.durability.mode);
         let append = self
             .wal

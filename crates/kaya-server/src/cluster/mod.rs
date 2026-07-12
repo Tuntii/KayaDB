@@ -107,6 +107,9 @@ pub struct ClusterConfig {
     /// When true, emit OpenTelemetry spans at durability boundaries (`otel` feature).
     #[cfg(feature = "otel")]
     pub otel_enabled: bool,
+    /// When true, engine commit sequences are assigned from a hybrid logical clock.
+    /// Default false for back-compat; enabled automatically when multi-group ranges are configured (PC3).
+    pub use_hlc: bool,
 }
 
 impl ClusterConfig {
@@ -153,6 +156,7 @@ impl ClusterConfig {
             ebpf_seed: 0,
             #[cfg(feature = "otel")]
             otel_enabled: false,
+            use_hlc: false,
         }
     }
 
@@ -232,6 +236,12 @@ impl ClusterConfig {
         self.otel_enabled = true;
         self
     }
+
+    /// Enable hybrid-logical-clock commit timestamps on the local engine.
+    pub fn with_use_hlc(mut self) -> Self {
+        self.use_hlc = true;
+        self
+    }
 }
 
 /// A running cluster node.
@@ -287,6 +297,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
                 mode: durability_mode,
                 ..DurabilityConfig::default()
             },
+            use_hlc: config.use_hlc,
             ..EngineConfig::default()
         };
         #[cfg(feature = "ebpf")]

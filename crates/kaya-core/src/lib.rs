@@ -392,6 +392,9 @@ pub struct EngineConfig {
     pub disable_locking: bool,
     /// When true (default), successful user put/delete append CDC events to `cdc/log.jsonl`.
     pub enable_cdc: bool,
+    /// When true, assign commit sequences from a hybrid logical clock (HLC) packed as
+    /// `(physical_ms << 16) | logical`. When false (default), use plain monotonic sequences.
+    pub use_hlc: bool,
 }
 
 impl Default for EngineConfig {
@@ -406,6 +409,7 @@ impl Default for EngineConfig {
             compaction: CompactionConfig::default(),
             disable_locking: false,
             enable_cdc: true,
+            use_hlc: false,
         }
     }
 }
