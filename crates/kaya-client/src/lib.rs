@@ -4,16 +4,20 @@ pub use retry::{ClientObserver, OpObservation, OpOutcome, RetryPolicy, SharedObs
 
 use kaya_core::{KayaError, Result};
 use kaya_net::{
-    decode_error_payload, decode_hello_response, decode_scan_response, decode_value_payload,
-    encode_client_auth_payload, encode_hello_request, encode_key_payload, encode_put_payload,
-    encode_scan_payload, request_on_stream, HELLO_OPCODE, PROTO_VERSION, STATUS_INVALID_ARGUMENT,
-    STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
+    decode_error_payload, decode_hello_response, decode_scan_response, decode_txn_begin_response,
+    decode_txn_commit_response, decode_value_payload, encode_client_auth_payload,
+    encode_hello_request, encode_key_payload, encode_put_payload, encode_scan_payload,
+    encode_txn_id_payload, encode_txn_op_payload, request_on_stream, HELLO_OPCODE, PROTO_VERSION,
+    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK, STATUS_TXN_CONFLICT,
+    TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT,
+    TXN_ROLLBACK_OPCODE,
 };
 
 #[cfg(feature = "tls")]
 use kaya_net::{roundtrip_tls, TlsConfig};
 #[cfg(feature = "trace")]
 use kaya_sim::{LinearizabilityChecker, Op, OpResult};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Instant;
 use tokio::net::TcpStream;
@@ -41,6 +45,20 @@ pub struct KayaClient {
     trace: Option<LinearizabilityChecker>,
     #[cfg(feature = "tls")]
     tls_config: Option<TlsConfig>,
+}
+
+/// Snapshot Isolation transaction handle.
+///
+/// Obtained via [`KayaClient::begin_txn`]. Stages writes as intents on the
+/// leader; [`commit`](Transaction::commit) materializes them or
+/// [`rollback`](Transaction::rollback) discards them. A local write buffer
+/// provides client-side read-your-writes for keys written in this txn.
+pub struct Transaction<'a> {
+    client: &'a mut KayaClient,
+    txn_id: u64,
+    snapshot_ts: u64,
+    /// Local write buffer: `None` means deleted within this txn.
+    local: HashMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
 impl KayaClient {
@@ -92,7 +110,7 @@ impl KayaClient {
         self.observer = Some(observer);
     }
 
-    /// Set the client token used for data-path operations (PUT/GET/DELETE/SCAN/STATS).
+    /// Set the client token used for data-path operations (PUT/GET/DELETE/SCAN/STATS/TXN).
     pub fn set_client_token(&mut self, token: impl Into<String>) {
         self.client_token = Some(token.into());
     }
@@ -155,7 +173,8 @@ impl KayaClient {
     }
 
     fn wire_payload(&self, opcode: u8, payload: &[u8]) -> Vec<u8> {
-        if matches!(opcode, 1..=4 | 6) {
+        // Data-path + TXN opcodes may carry an optional client token prefix.
+        if matches!(opcode, 1..=4 | 6 | 9..=12) {
             encode_client_auth_payload(payload, self.client_token.as_deref())
         } else {
             payload.to_vec()
@@ -316,6 +335,31 @@ impl KayaClient {
         }
     }
 
+    /// Begin a Snapshot Isolation transaction.
+    ///
+    /// Returns a [`Transaction`] bound to this client. The server assigns a
+    /// `txn_id` and `snapshot_ts` (`read_ts`). Leader redirects are followed
+    /// like ordinary put/get.
+    pub async fn begin_txn(&mut self) -> Result<Transaction<'_>> {
+        let (status, body) = self.send_with_retry(TXN_BEGIN_OPCODE, &[]).await?;
+        if status == STATUS_OK {
+            let (txn_id, snapshot_ts) =
+                decode_txn_begin_response(&body).map_err(KayaError::corruption)?;
+            Ok(Transaction {
+                client: self,
+                txn_id,
+                snapshot_ts,
+                local: HashMap::new(),
+            })
+        } else if status == STATUS_INVALID_ARGUMENT {
+            let msg =
+                decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            Err(KayaError::invalid_argument(msg))
+        } else {
+            Err(map_txn_status(status, &body))
+        }
+    }
+
     pub async fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let payload = encode_put_payload(key, value);
         let (status, body) = self.send_with_retry(1, &payload).await?;
@@ -471,6 +515,118 @@ impl KayaClient {
     }
 }
 
+impl Transaction<'_> {
+    /// Server-assigned transaction id.
+    pub fn txn_id(&self) -> u64 {
+        self.txn_id
+    }
+
+    /// Snapshot / read timestamp for this transaction.
+    pub fn snapshot_ts(&self) -> u64 {
+        self.snapshot_ts
+    }
+
+    /// Point get under the txn snapshot, with local read-your-writes.
+    pub async fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        if let Some(local) = self.local.get(key) {
+            return Ok(local.clone());
+        }
+        let payload = encode_txn_op_payload(self.txn_id, TXN_OP_GET, key, None);
+        let (status, body) = self
+            .client
+            .send_with_retry(TXN_OP_OPCODE, &payload)
+            .await?;
+        if status == STATUS_OK {
+            let val = decode_value_payload(&body).map_err(KayaError::corruption)?;
+            Ok(Some(val))
+        } else if status == STATUS_NOT_FOUND {
+            Ok(None)
+        } else if status == STATUS_INVALID_ARGUMENT {
+            let msg =
+                decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            Err(KayaError::invalid_argument(msg))
+        } else {
+            Err(map_txn_status(status, &body))
+        }
+    }
+
+    /// Stage a put intent (write-write conflicts may fail immediately).
+    pub async fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        let payload = encode_txn_op_payload(self.txn_id, TXN_OP_PUT, key, Some(value));
+        let (status, body) = self
+            .client
+            .send_with_retry(TXN_OP_OPCODE, &payload)
+            .await?;
+        if status == STATUS_OK {
+            self.local.insert(key.to_vec(), Some(value.to_vec()));
+            Ok(())
+        } else if status == STATUS_INVALID_ARGUMENT {
+            let msg =
+                decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            Err(KayaError::invalid_argument(msg))
+        } else {
+            Err(map_txn_status(status, &body))
+        }
+    }
+
+    /// Stage a delete intent.
+    pub async fn delete(&mut self, key: &[u8]) -> Result<()> {
+        let payload = encode_txn_op_payload(self.txn_id, TXN_OP_DELETE, key, None);
+        let (status, body) = self
+            .client
+            .send_with_retry(TXN_OP_OPCODE, &payload)
+            .await?;
+        if status == STATUS_OK {
+            self.local.insert(key.to_vec(), None);
+            Ok(())
+        } else if status == STATUS_INVALID_ARGUMENT {
+            let msg =
+                decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            Err(KayaError::invalid_argument(msg))
+        } else {
+            Err(map_txn_status(status, &body))
+        }
+    }
+
+    /// Commit staged intents. Returns the commit timestamp on success.
+    ///
+    /// Write-write conflicts map to [`KayaError::TxnConflict`].
+    pub async fn commit(self) -> Result<u64> {
+        let payload = encode_txn_id_payload(self.txn_id);
+        let (status, body) = self
+            .client
+            .send_with_retry(TXN_COMMIT_OPCODE, &payload)
+            .await?;
+        if status == STATUS_OK {
+            decode_txn_commit_response(&body).map_err(KayaError::corruption)
+        } else if status == STATUS_INVALID_ARGUMENT {
+            let msg =
+                decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            Err(KayaError::invalid_argument(msg))
+        } else {
+            Err(map_txn_status(status, &body))
+        }
+    }
+
+    /// Discard staged intents without committing.
+    pub async fn rollback(self) -> Result<()> {
+        let payload = encode_txn_id_payload(self.txn_id);
+        let (status, body) = self
+            .client
+            .send_with_retry(TXN_ROLLBACK_OPCODE, &payload)
+            .await?;
+        if status == STATUS_OK {
+            Ok(())
+        } else if status == STATUS_INVALID_ARGUMENT {
+            let msg =
+                decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            Err(KayaError::invalid_argument(msg))
+        } else {
+            Err(map_txn_status(status, &body))
+        }
+    }
+}
+
 /// Derive a stable, non-zero jitter seed from the initial address so two
 /// clients pointed at different nodes stagger their backoffs deterministically.
 fn seed_from_addr(addr: SocketAddr) -> u64 {
@@ -497,6 +653,69 @@ fn outcome_from_status(status: u16) -> OpOutcome {
         STATUS_OK => OpOutcome::Ok,
         STATUS_NOT_FOUND => OpOutcome::NotFound,
         STATUS_INVALID_ARGUMENT => OpOutcome::InvalidArgument,
+        STATUS_TXN_CONFLICT => OpOutcome::ServerError,
         _ => OpOutcome::ServerError,
+    }
+}
+
+/// Map TXN-related non-OK status codes to a clear client error.
+fn map_txn_status(status: u16, body: &[u8]) -> KayaError {
+    if status == STATUS_TXN_CONFLICT {
+        return KayaError::TxnConflict;
+    }
+    if status == STATUS_NOT_LEADER {
+        let hint = std::str::from_utf8(body).unwrap_or("").trim();
+        if hint.is_empty() {
+            return KayaError::internal("not leader (no leader hint)");
+        }
+        return KayaError::internal(format!("not leader; hint={hint}"));
+    }
+    let msg = decode_error_payload(body).unwrap_or_else(|_| "Unknown error".to_string());
+    KayaError::internal(msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kaya_net::{
+        decode_txn_begin_response, decode_txn_commit_response, decode_txn_op_payload,
+        encode_txn_begin_response, encode_txn_commit_response, encode_txn_op_payload, TXN_OP_PUT,
+    };
+
+    #[test]
+    fn map_txn_status_conflict_is_txn_conflict() {
+        let err = map_txn_status(STATUS_TXN_CONFLICT, &[]);
+        assert!(matches!(err, KayaError::TxnConflict));
+        assert_eq!(err.exit_code(), 7);
+        assert!(err.guidance().is_some());
+    }
+
+    #[test]
+    fn map_txn_status_not_leader_uses_hint() {
+        let err = map_txn_status(STATUS_NOT_LEADER, b"127.0.0.1:7379");
+        let msg = err.to_string();
+        assert!(msg.contains("not leader"), "{msg}");
+        assert!(msg.contains("127.0.0.1:7379"), "{msg}");
+    }
+
+    #[test]
+    fn txn_payloads_round_trip_for_client_shapes() {
+        let begin = encode_txn_begin_response(7, 42);
+        assert_eq!(decode_txn_begin_response(&begin).unwrap(), (7, 42));
+
+        let put = encode_txn_op_payload(7, TXN_OP_PUT, b"k", Some(b"v"));
+        let (id, op, key, val) = decode_txn_op_payload(&put).unwrap();
+        assert_eq!((id, op, key, val), (7, TXN_OP_PUT, b"k".to_vec(), Some(b"v".to_vec())));
+
+        let commit = encode_txn_commit_response(99);
+        assert_eq!(decode_txn_commit_response(&commit).unwrap(), 99);
+    }
+
+    #[test]
+    fn outcome_maps_txn_conflict() {
+        assert!(matches!(
+            outcome_from_status(STATUS_TXN_CONFLICT),
+            OpOutcome::ServerError
+        ));
     }
 }
