@@ -82,7 +82,8 @@ impl KernelBackend {
     /// Load and attach kprobes from a compiled BPF object (used by try_attach + tests).
     pub fn attach_from_object(bytes: &[u8]) -> Result<Self, String> {
         use aya::maps::RingBuf;
-        use aya::programs::{KProbe, KRetprobe};
+        // aya 0.14+: kprobe and kretprobe share `KProbe` (kind from the ELF program).
+        use aya::programs::KProbe;
         use aya::Ebpf;
 
         let mut bpf = Ebpf::load(bytes).map_err(|e| format!("bpf load: {e}"))?;
@@ -200,7 +201,8 @@ fn attach_kprobe_pair(
     exit: &str,
     symbol: &str,
 ) -> Result<(), String> {
-    use aya::programs::{KProbe, KRetprobe};
+    // aya 0.14+: both kprobe and kretprobe programs convert to `KProbe`.
+    use aya::programs::KProbe;
 
     let enter_prog: &mut KProbe = bpf
         .program_mut(enter)
@@ -214,7 +216,7 @@ fn attach_kprobe_pair(
         .attach(symbol, 0)
         .map_err(|e| format!("{enter} attach: {e}"))?;
 
-    let exit_prog: &mut KRetprobe = bpf
+    let exit_prog: &mut KProbe = bpf
         .program_mut(exit)
         .ok_or_else(|| format!("missing {exit}"))?
         .try_into()
