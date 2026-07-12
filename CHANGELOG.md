@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (M18 — Secondary indexes foundation)
+- Engine secondary indexes: `create_index` / `list_indexes` / `drop_index` / `scan_by_index`
+- System keys under `\x00idx/meta|data/`; value-as-secondary for keys under `primary_prefix`
+- Automatic index maintenance on put/delete (covers txn_commit materialization)
+- Spec: `spec/docs/secondary-index-spec.md`
+
 ### Added (M17 — Single-group ACID transactions)
 - Snapshot Isolation write intents + single-node engine txn API (`begin`/`put`/`get`/`delete`/`commit`/`rollback`)
 - Wire `TXN_*` opcodes 9–12 with server SI transaction dispatch

@@ -131,6 +131,7 @@ impl<D: Disk> Engine<D> {
     /// Stage a put intent after write–write conflict checks.
     pub fn txn_put(&mut self, txn_id: TxnId, key: Bytes, value: Bytes) -> Result<()> {
         self.validate_key(&key)?;
+        crate::index::reject_if_system_key(&key)?;
         self.validate_value(&value)?;
         self.stage_intent(txn_id, key, Some(value))
     }
@@ -138,6 +139,7 @@ impl<D: Disk> Engine<D> {
     /// Stage a delete intent after write–write conflict checks.
     pub fn txn_delete(&mut self, txn_id: TxnId, key: Bytes) -> Result<()> {
         self.validate_key(&key)?;
+        crate::index::reject_if_system_key(&key)?;
         self.stage_intent(txn_id, key, None)
     }
 

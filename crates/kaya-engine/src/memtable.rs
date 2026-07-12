@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use kaya_core::{Bytes, KayaError, KeyValue, Result};
 use kaya_io::Disk;
 use kaya_lsm::ValueRecordRef;
-use kaya_wal::WalPayload;
 
 use super::{Engine, ReadOptions, ReadTimestamp, ScanOptions, WriteOptions, WriteResult};
 
@@ -15,65 +14,25 @@ impl<D: Disk> Engine<D> {
         opts: WriteOptions,
     ) -> Result<WriteResult> {
         self.validate_key(&key)?;
+        crate::index::reject_if_system_key(&key)?;
         self.validate_value(&value)?;
-        let durability = opts.durability.unwrap_or(self.config.durability.mode);
-        let append = self
-            .wal
-            .append(
-                WalPayload::Put {
-                    key: key.clone(),
-                    value: value.clone(),
-                },
-                durability,
-            )
+        let old = self.get_inner(&key, ReadTimestamp::Latest)?;
+        let wr = self
+            .write_put(key.clone(), value.clone(), opts.clone())
             .await?;
-        self.memtable.put(key, value, append.sequence);
-        self.stats.put_count += 1;
-        self.stats.memtable_entries = self.memtable.len() as u64;
-        self.stats.wal_bytes_written += u64::from(append.encoded_len);
-        self.stats.wal_fsync_count += u64::from(append.durable);
-        if let Some(us) = append.fsync_duration_us {
-            self.stats.wal_fsync_total_us += us;
-            if us > self.stats.wal_fsync_max_us {
-                self.stats.wal_fsync_max_us = us;
-            }
-            self.histograms.wal_fsync_us.observe(us);
-        }
-        self.stats.last_sequence = append.sequence.get();
-        self.maybe_auto_flush().await?;
-        Ok(WriteResult {
-            sequence: append.sequence,
-            lsn: append.lsn,
-            durable: append.durable,
-        })
+        self.maintain_indexes_after_put(&key, old.as_deref(), &value, &opts)
+            .await?;
+        Ok(wr)
     }
 
     pub async fn delete(&mut self, key: Bytes, opts: WriteOptions) -> Result<WriteResult> {
         self.validate_key(&key)?;
-        let durability = opts.durability.unwrap_or(self.config.durability.mode);
-        let append = self
-            .wal
-            .append(WalPayload::Delete { key: key.clone() }, durability)
+        crate::index::reject_if_system_key(&key)?;
+        let old = self.get_inner(&key, ReadTimestamp::Latest)?;
+        let wr = self.write_delete(key.clone(), opts.clone()).await?;
+        self.maintain_indexes_after_delete(&key, old.as_deref(), &opts)
             .await?;
-        self.memtable.delete(key, append.sequence);
-        self.stats.delete_count += 1;
-        self.stats.memtable_entries = self.memtable.len() as u64;
-        self.stats.wal_bytes_written += u64::from(append.encoded_len);
-        self.stats.wal_fsync_count += u64::from(append.durable);
-        if let Some(us) = append.fsync_duration_us {
-            self.stats.wal_fsync_total_us += us;
-            if us > self.stats.wal_fsync_max_us {
-                self.stats.wal_fsync_max_us = us;
-            }
-            self.histograms.wal_fsync_us.observe(us);
-        }
-        self.stats.last_sequence = append.sequence.get();
-        self.maybe_auto_flush().await?;
-        Ok(WriteResult {
-            sequence: append.sequence,
-            lsn: append.lsn,
-            durable: append.durable,
-        })
+        Ok(wr)
     }
 
     pub async fn get(&mut self, key: &[u8], opts: ReadOptions) -> Result<Option<Bytes>> {
@@ -115,7 +74,7 @@ impl<D: Disk> Engine<D> {
         result
     }
 
-    fn scan_prefix_inner(&mut self, prefix: &[u8], opts: ScanOptions) -> Result<Vec<KeyValue>> {
+    pub(crate) fn scan_prefix_inner(&mut self, prefix: &[u8], opts: ScanOptions) -> Result<Vec<KeyValue>> {
         self.validate_scan_prefix(prefix)?;
         self.stats.scan_count += 1;
         let max_results = self.config.limits.max_scan_results;

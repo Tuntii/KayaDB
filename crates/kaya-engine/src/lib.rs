@@ -12,6 +12,7 @@ use kaya_wal::{recover_wal, WalRecoveryReport, WalWarning, WalWriter};
 
 mod compaction;
 mod flush;
+mod index;
 mod memtable;
 mod recovery;
 mod snapshot;
@@ -21,6 +22,7 @@ mod txn;
 pub use recovery::recover;
 pub use snapshot::SnapshotView;
 pub use stats::{CompactionResult, EngineStats, FlushResult, WriteResult};
+pub use index::{IndexDef, INDEX_DATA_PREFIX, INDEX_META_PREFIX, INDEX_SYS_PREFIX};
 pub use txn::{Intent, TxnId};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -107,6 +109,8 @@ pub struct Engine<D: Disk> {
     gc_watermark: u64,
     /// In-memory write intents + open txn metadata (M17 phase 1; empty after open/recovery).
     txn: txn::TxnTables,
+    /// Registered secondary indexes (M18 foundation); loaded from system meta keys on open.
+    indexes: std::collections::BTreeMap<String, index::IndexDef>,
     #[allow(dead_code)]
     lock_file: Option<std::fs::File>,
 }
@@ -244,7 +248,7 @@ impl<D: Disk> Engine<D> {
             records_replayed: wal_records_replayed,
         };
 
-        Ok(Self {
+        let mut engine = Self {
             config,
             disk,
             wal,
@@ -259,8 +263,12 @@ impl<D: Disk> Engine<D> {
             sstable_refcounts: std::collections::HashMap::new(),
             gc_watermark: 0,
             txn: txn::TxnTables::new(),
+            indexes: std::collections::BTreeMap::new(),
             lock_file,
-        })
+        };
+        // Load durable index metadata after the engine is constructed.
+        engine.load_index_metadata()?;
+        Ok(engine)
     }
 
     pub async fn close(&mut self) -> Result<()> {
@@ -1926,6 +1934,147 @@ mod tests {
             assert_eq!(engine.txn_get(t, b"k").unwrap(), None);
             engine.txn_commit(t).await.unwrap();
             assert_eq!(engine.get(b"k", ReadOptions::default()).await.unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn index_create_put_scan_finds_key() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine.create_index("by_val", b"user:").await.unwrap();
+            assert_eq!(engine.list_indexes(), vec!["by_val".to_string()]);
+            engine
+                .put(b"user:1".to_vec(), b"alice".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            engine
+                .put(b"user:2".to_vec(), b"bob".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            engine
+                .put(b"other:9".to_vec(), b"alice".to_vec(), strict_opts())
+                .await
+                .unwrap();
+
+            let hits = engine.scan_by_index("by_val", b"ali").await.unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].0, b"alice");
+            assert_eq!(hits[0].1, b"user:1");
+
+            let all = engine.scan_by_index("by_val", b"").await.unwrap();
+            assert_eq!(all.len(), 2);
+        });
+    }
+
+    #[test]
+    fn index_delete_removes_entry() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine.create_index("by_val", b"user:").await.unwrap();
+            engine
+                .put(b"user:1".to_vec(), b"alice".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            assert_eq!(
+                engine.scan_by_index("by_val", b"alice").await.unwrap().len(),
+                1
+            );
+            engine
+                .delete(b"user:1".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            assert!(engine
+                .scan_by_index("by_val", b"alice")
+                .await
+                .unwrap()
+                .is_empty());
+        });
+    }
+
+    #[test]
+    fn index_divergence_entry_exists_after_put() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine.create_index("by_val", b"user:").await.unwrap();
+            engine
+                .put(b"user:1".to_vec(), b"alice".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            // Direct divergence check: expected system data key must exist.
+            let idx_key = crate::index::encode_data_key("by_val", b"alice", b"user:1");
+            assert_eq!(
+                engine.get(&idx_key, ReadOptions::default()).await.unwrap(),
+                Some(vec![]),
+                "index data entry must exist after primary put"
+            );
+            assert_eq!(
+                engine.get(b"user:1", ReadOptions::default()).await.unwrap(),
+                Some(b"alice".to_vec())
+            );
+        });
+    }
+
+    #[test]
+    fn index_update_moves_secondary_entry() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine.create_index("by_val", b"user:").await.unwrap();
+            engine
+                .put(b"user:1".to_vec(), b"alice".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            engine
+                .put(b"user:1".to_vec(), b"ally".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            assert!(engine
+                .scan_by_index("by_val", b"alice")
+                .await
+                .unwrap()
+                .is_empty());
+            let hits = engine.scan_by_index("by_val", b"ally").await.unwrap();
+            assert_eq!(hits, vec![(b"ally".to_vec(), b"user:1".to_vec())]);
+        });
+    }
+
+    #[test]
+    fn index_survives_reopen() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = EngineConfig::default();
+            {
+                let mut engine = Engine::open(config.clone(), disk.clone()).await.unwrap();
+                engine.create_index("by_val", b"user:").await.unwrap();
+                engine
+                    .put(b"user:1".to_vec(), b"alice".to_vec(), strict_opts())
+                    .await
+                    .unwrap();
+            }
+            disk.crash();
+            let mut engine2 = Engine::open(config, disk).await.unwrap();
+            assert_eq!(engine2.list_indexes(), vec!["by_val".to_string()]);
+            let hits = engine2.scan_by_index("by_val", b"alice").await.unwrap();
+            assert_eq!(hits, vec![(b"alice".to_vec(), b"user:1".to_vec())]);
+        });
+    }
+
+    #[test]
+    fn index_txn_commit_maintains_entries() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine.create_index("by_val", b"user:").await.unwrap();
+            let (t, _) = engine.begin_txn();
+            engine
+                .txn_put(t, b"user:1".to_vec(), b"alice".to_vec())
+                .unwrap();
+            engine.txn_commit(t).await.unwrap();
+            let hits = engine.scan_by_index("by_val", b"alice").await.unwrap();
+            assert_eq!(hits, vec![(b"alice".to_vec(), b"user:1".to_vec())]);
         });
     }
 
