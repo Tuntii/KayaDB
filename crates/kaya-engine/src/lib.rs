@@ -31,6 +31,17 @@ pub struct WriteOptions {
 pub enum ReadTimestamp {
     #[default]
     Latest,
+    /// Inclusive upper bound on commit_ts / sequence.
+    At(u64),
+}
+
+impl ReadTimestamp {
+    pub fn as_u64(self) -> u64 {
+        match self {
+            Self::Latest => u64::MAX,
+            Self::At(ts) => ts,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -41,6 +52,7 @@ pub struct ReadOptions {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ScanOptions {
     pub limit: Option<usize>,
+    pub read_at: ReadTimestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +101,8 @@ pub struct Engine<D: Disk> {
     /// Reference counts for pinned SSTables (used for snapshots).
     /// table_id -> refcount. When >0 the table is pinned and should not be deleted by compaction.
     sstable_refcounts: std::collections::HashMap<u64, u32>,
+    /// GC lower bound: compaction may drop versions with seq < watermark under Rules A–C.
+    gc_watermark: u64,
     #[allow(dead_code)]
     lock_file: Option<std::fs::File>,
 }
@@ -239,6 +253,7 @@ impl<D: Disk> Engine<D> {
             next_manifest_edit_seq,
             live_sstables,
             sstable_refcounts: std::collections::HashMap::new(),
+            gc_watermark: 0,
             lock_file,
         })
     }
@@ -246,6 +261,18 @@ impl<D: Disk> Engine<D> {
     pub async fn close(&mut self) -> Result<()> {
         let _ = &self.disk;
         Ok(())
+    }
+
+    /// Current GC watermark (versions with seq < watermark may be dropped by compaction).
+    pub fn gc_watermark(&self) -> u64 {
+        self.gc_watermark
+    }
+
+    /// Advance the GC watermark (non-decreasing).
+    pub fn set_gc_watermark(&mut self, ts: u64) {
+        if ts > self.gc_watermark {
+            self.gc_watermark = ts;
+        }
     }
 
     pub async fn compact(&mut self) -> Result<CompactionResult> {
@@ -271,37 +298,110 @@ impl<D: Disk> Engine<D> {
 
         let compact_start = std::time::Instant::now();
 
-        let mut merged: BTreeMap<Bytes, (u64, Option<Bytes>)> = BTreeMap::new();
+        // Collect ALL versions from input SSTs (v4 multi-version or legacy single).
+        // Group by user_key; keep multi-version order (seq DESC).
         let input_set: std::collections::HashSet<u64> = input_ids.iter().copied().collect();
+        let mut by_key: BTreeMap<Bytes, Vec<(u64, Option<Bytes>)>> = BTreeMap::new();
         for (meta, reader) in self.live_sstables.iter().rev() {
             if !input_set.contains(&meta.table_id) {
                 continue;
             }
             for entry in reader.all_entries()? {
-                let seq = entry.sequence.get();
-                match merged.get(&entry.key) {
-                    Some((s, _)) if *s >= seq => {}
-                    _ => {
-                        merged.insert(entry.key, (seq, entry.value));
-                    }
+                by_key
+                    .entry(entry.key)
+                    .or_default()
+                    .push((entry.sequence.get(), entry.value));
+            }
+        }
+
+        // Apply GC watermark (Rules A/B/C) and emit in InternalKey order
+        // (user_key ASC, seq DESC) for SST v4 builder.
+        let watermark = self.gc_watermark;
+        let mut out_entries: Vec<SstEntry> = Vec::new();
+        for (key, mut versions) in by_key {
+            versions.sort_by(|a, b| b.0.cmp(&a.0));
+            // Same seq from overlapping inputs: keep first (already seq DESC).
+            versions.dedup_by(|a, b| a.0 == b.0);
+            for (seq, value) in select_versions_for_gc(versions, watermark) {
+                out_entries.push(SstEntry {
+                    key: key.clone(),
+                    value,
+                    sequence: SequenceNumber::new(seq),
+                });
+            }
+        }
+
+        let last_seq = SequenceNumber::new(self.stats.last_sequence);
+        let manifest_rel = RelativePath::new(MANIFEST_FILE_NAME)?;
+
+        // Empty output after GC: delete inputs only (cannot build empty SSTable).
+        if out_entries.is_empty() {
+            for &id in &input_ids {
+                let edit_del = encode_manifest_edit(
+                    &ManifestEdit::DeleteTable { table_id: id },
+                    self.next_manifest_edit_seq,
+                );
+                self.next_manifest_edit_seq += 1;
+                self.disk.append(&manifest_rel, &edit_del).await?;
+            }
+            let edit_seq = encode_manifest_edit(
+                &ManifestEdit::SetLastSequence { sequence: last_seq },
+                self.next_manifest_edit_seq,
+            );
+            self.next_manifest_edit_seq += 1;
+            self.disk.append(&manifest_rel, &edit_seq).await?;
+            self.disk.fsync_file(&manifest_rel).await?;
+
+            let current_tmp_rel = RelativePath::new(CURRENT_TMP_FILE_NAME)?;
+            let current_rel = RelativePath::new(CURRENT_FILE_NAME)?;
+            let root_rel = RelativePath::root();
+            self.disk
+                .write_at(&current_tmp_rel, 0, MANIFEST_FILE_NAME.as_bytes())
+                .await?;
+            self.disk.fsync_file(&current_tmp_rel).await?;
+            self.disk.rename(&current_tmp_rel, &current_rel).await?;
+            self.disk.fsync_dir(&root_rel).await?;
+
+            let mut new_live: Vec<(TableMetadata, SstableReader)> = Vec::new();
+            for (meta, reader) in self.live_sstables.drain(..) {
+                if !input_set.contains(&meta.table_id) {
+                    new_live.push((meta, reader));
                 }
             }
+            new_live.sort_by_key(|b| std::cmp::Reverse(b.0.table_id));
+            self.live_sstables = new_live;
+            for &id in &input_ids {
+                self.manifest_state.live_tables.retain(|t| t.table_id != id);
+            }
+            self.manifest_state.last_sequence = last_seq;
+            self.stats.sstable_count = self.live_sstables.len() as u64;
+
+            let compact_us = compact_start.elapsed().as_micros() as u64;
+            self.stats.compaction_total_us += compact_us;
+            if compact_us > self.stats.compaction_max_us {
+                self.stats.compaction_max_us = compact_us;
+            }
+            self.stats.compaction_count += 1;
+            self.histograms.compaction_us.observe(compact_us);
+
+            return Ok(CompactionResult {
+                input_tables: input_ids.len() as u64,
+                output_tables: 0,
+            });
         }
 
         let new_table_id = self.next_table_id;
         self.next_table_id += 1;
 
-        let mut builder =
-            SstableBuilder::with_options(kaya_lsm::SstableBuildOptions::from(&self.config.sstable));
-        for (key, (seq, value)) in &merged {
-            builder.add(SstEntry {
-                key: key.clone(),
-                value: value.clone(),
-                sequence: SequenceNumber::new(*seq),
-            });
+        let mut build_opts = kaya_lsm::SstableBuildOptions::from(&self.config.sstable);
+        build_opts.mvcc = true;
+        let mut builder = SstableBuilder::with_options(build_opts);
+        for entry in &out_entries {
+            builder.add(entry.clone());
         }
         let sst_bytes = builder.finish()?;
         let sst_file_size = sst_bytes.len() as u64;
+        let entry_count = out_entries.len() as u64;
 
         let (sst_table_min_seq, sst_table_max_seq, smallest_key, largest_key) = {
             let footer = decode_footer(&sst_bytes)?;
@@ -334,14 +434,11 @@ impl<D: Disk> Engine<D> {
             largest_key,
             min_sequence: SequenceNumber::new(sst_table_min_seq),
             max_sequence: SequenceNumber::new(sst_table_max_seq),
-            entry_count: merged.len() as u64,
+            entry_count,
             file_size: sst_file_size,
             footer_checksum: footer_crc,
         };
 
-        let last_seq = SequenceNumber::new(self.stats.last_sequence);
-
-        let manifest_rel = RelativePath::new(MANIFEST_FILE_NAME)?;
         let edit_create = encode_manifest_edit(
             &ManifestEdit::CreateTable(new_meta.clone()),
             self.next_manifest_edit_seq,
@@ -410,6 +507,38 @@ impl<D: Disk> Engine<D> {
             output_tables: 1,
         })
     }
+}
+
+/// Select versions to retain under GC watermark Rules A/B/C (mvcc-spec §7.2).
+///
+/// `versions` must be sorted by sequence descending (newest first).
+/// Safer minimal policy:
+/// - keep all versions with `seq >= watermark`
+/// - if newest overall is a Put with `seq < watermark`, keep it (Rule C)
+/// - drop obsolete tombstones and superseded older versions (Rules A/B)
+fn select_versions_for_gc(
+    versions: Vec<(u64, Option<Bytes>)>,
+    watermark: u64,
+) -> Vec<(u64, Option<Bytes>)> {
+    if versions.is_empty() {
+        return versions;
+    }
+    // Rule B: newest is tombstone below watermark → drop tombstone and all older.
+    if versions[0].1.is_none() && versions[0].0 < watermark {
+        return Vec::new();
+    }
+
+    let mut retained = Vec::new();
+    for (i, (seq, val)) in versions.into_iter().enumerate() {
+        if seq >= watermark {
+            retained.push((seq, val));
+        } else if i == 0 && val.is_some() {
+            // Rule C: sole covering Put below watermark.
+            retained.push((seq, val));
+        }
+        // else Rule A / obsolete: drop
+    }
+    retained
 }
 
 #[cfg(test)]
@@ -1261,7 +1390,7 @@ mod tests {
                     .unwrap();
             }
             let result = engine
-                .scan_prefix(b"k", ScanOptions { limit: Some(10) })
+                .scan_prefix(b"k", ScanOptions { limit: Some(10), ..Default::default() })
                 .await
                 .unwrap();
             assert_eq!(result.len(), 3, "user limit above hard cap is clamped");
@@ -1340,5 +1469,308 @@ mod tests {
             assert_eq!(result[1].key, b"k1".to_vec());
             assert_eq!(result[2].key, b"k2".to_vec());
         });
+    }
+
+    fn read_at(ts: u64) -> ReadOptions {
+        ReadOptions {
+            read_at: ReadTimestamp::At(ts),
+        }
+    }
+
+    #[test]
+    fn snapshot_get_at_sees_older_version_in_memtable() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+
+            let w1 = engine
+                .put(b"k".to_vec(), b"v1".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            let w2 = engine
+                .put(b"k".to_vec(), b"v2".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            assert!(w2.sequence.get() > w1.sequence.get());
+
+            assert_eq!(
+                engine
+                    .get(b"k", read_at(w1.sequence.get()))
+                    .await
+                    .unwrap(),
+                Some(b"v1".to_vec())
+            );
+            assert_eq!(
+                engine.get(b"k", ReadOptions::default()).await.unwrap(),
+                Some(b"v2".to_vec())
+            );
+            assert_eq!(
+                engine
+                    .get(b"k", read_at(w2.sequence.get()))
+                    .await
+                    .unwrap(),
+                Some(b"v2".to_vec())
+            );
+        });
+    }
+
+    #[test]
+    fn snapshot_get_at_survives_flush_and_reopen() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = EngineConfig::default();
+            let (s1, s2) = {
+                let mut engine = Engine::open(config.clone(), disk.clone()).await.unwrap();
+                let w1 = engine
+                    .put(b"k".to_vec(), b"v1".to_vec(), strict_opts())
+                    .await
+                    .unwrap();
+                let w2 = engine
+                    .put(b"k".to_vec(), b"v2".to_vec(), strict_opts())
+                    .await
+                    .unwrap();
+                engine.flush().await.unwrap();
+                assert_eq!(engine.stats().sstable_count, 1);
+                assert_eq!(engine.stats().memtable_entries, 0);
+                // Still visible from SST after flush
+                assert_eq!(
+                    engine
+                        .get(b"k", read_at(w1.sequence.get()))
+                        .await
+                        .unwrap(),
+                    Some(b"v1".to_vec())
+                );
+                assert_eq!(
+                    engine.get(b"k", ReadOptions::default()).await.unwrap(),
+                    Some(b"v2".to_vec())
+                );
+                (w1.sequence.get(), w2.sequence.get())
+            };
+
+            disk.crash();
+
+            let mut engine2 = Engine::open(config, disk).await.unwrap();
+            assert_eq!(
+                engine2.get(b"k", read_at(s1)).await.unwrap(),
+                Some(b"v1".to_vec())
+            );
+            assert_eq!(
+                engine2.get(b"k", read_at(s2)).await.unwrap(),
+                Some(b"v2".to_vec())
+            );
+            assert_eq!(
+                engine2.get(b"k", ReadOptions::default()).await.unwrap(),
+                Some(b"v2".to_vec())
+            );
+        });
+    }
+
+    #[test]
+    fn delete_then_get_at_older_sees_put() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+
+            let w1 = engine
+                .put(b"k".to_vec(), b"v1".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            let _w2 = engine.delete(b"k".to_vec(), strict_opts()).await.unwrap();
+
+            assert_eq!(
+                engine.get(b"k", ReadOptions::default()).await.unwrap(),
+                None
+            );
+            assert_eq!(
+                engine
+                    .get(b"k", read_at(w1.sequence.get()))
+                    .await
+                    .unwrap(),
+                Some(b"v1".to_vec())
+            );
+
+            engine.flush().await.unwrap();
+            assert_eq!(
+                engine.get(b"k", ReadOptions::default()).await.unwrap(),
+                None
+            );
+            assert_eq!(
+                engine
+                    .get(b"k", read_at(w1.sequence.get()))
+                    .await
+                    .unwrap(),
+                Some(b"v1".to_vec())
+            );
+        });
+    }
+
+    #[test]
+    fn compact_with_watermark_drops_old_versions() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+
+            let w1 = engine
+                .put(b"k".to_vec(), b"v1".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            engine.flush().await.unwrap();
+            let w2 = engine
+                .put(b"k".to_vec(), b"v2".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            engine.flush().await.unwrap();
+            assert_eq!(engine.stats().sstable_count, 2);
+
+            // Before GC: both versions visible
+            assert_eq!(
+                engine
+                    .get(b"k", read_at(w1.sequence.get()))
+                    .await
+                    .unwrap(),
+                Some(b"v1".to_vec())
+            );
+
+            // Watermark at v2: drop v1 under Rule A (superseded by retained N >= wm)
+            engine.set_gc_watermark(w2.sequence.get());
+            assert_eq!(engine.gc_watermark(), w2.sequence.get());
+
+            let r = engine.compact().await.unwrap();
+            assert_eq!(r.input_tables, 2);
+            assert_eq!(r.output_tables, 1);
+            assert_eq!(engine.stats().sstable_count, 1);
+
+            assert_eq!(
+                engine.get(b"k", ReadOptions::default()).await.unwrap(),
+                Some(b"v2".to_vec())
+            );
+            assert_eq!(
+                engine
+                    .get(b"k", read_at(w2.sequence.get()))
+                    .await
+                    .unwrap(),
+                Some(b"v2".to_vec())
+            );
+            // Old snapshot bound below watermark no longer sees dropped version
+            assert_eq!(
+                engine
+                    .get(b"k", read_at(w1.sequence.get()))
+                    .await
+                    .unwrap(),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn compact_preserves_versions_when_watermark_zero() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+
+            let w1 = engine
+                .put(b"k".to_vec(), b"v1".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            engine.flush().await.unwrap();
+            let w2 = engine
+                .put(b"k".to_vec(), b"v2".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            engine.flush().await.unwrap();
+
+            assert_eq!(engine.gc_watermark(), 0);
+            engine.compact().await.unwrap();
+
+            assert_eq!(
+                engine
+                    .get(b"k", read_at(w1.sequence.get()))
+                    .await
+                    .unwrap(),
+                Some(b"v1".to_vec())
+            );
+            assert_eq!(
+                engine
+                    .get(b"k", read_at(w2.sequence.get()))
+                    .await
+                    .unwrap(),
+                Some(b"v2".to_vec())
+            );
+        });
+    }
+
+    #[test]
+    fn proper_prefix_keys_after_multi_version_flush() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+
+            let wa_old = engine
+                .put(b"a".to_vec(), b"va-old".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            let _wa = engine
+                .put(b"a".to_vec(), b"va".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            let _waa = engine
+                .put(b"aa".to_vec(), b"vaa".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            engine.flush().await.unwrap();
+
+            assert_eq!(
+                engine.get(b"a", ReadOptions::default()).await.unwrap(),
+                Some(b"va".to_vec())
+            );
+            assert_eq!(
+                engine.get(b"aa", ReadOptions::default()).await.unwrap(),
+                Some(b"vaa".to_vec())
+            );
+            assert_eq!(
+                engine
+                    .get(b"a", read_at(wa_old.sequence.get()))
+                    .await
+                    .unwrap(),
+                Some(b"va-old".to_vec())
+            );
+
+            let scan = engine
+                .scan_prefix(b"a", ScanOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(scan.len(), 2);
+            assert_eq!(scan[0].key, b"a");
+            assert_eq!(scan[0].value, b"va");
+            assert_eq!(scan[1].key, b"aa");
+            assert_eq!(scan[1].value, b"vaa");
+
+            let scan_at = engine
+                .scan_prefix(
+                    b"a",
+                    ScanOptions {
+                        limit: None,
+                        read_at: ReadTimestamp::At(wa_old.sequence.get()),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(scan_at.len(), 1);
+            assert_eq!(scan_at[0].key, b"a");
+            assert_eq!(scan_at[0].value, b"va-old");
+        });
+    }
+
+    #[test]
+    fn gc_watermark_is_non_decreasing() {
+        let disk = Arc::new(SimDisk::new());
+        let mut engine = block_on(Engine::open(EngineConfig::default(), disk)).unwrap();
+        assert_eq!(engine.gc_watermark(), 0);
+        engine.set_gc_watermark(10);
+        assert_eq!(engine.gc_watermark(), 10);
+        engine.set_gc_watermark(5);
+        assert_eq!(engine.gc_watermark(), 10);
+        engine.set_gc_watermark(20);
+        assert_eq!(engine.gc_watermark(), 20);
     }
 }

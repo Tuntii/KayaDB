@@ -325,9 +325,9 @@ Dual-read rules:
    with the same user_key and commit_ts.
 3. Bloom filters on v1–v3 remain user_key based; v4 blooms also key on user_key
    (not internal key) so dual-read lookups stay efficient.
-4. Compaction that rewrites v1–v3 data into v4 **must** encode internal keys
-   using `encode_internal_key(user_key, sequence)` and preserve the sequence
-   field for inspect/compat as commit_ts.
+4. Compaction that rewrites v1–v3 data into v4 **must** preserve user_key and
+   the entry `sequence` as commit_ts, emit multi-version rows in InternalKey
+   order (user_key ASC, commit_ts DESC), and set format_version 4.
 5. Short keys (`len < 8`) or keys that are not internal-encoded are never
    misinterpreted as inverted-ts suffixes when the table format version is
    v1–v3; format version is authoritative.
@@ -349,15 +349,26 @@ No WAL format version bump is required for M16.
 
 ---
 
-## 10. SSTable v4 (preview)
+## 10. SSTable v4
 
-SSTable format version v4 stores **internal keys** in the entry key field.
-The entry `sequence` field still holds `commit_ts` for inspect tools and for
-symmetry with dual-read.
+SSTable format version v4 stores **user_key** in the entry key field (not the
+wire-encoded internal key). Multiple versions of the same user_key are allowed
+in one table, ordered by typed InternalKey order: **user_key ASC, commit_ts DESC**.
+
+The entry `sequence` field holds `commit_ts` (= `SequenceNumber` in M16) for
+visibility selection, inspect tools, and dual-read symmetry with v1–v3.
+
+- Point lookup `get_at(user_key, read_ts)` returns the newest version with
+  `sequence <= read_ts` (Put or Delete).
+- Prefix scan `scan_prefix_at` returns one visible version per user_key under
+  the prefix (including tombstones so callers can apply merge visibility).
+- Bloom filters remain keyed on **user_key** only.
+- The wire `encode_internal_key` form is reserved for optional external codecs;
+  on-disk v4 data blocks keep plain user_keys + per-entry sequence.
 
 Detailed binary layout (footer, block encoding, compression) remains owned by
-`lsm-storage-format-spec.md` and is updated when v4 lands. This document owns
-the **semantic** key/value versioning contract.
+`lsm-storage-format-spec.md`. This document owns the **semantic** key/value
+versioning contract.
 
 ---
 
