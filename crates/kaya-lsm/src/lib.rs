@@ -1,9 +1,14 @@
 mod block_cache;
 mod compaction;
+mod internal_key;
 mod manifest;
 mod sstable;
 
 pub use block_cache::BlockCacheStats;
+pub use internal_key::{
+    commit_ts_of, encode_internal_key, encode_internal_key_seq, matches_user_key, user_key_of,
+    COMMIT_TS_LEN,
+};
 pub use compaction::{
     CompactionCandidate, CompactionPolicy, L0MergePolicy, LevelStrategy, TierStrategy,
 };
