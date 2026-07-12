@@ -384,7 +384,7 @@ impl<D: Disk> Engine<D> {
         let watermark = self.gc_watermark;
         let mut out_entries: Vec<SstEntry> = Vec::new();
         for (key, mut versions) in by_key {
-            versions.sort_by(|a, b| b.0.cmp(&a.0));
+            versions.sort_by_key(|b| std::cmp::Reverse(b.0));
             // Same seq from overlapping inputs: keep first (already seq DESC).
             versions.dedup_by(|a, b| a.0 == b.0);
             for (seq, value) in select_versions_for_gc(versions, watermark) {
@@ -2011,8 +2011,10 @@ mod tests {
     fn hlc_writes_use_packed_timestamps_and_increase_when_wall_stalls() {
         block_on(async {
             let disk = Arc::new(SimDisk::new());
-            let mut config = EngineConfig::default();
-            config.use_hlc = true;
+            let config = EngineConfig {
+                use_hlc: true,
+                ..EngineConfig::default()
+            };
             let mut engine = Engine::open(config, disk).await.unwrap();
             assert!(engine.use_hlc());
 

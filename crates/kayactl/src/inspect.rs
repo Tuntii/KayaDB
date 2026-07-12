@@ -340,13 +340,13 @@ mod tests {
     #[test]
     fn multi_version_when_duplicate_keys() {
         let e1 = SstEntry {
-            key: b"k".to_vec().into(),
-            value: Some(b"v1".to_vec().into()),
+            key: b"k".to_vec(),
+            value: Some(b"v1".to_vec()),
             sequence: SequenceNumber::new(1),
         };
         let e2 = SstEntry {
-            key: b"k".to_vec().into(),
-            value: Some(b"v2".to_vec().into()),
+            key: b"k".to_vec(),
+            value: Some(b"v2".to_vec()),
             sequence: SequenceNumber::new(2),
         };
         let inspection = SstInspection {
@@ -361,8 +361,8 @@ mod tests {
     #[test]
     fn display_user_key_plain() {
         let e = SstEntry {
-            key: b"hello".to_vec().into(),
-            value: Some(b"v".to_vec().into()),
+            key: b"hello".to_vec(),
+            value: Some(b"v".to_vec()),
             sequence: SequenceNumber::new(7),
         };
         assert_eq!(display_user_key(&e), "hello");
@@ -373,7 +373,7 @@ mod tests {
         let wire = encode_internal_key(b"user", 42);
         let e = SstEntry {
             key: wire,
-            value: Some(b"v".to_vec().into()),
+            value: Some(b"v".to_vec()),
             sequence: SequenceNumber::new(42),
         };
         assert_eq!(display_user_key(&e), "user");
@@ -383,8 +383,8 @@ mod tests {
     fn display_user_key_does_not_strip_long_plain_keys() {
         // 12-byte plain user_key must not be treated as wire-encoded unless ts matches.
         let e = SstEntry {
-            key: b"abcdefghijkl".to_vec().into(),
-            value: Some(b"v".to_vec().into()),
+            key: b"abcdefghijkl".to_vec(),
+            value: Some(b"v".to_vec()),
             sequence: SequenceNumber::new(1),
         };
         assert_eq!(display_user_key(&e), "abcdefghijkl");

@@ -430,8 +430,10 @@ mod apply_mutations_tests {
     fn apply_mutations_maintains_index_and_cdc() {
         block_on(async {
             let disk = Arc::new(SimDisk::new());
-            let mut cfg = EngineConfig::default();
-            cfg.enable_cdc = true;
+            let cfg = EngineConfig {
+                enable_cdc: true,
+                ..EngineConfig::default()
+            };
             let mut engine = Engine::open(cfg, disk).await.unwrap();
             engine.create_index("by_val", b"user:").await.unwrap();
 

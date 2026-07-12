@@ -207,7 +207,7 @@ mod tests {
         assert!(v100 < seek);
         assert!(seek <= v50);
         assert!(v50 < v10);
-        let mut keys = vec![v100, v50.clone(), v10];
+        let mut keys = [v100, v50.clone(), v10];
         keys.sort();
         let first_ge = keys.iter().find(|k| *k >= &seek).unwrap();
         assert_eq!(first_ge, &v50);

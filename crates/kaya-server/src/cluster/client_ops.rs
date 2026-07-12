@@ -737,8 +737,7 @@ async fn txn_commit_via_raft(
         }
     };
 
-    let mutations: Vec<(Vec<u8>, Option<Vec<u8>>)> =
-        staged.into_iter().map(|(k, v)| (k, v)).collect();
+    let mutations: Vec<(Vec<u8>, Option<Vec<u8>>)> = staged.into_iter().collect();
 
     // Cross-group atomic txn is not supported in the multi-raft foundation.
     let mut groups = std::collections::BTreeSet::new();

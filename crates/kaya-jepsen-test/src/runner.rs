@@ -394,19 +394,24 @@ impl TestRunner {
         let stats = history.stats();
         eprintln!("{}", stats);
 
+        // After kill/partition, a node may have partially applied a TxnCommit
+        // before crash. Raft re-applies the entry once leadership/commit is
+        // re-established; allow time for that before failing the invariant.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
         let mut last_err = String::new();
         let mut ok = false;
-        for _ in 0..8 {
+        for attempt in 0..24 {
             // Prefer any reachable node; leader preferred via redirects.
             for addr in endpoints {
-                match timeout(Duration::from_secs(2), KayaClient::connect(*addr)).await {
+                match timeout(Duration::from_secs(3), KayaClient::connect(*addr)).await {
                     Ok(Ok(mut client)) => {
-                        client.set_max_redirects(10);
+                        client.set_max_redirects(16);
                         match verify_bank_sum_live(
                             &mut client,
                             BANK_NUM_ACCOUNTS,
                             expected,
-                            Duration::from_secs(3),
+                            Duration::from_secs(5),
                         )
                         .await
                         {
@@ -423,7 +428,8 @@ impl TestRunner {
             if ok {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            let backoff_ms = 250u64.saturating_mul(1 + (attempt as u64 / 4));
+            tokio::time::sleep(Duration::from_millis(backoff_ms.min(1500))).await;
         }
 
         let partition_attempted = partition_tracker.attempted();

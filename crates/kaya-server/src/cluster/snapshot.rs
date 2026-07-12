@@ -216,10 +216,9 @@ pub(crate) async fn maybe_compact_raft_log(
     let snap_data = build_raft_snapshot_payload(&engine_data, &members_snapshot);
 
     for (gid, last, term) in compaction_targets {
-        host.lock()
-            .unwrap()
-            .get_mut(gid)
-            .map(|n| n.compact(last, term, snap_data.clone()));
+        if let Some(n) = host.lock().unwrap().get_mut(gid) {
+            n.compact(last, term, snap_data.clone())
+        }
     }
 
     // Persisted snapshot for fast restart (shared engine+membership at root).

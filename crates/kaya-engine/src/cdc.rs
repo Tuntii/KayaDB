@@ -276,7 +276,7 @@ fn parse_json_string(s: &str) -> Result<(String, &str)> {
 }
 
 fn cursor_rel_path(consumer_id: &str) -> Result<RelativePath> {
-    RelativePath::new(&format!("{CDC_CURSORS_DIR}/{consumer_id}"))
+    RelativePath::new(format!("{CDC_CURSORS_DIR}/{consumer_id}"))
 }
 
 fn log_rel_path() -> Result<RelativePath> {

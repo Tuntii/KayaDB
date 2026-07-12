@@ -151,10 +151,7 @@ async fn apply_command(
             engine
                 .lock()
                 .await
-                .apply_mutations(
-                    mutations.into_iter().map(|(k, v)| (k, v)).collect(),
-                    WriteOptions::default(),
-                )
+                .apply_mutations(mutations.into_iter().collect(), WriteOptions::default())
                 .await
                 .map(|_| None) // LSN correlation is optional for batch commits
                 .map_err(|e| e.to_string())

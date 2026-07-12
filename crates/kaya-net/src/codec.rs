@@ -623,9 +623,12 @@ pub fn encode_txn_op_payload(txn_id: u64, op: u8, key: &[u8], value: Option<&[u8
     out
 }
 
+/// Decoded TXN_OP request: `(txn_id, op, key, value)` — `value` is `Some` only for put.
+pub type TxnOpPayload = (u64, u8, Vec<u8>, Option<Vec<u8>>);
+
 /// Decode TXN_OP request. Returns `(txn_id, op, key, value)` where `value` is
 /// `Some` only for put.
-pub fn decode_txn_op_payload(data: &[u8]) -> Result<(u64, u8, Vec<u8>, Option<Vec<u8>>), String> {
+pub fn decode_txn_op_payload(data: &[u8]) -> Result<TxnOpPayload, String> {
     let mut cur = data;
     let txn_id = take_u64(&mut cur)?;
     let op = take_u8(&mut cur)?;

@@ -115,7 +115,7 @@ impl Memtable {
         // InternalKey{key, read_ts}. range from that seek yields the first
         // entry with user_key == key and ts <= read_ts.
         let seek = InternalKey::new(key.to_vec(), read_ts);
-        for (ik, record) in self.entries.range(seek..) {
+        if let Some((ik, record)) = self.entries.range(seek..).next() {
             if ik.user_key.as_slice() != key {
                 return None;
             }

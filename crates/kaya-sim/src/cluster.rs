@@ -783,10 +783,7 @@ async fn apply_command_to_engine(
                 return Ok(None);
             }
             engine
-                .apply_mutations(
-                    mutations.into_iter().map(|(k, v)| (k, v)).collect(),
-                    WriteOptions::default(),
-                )
+                .apply_mutations(mutations.into_iter().collect(), WriteOptions::default())
                 .await
                 .map(|_| None)
                 .map_err(|e| e.to_string())
