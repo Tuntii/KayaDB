@@ -784,8 +784,11 @@ async fn apply_command_to_engine(
 async fn sync_ref_model_from_engine(engine: &mut Engine<SimDisk>) -> RefModel {
     let mut model = RefModel::new();
     if let Ok(kvs) = engine.scan_prefix(b"", ScanOptions::default()).await {
+        // Latest-only rebuild: assign synthetic increasing seqs per key.
+        let mut seq = 1u64;
         for kv in kvs {
-            model.put(kv.key, kv.value);
+            model.put(kv.key, kv.value, seq);
+            seq = seq.saturating_add(1);
         }
     }
     model

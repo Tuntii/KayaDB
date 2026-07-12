@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use kaya_core::{DurabilityMode, EngineConfig};
-use kaya_engine::{Engine, ReadOptions, ScanOptions, WriteOptions};
+use kaya_engine::{Engine, ReadOptions, ReadTimestamp, ScanOptions, WriteOptions};
 use kaya_io::SimDisk;
 
 use crate::{
@@ -59,8 +59,8 @@ pub(crate) async fn run_async(config: SimulationConfig) -> SimulationReport {
                 let value = rng.bytes(vlen);
                 tw.op_put(op_id, &key, &value);
                 match engine.put(key.clone(), value.clone(), strict.clone()).await {
-                    Ok(_) => {
-                        model.put(key.clone(), value.clone());
+                    Ok(wr) => {
+                        model.put(key.clone(), value.clone(), wr.sequence.get());
                         tw.result_ok(op_id);
                         let actual = engine
                             .get(&key, ReadOptions::default())
@@ -104,8 +104,8 @@ pub(crate) async fn run_async(config: SimulationConfig) -> SimulationReport {
                 let key = gen_key(&mut rng, config.keyspace_size);
                 tw.op_delete(op_id, &key);
                 match engine.delete(key.clone(), strict.clone()).await {
-                    Ok(_) => {
-                        model.delete(&key);
+                    Ok(wr) => {
+                        model.delete(&key, wr.sequence.get());
                         tw.result_ok(op_id);
                         let actual = engine
                             .get(&key, ReadOptions::default())
@@ -178,7 +178,7 @@ pub(crate) async fn run_async(config: SimulationConfig) -> SimulationReport {
                 tw.restart_event();
                 tw.result_ok(op_id);
 
-                // ENG-001: every key in the keyspace must match the reference model.
+                // ENG-001: every key in the keyspace must match the reference model (Latest).
                 let mut all_ok = true;
                 for idx in 0..config.keyspace_size {
                     let key = format!("key:{idx:04x}").into_bytes();
@@ -202,6 +202,17 @@ pub(crate) async fn run_async(config: SimulationConfig) -> SimulationReport {
                 if all_ok {
                     tw.invariant_ok("ENG-001");
                 }
+
+                // MVCC property: for each recorded commit_ts, engine get_at
+                // matches the versioned RefModel after crash/restart.
+                check_mvcc_get_at(
+                    &mut engine,
+                    &model,
+                    config.keyspace_size,
+                    &mut violations,
+                    &mut tw,
+                )
+                .await;
             }
         }
     }
@@ -213,6 +224,64 @@ pub(crate) async fn run_async(config: SimulationConfig) -> SimulationReport {
         operations_executed: op_id,
         invariant_failures: violations,
         trace: tw.finish(),
+    }
+}
+
+/// After crash/restart (or any durable point), verify snapshot reads at every
+/// known commit timestamp match the multi-version reference model.
+async fn check_mvcc_get_at(
+    engine: &mut Engine<SimDisk>,
+    model: &RefModel,
+    keyspace_size: u64,
+    violations: &mut Vec<String>,
+    tw: &mut TraceWriter,
+) {
+    let timestamps = model.all_commit_timestamps();
+    if timestamps.is_empty() {
+        tw.invariant_ok("MVCC-001");
+        return;
+    }
+
+    let mut all_ok = true;
+    for idx in 0..keyspace_size {
+        let key = format!("key:{idx:04x}").into_bytes();
+        // Only probe timestamps that matter for this key, plus a couple global ones.
+        let mut read_ts_list = model.versions_of(&key);
+        // Also sample a few global timestamps so cross-key ordering is covered.
+        for &ts in timestamps.iter().take(4) {
+            if !read_ts_list.contains(&ts) {
+                read_ts_list.push(ts);
+            }
+        }
+        read_ts_list.sort_unstable();
+        read_ts_list.dedup();
+
+        for read_ts in read_ts_list {
+            let expected = model.get_at(&key, read_ts).cloned();
+            let actual = engine
+                .get(
+                    &key,
+                    ReadOptions {
+                        read_at: ReadTimestamp::At(read_ts),
+                    },
+                )
+                .await
+                .unwrap_or(None);
+            if expected != actual {
+                let d = format!(
+                    "MVCC-001: key {} @ read_ts={read_ts}: expected {:?}, got {:?}",
+                    hex_enc(&key),
+                    expected,
+                    actual
+                );
+                violations.push(d.clone());
+                tw.invariant_violation("MVCC-001", &d);
+                all_ok = false;
+            }
+        }
+    }
+    if all_ok {
+        tw.invariant_ok("MVCC-001");
     }
 }
 
@@ -351,5 +420,143 @@ fn check_eng002(
         );
         violations.push(d.clone());
         tw.invariant_violation("ENG-002", &d);
+    }
+}
+
+// ── Integration-style MVCC crash property ─────────────────────────────────────
+
+#[cfg(test)]
+mod mvcc_tests {
+    use super::*;
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(f)
+    }
+
+    fn read_at(ts: u64) -> ReadOptions {
+        ReadOptions {
+            read_at: ReadTimestamp::At(ts),
+        }
+    }
+
+    #[test]
+    fn mvcc_multi_version_put_crash_get_at_matches_model() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let engine_cfg = EngineConfig {
+                disable_locking: true,
+                ..Default::default()
+            };
+            let mut engine = Engine::open(engine_cfg.clone(), disk.clone())
+                .await
+                .expect("open");
+            let mut model = RefModel::new();
+
+            let strict = WriteOptions {
+                durability: Some(DurabilityMode::Strict),
+                ..WriteOptions::default()
+            };
+
+            let key = b"key:0001".to_vec();
+            let w1 = engine
+                .put(key.clone(), b"v1".to_vec(), strict.clone())
+                .await
+                .unwrap();
+            model.put(key.clone(), b"v1".to_vec(), w1.sequence.get());
+
+            let w2 = engine
+                .put(key.clone(), b"v2".to_vec(), strict.clone())
+                .await
+                .unwrap();
+            model.put(key.clone(), b"v2".to_vec(), w2.sequence.get());
+
+            let w3 = engine
+                .put(key.clone(), b"v3".to_vec(), strict.clone())
+                .await
+                .unwrap();
+            model.put(key.clone(), b"v3".to_vec(), w3.sequence.get());
+
+            // Crash mid-history and reopen.
+            engine.close().await.ok();
+            disk.crash();
+            let mut engine = Engine::open(engine_cfg, disk).await.expect("reopen");
+
+            for ts in [w1.sequence.get(), w2.sequence.get(), w3.sequence.get()] {
+                let expected = model.get_at(&key, ts).cloned();
+                let actual = engine.get(&key, read_at(ts)).await.unwrap();
+                assert_eq!(
+                    expected, actual,
+                    "get_at mismatch after crash at read_ts={ts}"
+                );
+            }
+
+            // Latest still matches.
+            assert_eq!(
+                engine.get(&key, ReadOptions::default()).await.unwrap(),
+                model.get(&key).cloned()
+            );
+            assert_eq!(
+                engine.get(&key, ReadOptions::default()).await.unwrap(),
+                Some(b"v3".to_vec())
+            );
+        });
+    }
+
+    #[test]
+    fn mvcc_delete_then_crash_snapshot_sees_old_put() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let engine_cfg = EngineConfig {
+                disable_locking: true,
+                ..Default::default()
+            };
+            let mut engine = Engine::open(engine_cfg.clone(), disk.clone())
+                .await
+                .expect("open");
+            let mut model = RefModel::new();
+
+            let strict = WriteOptions {
+                durability: Some(DurabilityMode::Strict),
+                ..WriteOptions::default()
+            };
+
+            let key = b"key:00aa".to_vec();
+            let w1 = engine
+                .put(key.clone(), b"alive".to_vec(), strict.clone())
+                .await
+                .unwrap();
+            model.put(key.clone(), b"alive".to_vec(), w1.sequence.get());
+
+            let w2 = engine.delete(key.clone(), strict).await.unwrap();
+            model.delete(&key, w2.sequence.get());
+
+            engine.close().await.ok();
+            disk.crash();
+            let mut engine = Engine::open(engine_cfg, disk).await.expect("reopen");
+
+            assert_eq!(
+                engine
+                    .get(&key, read_at(w1.sequence.get()))
+                    .await
+                    .unwrap(),
+                Some(b"alive".to_vec())
+            );
+            assert_eq!(
+                model.get_at(&key, w1.sequence.get()).map(|v| v.as_slice()),
+                Some(b"alive".as_ref())
+            );
+            assert_eq!(
+                engine
+                    .get(&key, read_at(w2.sequence.get()))
+                    .await
+                    .unwrap(),
+                None
+            );
+            assert_eq!(engine.get(&key, ReadOptions::default()).await.unwrap(), None);
+            assert_eq!(model.get(&key), None);
+        });
     }
 }
