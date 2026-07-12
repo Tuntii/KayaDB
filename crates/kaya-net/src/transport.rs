@@ -46,6 +46,8 @@ pub const STATUS_OK: u16 = 0;
 pub const STATUS_INVALID_ARGUMENT: u16 = 1;
 /// GET / SCAN: the key was not found.
 pub const STATUS_NOT_FOUND: u16 = 2;
+/// Write-write or intent conflict under Snapshot Isolation (M17).
+pub const STATUS_TXN_CONFLICT: u16 = 3;
 /// The server encountered an error processing the request.
 pub const STATUS_ERROR: u16 = 9;
 /// This node is not the current Raft leader; the client should retry.

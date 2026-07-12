@@ -228,12 +228,14 @@ Engine / Rust API surfaces the same condition as `KayaError::TxnConflict`.
 pub type TxnId = u64;
 
 impl<D: Disk> Engine<D> {
-    pub fn begin_txn(&mut self) -> TxnId;
+    pub fn begin_txn(&mut self) -> (TxnId, u64 /* snapshot_ts */);
     pub fn txn_get(&mut self, txn_id: TxnId, key: &[u8]) -> Result<Option<Bytes>>;
-    pub async fn txn_put(&mut self, txn_id: TxnId, key: Bytes, value: Bytes) -> Result<()>;
-    pub async fn txn_delete(&mut self, txn_id: TxnId, key: Bytes) -> Result<()>;
+    pub fn txn_put(&mut self, txn_id: TxnId, key: Bytes, value: Bytes) -> Result<()>;
+    pub fn txn_delete(&mut self, txn_id: TxnId, key: Bytes) -> Result<()>;
     pub async fn txn_commit(&mut self, txn_id: TxnId) -> Result<SequenceNumber>;
     pub fn txn_rollback(&mut self, txn_id: TxnId) -> Result<()>;
+    pub fn txn_prepare_commit(&mut self, txn_id: TxnId) -> Result<Vec<(Bytes, Option<Bytes>)>>;
+    pub fn txn_finish(&mut self, txn_id: TxnId) -> Result<()>;
 }
 ```
 

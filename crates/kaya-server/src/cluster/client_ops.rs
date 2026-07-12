@@ -1,4 +1,13 @@
-//! Client protocol: PUT/GET/DELETE/SCAN routing and membership proposals.
+//! Client protocol: PUT/GET/DELETE/SCAN/TXN routing and membership proposals.
+//!
+//! ## Transactions (M17)
+//!
+//! TXN opcodes 9–12 stage write intents on the **leader** engine only. On
+//! `TXN_COMMIT`, each staged put/delete is proposed as an existing
+//! [`RaftCommand::Put`]/[`RaftCommand::Delete`] so committed data is
+//! Raft-replicated; local intents are then cleared. Multi-node SI remains
+//! best-effort until intents themselves are Raft-replicated (followers do
+//! not observe in-flight intents).
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -7,10 +16,12 @@ use std::sync::Arc;
 use kaya_engine::{ReadOptions, ScanOptions};
 use kaya_net::{
     decode_hello_request, decode_key_payload, decode_member_payload, decode_put_payload,
-    decode_remove_member_payload, decode_scan_payload, encode_error_payload, encode_hello_response,
-    encode_scan_response, encode_value_payload, read_client_frame, send_envelopes,
+    decode_remove_member_payload, decode_scan_payload, decode_txn_id_payload, decode_txn_op_payload,
+    encode_error_payload, encode_hello_response, encode_scan_response, encode_txn_begin_response,
+    encode_txn_commit_response, encode_value_payload, read_client_frame, send_envelopes,
     write_client_response, NodeRoster, PROTO_VERSION, STATUS_ERROR, STATUS_INVALID_ARGUMENT,
-    STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
+    STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK, STATUS_TXN_CONFLICT, TXN_BEGIN_OPCODE,
+    TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
 };
 use kaya_raft::{ClusterMember, NodeId};
 use tokio::net::TcpListener;
@@ -347,9 +358,9 @@ async fn dispatch(
         }
     }
 
-    // Data-path opcodes 1-4 and 6 (STATS) with optional client token enforcement.
-    // HEALTH (5) stays open for liveness probes.
-    let payload = if matches!(opcode, 1..=4 | 6) {
+    // Data-path opcodes 1-4, 6 (STATS), and 9-12 (TXN) with optional client token
+    // enforcement. HEALTH (5) stays open for liveness probes.
+    let payload = if matches!(opcode, 1..=4 | 6 | 9..=12) {
         let (clean_payload, presented) = if payload.len() >= CLIENT_AUTH_PREFIX.len()
             && payload.starts_with(CLIENT_AUTH_PREFIX)
         {
@@ -514,6 +525,115 @@ async fn dispatch(
             outcome(status, body, client_auth, None)
         }
 
+        // TXN_BEGIN
+        TXN_BEGIN_OPCODE => {
+            if !raft.lock().unwrap().is_leader() {
+                let hint = get_leader_hint(raft, &roster_snapshot);
+                return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
+            }
+            let (txn_id, snapshot_ts) = engine.lock().await.begin_txn();
+            outcome(
+                STATUS_OK,
+                encode_txn_begin_response(txn_id, snapshot_ts),
+                client_auth,
+                None,
+            )
+        }
+
+        // TXN_OP
+        TXN_OP_OPCODE => match decode_txn_op_payload(&payload) {
+            Ok((txn_id, op, key, value)) => {
+                if !raft.lock().unwrap().is_leader() {
+                    let hint = get_leader_hint(raft, &roster_snapshot);
+                    return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
+                }
+                let key_len = key.len();
+                let mut eng = engine.lock().await;
+                match op {
+                    TXN_OP_GET => match eng.txn_get(txn_id, &key) {
+                        Ok(Some(v)) => {
+                            outcome(STATUS_OK, encode_value_payload(&v), client_auth, Some(key_len))
+                        }
+                        Ok(None) => {
+                            outcome(STATUS_NOT_FOUND, vec![], client_auth, Some(key_len))
+                        }
+                        Err(e) => map_txn_err(e, client_auth, Some(key_len)),
+                    },
+                    TXN_OP_PUT => {
+                        let Some(value) = value else {
+                            return outcome(
+                                STATUS_INVALID_ARGUMENT,
+                                encode_error_payload("TXN_OP put missing value"),
+                                client_auth,
+                                Some(key_len),
+                            );
+                        };
+                        match eng.txn_put(txn_id, key, value) {
+                            Ok(()) => outcome(STATUS_OK, vec![], client_auth, Some(key_len)),
+                            Err(e) => map_txn_err(e, client_auth, Some(key_len)),
+                        }
+                    }
+                    TXN_OP_DELETE => match eng.txn_delete(txn_id, key) {
+                        Ok(()) => outcome(STATUS_OK, vec![], client_auth, Some(key_len)),
+                        Err(e) => map_txn_err(e, client_auth, Some(key_len)),
+                    },
+                    other => outcome(
+                        STATUS_INVALID_ARGUMENT,
+                        encode_error_payload(&format!("unknown TXN_OP kind: {other}")),
+                        client_auth,
+                        Some(key_len),
+                    ),
+                }
+            }
+            Err(e) => outcome(
+                STATUS_INVALID_ARGUMENT,
+                encode_error_payload(&e),
+                client_auth,
+                None,
+            ),
+        },
+
+        // TXN_COMMIT
+        TXN_COMMIT_OPCODE => match decode_txn_id_payload(&payload) {
+            Ok(txn_id) => {
+                let (status, body) = txn_commit_via_raft(
+                    raft,
+                    engine,
+                    &roster_snapshot,
+                    propose_tx,
+                    txn_id,
+                )
+                .await;
+                outcome(status, body, client_auth, None)
+            }
+            Err(e) => outcome(
+                STATUS_INVALID_ARGUMENT,
+                encode_error_payload(&e),
+                client_auth,
+                None,
+            ),
+        },
+
+        // TXN_ROLLBACK
+        TXN_ROLLBACK_OPCODE => match decode_txn_id_payload(&payload) {
+            Ok(txn_id) => {
+                if !raft.lock().unwrap().is_leader() {
+                    let hint = get_leader_hint(raft, &roster_snapshot);
+                    return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
+                }
+                match engine.lock().await.txn_rollback(txn_id) {
+                    Ok(()) => outcome(STATUS_OK, vec![], client_auth, None),
+                    Err(e) => map_txn_err(e, client_auth, None),
+                }
+            }
+            Err(e) => outcome(
+                STATUS_INVALID_ARGUMENT,
+                encode_error_payload(&e),
+                client_auth,
+                None,
+            ),
+        },
+
         other => outcome(
             STATUS_ERROR,
             encode_error_payload(&format!("unknown opcode: {other}")),
@@ -521,6 +641,92 @@ async fn dispatch(
             None,
         ),
     }
+}
+
+fn map_txn_err(
+    err: kaya_core::KayaError,
+    client_auth: &'static str,
+    key_len: Option<usize>,
+) -> DispatchOutcome {
+    match err {
+        kaya_core::KayaError::TxnConflict => {
+            outcome(STATUS_TXN_CONFLICT, encode_error_payload("txn conflict"), client_auth, key_len)
+        }
+        e @ kaya_core::KayaError::InvalidArgument { .. } => outcome(
+            STATUS_INVALID_ARGUMENT,
+            encode_error_payload(&e.to_string()),
+            client_auth,
+            key_len,
+        ),
+        e => outcome(
+            STATUS_ERROR,
+            encode_error_payload(&e.to_string()),
+            client_auth,
+            key_len,
+        ),
+    }
+}
+
+/// Materialize staged intents via Raft Put/Delete proposes, then clear local
+/// txn state. Multi-node SI is best-effort until intents are Raft-replicated.
+async fn txn_commit_via_raft(
+    raft: &SharedRaft,
+    engine: &SharedEngine,
+    roster: &NodeRoster,
+    propose_tx: &mpsc::Sender<ProposeReq>,
+    txn_id: u64,
+) -> (u16, Vec<u8>) {
+    if !raft.lock().unwrap().is_leader() {
+        return (STATUS_NOT_LEADER, get_leader_hint(raft, roster));
+    }
+
+    let staged = {
+        let mut eng = engine.lock().await;
+        match eng.txn_prepare_commit(txn_id) {
+            Ok(writes) => writes,
+            Err(kaya_core::KayaError::TxnConflict) => {
+                return (
+                    STATUS_TXN_CONFLICT,
+                    encode_error_payload("txn conflict"),
+                );
+            }
+            Err(e @ kaya_core::KayaError::InvalidArgument { .. }) => {
+                return (
+                    STATUS_INVALID_ARGUMENT,
+                    encode_error_payload(&e.to_string()),
+                );
+            }
+            Err(e) => {
+                return (STATUS_ERROR, encode_error_payload(&e.to_string()));
+            }
+        }
+    };
+
+    for (key, value) in staged {
+        let cmd = match value {
+            Some(v) => RaftCommand::Put { key, value: v }.encode(),
+            None => RaftCommand::Delete { key }.encode(),
+        };
+        let (status, body) = propose_and_wait(raft, roster, propose_tx, cmd).await;
+        if status != STATUS_OK {
+            // Leave txn open so the client can rollback; partial materialization
+            // may already be durable (documented M17 sequential-commit caveat).
+            return (status, body);
+        }
+    }
+
+    let commit_ts = {
+        let mut eng = engine.lock().await;
+        if let Err(e) = eng.txn_finish(txn_id) {
+            return (
+                STATUS_ERROR,
+                encode_error_payload(&format!("commit applied but finish failed: {e}")),
+            );
+        }
+        eng.stats().last_sequence
+    };
+
+    (STATUS_OK, encode_txn_commit_response(commit_ts))
 }
 
 /// Leader proposes adding a new voting member (joint-consensus path).

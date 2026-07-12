@@ -53,7 +53,9 @@ impl TxnTables {
 
 impl<D: Disk> Engine<D> {
     /// Begin a transaction. Assigns `snapshot_ts = last_sequence` at BEGIN.
-    pub fn begin_txn(&mut self) -> TxnId {
+    ///
+    /// Returns `(txn_id, snapshot_ts)`.
+    pub fn begin_txn(&mut self) -> (TxnId, u64) {
         let id = self.txn.next_txn_id;
         self.txn.next_txn_id = self.txn.next_txn_id.saturating_add(1);
         let snapshot_ts = self.stats.last_sequence;
@@ -64,7 +66,49 @@ impl<D: Disk> Engine<D> {
                 keys: HashSet::new(),
             },
         );
-        id
+        (id, snapshot_ts)
+    }
+
+    /// Snapshot timestamp assigned at BEGIN for an open transaction.
+    pub fn txn_snapshot_ts(&self, txn_id: TxnId) -> Result<u64> {
+        self.txn
+            .txns
+            .get(&txn_id)
+            .map(|m| m.snapshot_ts)
+            .ok_or_else(|| {
+                KayaError::invalid_argument(format!("unknown or finished transaction {txn_id}"))
+            })
+    }
+
+    /// Re-check write conflicts and return staged intents (sorted by key) without
+    /// materializing or clearing them. Used by the server to propose each write
+    /// via Raft before finishing the local txn.
+    pub fn txn_prepare_commit(&mut self, txn_id: TxnId) -> Result<Vec<(Bytes, Option<Bytes>)>> {
+        let meta = self.txn.txns.get(&txn_id).ok_or_else(|| {
+            KayaError::invalid_argument(format!("unknown or finished transaction {txn_id}"))
+        })?;
+        let mut keys: Vec<Bytes> = meta.keys.iter().cloned().collect();
+        let snapshot_ts = meta.snapshot_ts;
+
+        for key in &keys {
+            self.check_write_conflict(txn_id, key, snapshot_ts)?;
+        }
+
+        keys.sort();
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            match self.txn.intents.get(&key) {
+                Some(i) if i.txn_id == txn_id => out.push((key, i.value.clone())),
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
+    /// Drop txn metadata and intents after external materialization (Raft) or
+    /// as a synonym for rollback cleanup.
+    pub fn txn_finish(&mut self, txn_id: TxnId) -> Result<()> {
+        self.txn_rollback(txn_id)
     }
 
     /// Point read under the txn snapshot, with read-your-writes on own intents.

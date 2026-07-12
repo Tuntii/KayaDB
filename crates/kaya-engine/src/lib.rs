@@ -1783,7 +1783,7 @@ mod tests {
         block_on(async {
             let disk = Arc::new(SimDisk::new());
             let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
-            let t = engine.begin_txn();
+            let (t, _) = engine.begin_txn();
             engine.txn_put(t, b"k".to_vec(), b"mine".to_vec()).unwrap();
             assert_eq!(engine.txn_get(t, b"k").unwrap(), Some(b"mine".to_vec()));
             // Not visible to non-txn get until commit
@@ -1796,8 +1796,8 @@ mod tests {
         block_on(async {
             let disk = Arc::new(SimDisk::new());
             let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
-            let t1 = engine.begin_txn();
-            let t2 = engine.begin_txn();
+            let (t1, _) = engine.begin_txn();
+            let (t2, _) = engine.begin_txn();
             engine.txn_put(t1, b"k".to_vec(), b"v1".to_vec()).unwrap();
             let err = engine.txn_put(t2, b"k".to_vec(), b"v2".to_vec());
             assert!(
@@ -1821,8 +1821,8 @@ mod tests {
                 .put(b"k".to_vec(), b"old".to_vec(), strict_opts())
                 .await
                 .unwrap();
-            let t1 = engine.begin_txn();
-            let t2 = engine.begin_txn();
+            let (t1, _) = engine.begin_txn();
+            let (t2, _) = engine.begin_txn();
             engine.txn_put(t2, b"k".to_vec(), b"from-t2".to_vec()).unwrap();
             engine.txn_commit(t2).await.unwrap();
             assert_eq!(engine.txn_get(t1, b"k").unwrap(), Some(b"old".to_vec()));
@@ -1843,8 +1843,8 @@ mod tests {
                 .put(b"k".to_vec(), b"v0".to_vec(), strict_opts())
                 .await
                 .unwrap();
-            let t1 = engine.begin_txn();
-            let t2 = engine.begin_txn();
+            let (t1, _) = engine.begin_txn();
+            let (t2, _) = engine.begin_txn();
             engine.txn_put(t2, b"k".to_vec(), b"v1".to_vec()).unwrap();
             engine.txn_commit(t2).await.unwrap();
             assert_eq!(
@@ -1860,10 +1860,10 @@ mod tests {
         block_on(async {
             let disk = Arc::new(SimDisk::new());
             let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
-            let t1 = engine.begin_txn();
+            let (t1, _) = engine.begin_txn();
             engine.txn_put(t1, b"k".to_vec(), b"temp".to_vec()).unwrap();
             engine.txn_rollback(t1).unwrap();
-            let t2 = engine.begin_txn();
+            let (t2, _) = engine.begin_txn();
             engine.txn_put(t2, b"k".to_vec(), b"ok".to_vec()).unwrap();
             engine.txn_commit(t2).await.unwrap();
             assert_eq!(
@@ -1884,7 +1884,7 @@ mod tests {
             let config = EngineConfig::default();
             {
                 let mut engine = Engine::open(config.clone(), disk.clone()).await.unwrap();
-                let t = engine.begin_txn();
+                let (t, _) = engine.begin_txn();
                 engine.txn_put(t, b"a".to_vec(), b"1".to_vec()).unwrap();
                 engine.txn_put(t, b"b".to_vec(), b"2".to_vec()).unwrap();
                 engine.txn_delete(t, b"c".to_vec()).unwrap();
@@ -1905,7 +1905,7 @@ mod tests {
                 engine2.get(b"b", ReadOptions::default()).await.unwrap(),
                 Some(b"2".to_vec())
             );
-            let t = engine2.begin_txn();
+            let (t, _) = engine2.begin_txn();
             engine2.txn_put(t, b"a".to_vec(), b"new".to_vec()).unwrap();
             engine2.txn_rollback(t).unwrap();
         });
@@ -1920,7 +1920,7 @@ mod tests {
                 .put(b"k".to_vec(), b"v".to_vec(), strict_opts())
                 .await
                 .unwrap();
-            let t = engine.begin_txn();
+            let (t, _) = engine.begin_txn();
             assert_eq!(engine.txn_get(t, b"k").unwrap(), Some(b"v".to_vec()));
             engine.txn_delete(t, b"k".to_vec()).unwrap();
             assert_eq!(engine.txn_get(t, b"k").unwrap(), None);

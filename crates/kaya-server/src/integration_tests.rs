@@ -4,9 +4,12 @@ mod tests {
     use crate::cluster::{ClusterConfig, ClusterNode};
     use crate::operator_auth::encode_admin_payload;
     use kaya_net::{
-        decode_hello_response, decode_value_payload, encode_hello_request, encode_key_payload,
-        encode_member_payload, encode_put_payload, encode_remove_member_payload, roundtrip,
-        HELLO_OPCODE, PROTO_VERSION, STATUS_INVALID_ARGUMENT, STATUS_OK,
+        decode_hello_response, decode_txn_begin_response, decode_txn_commit_response,
+        decode_value_payload, encode_hello_request, encode_key_payload, encode_member_payload,
+        encode_put_payload, encode_remove_member_payload, encode_txn_id_payload,
+        encode_txn_op_payload, roundtrip, HELLO_OPCODE, PROTO_VERSION, STATUS_INVALID_ARGUMENT,
+        STATUS_NOT_FOUND, STATUS_OK, TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_GET, TXN_OP_OPCODE,
+        TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
     };
     use kaya_sim::{LinearizabilityChecker, Op, OpResult};
     use serial_test::serial;
@@ -1488,4 +1491,89 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&data_dir);
     }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_txn_begin_put_get_commit_visible() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_txn_{test_id}"));
+
+        let r1 = get_free_port().await;
+        let c1 = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{r1}").parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{c1}").parse().unwrap();
+
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![]);
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "single-node leader not ready for TXN test");
+
+        // BEGIN
+        let (status, body) = roundtrip(client_addr, TXN_BEGIN_OPCODE, &[])
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK, "TXN_BEGIN should succeed");
+        let (txn_id, _snapshot_ts) = decode_txn_begin_response(&body).unwrap();
+        assert!(txn_id >= 1);
+
+        // OP put
+        let put_payload = encode_txn_op_payload(txn_id, TXN_OP_PUT, b"txn-key", Some(b"txn-val"));
+        let (status, _) = roundtrip(client_addr, TXN_OP_OPCODE, &put_payload)
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK, "TXN_OP put should succeed");
+
+        // OP get (RYW)
+        let get_payload = encode_txn_op_payload(txn_id, TXN_OP_GET, b"txn-key", None);
+        let (status, body) = roundtrip(client_addr, TXN_OP_OPCODE, &get_payload)
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK, "TXN_OP get should succeed");
+        assert_eq!(decode_value_payload(&body).unwrap(), b"txn-val");
+
+        // Outside GET should not see uncommitted intent
+        let outside_get = encode_key_payload(b"txn-key");
+        let (status, _) = roundtrip(client_addr, 2, &outside_get).await.unwrap();
+        assert_eq!(
+            status, STATUS_NOT_FOUND,
+            "uncommitted intent must not be visible outside txn"
+        );
+
+        // COMMIT
+        let commit_payload = encode_txn_id_payload(txn_id);
+        let (status, body) = roundtrip(client_addr, TXN_COMMIT_OPCODE, &commit_payload)
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK, "TXN_COMMIT should succeed");
+        let commit_ts = decode_txn_commit_response(&body).unwrap();
+        assert!(commit_ts > 0, "commit_ts should be positive after put");
+
+        // Outside GET sees value
+        let (status, body) = roundtrip(client_addr, 2, &outside_get).await.unwrap();
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(decode_value_payload(&body).unwrap(), b"txn-val");
+
+        // ROLLBACK of finished txn is invalid
+        let (status, _) = roundtrip(client_addr, TXN_ROLLBACK_OPCODE, &commit_payload)
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_INVALID_ARGUMENT);
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
 }
