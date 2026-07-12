@@ -3,7 +3,7 @@
 //! Wire format:
 //!
 //! ```text
-//! type      : u8       (1 = Put, 2 = Delete, 3 = ConfigChange)
+//! type      : u8       (1 = Put, 2 = Delete, 3 = ConfigChange, 4 = TxnCommit)
 //! key_len   : u32 LE
 //! key       : bytes
 //! [Put only]
@@ -13,6 +13,11 @@
 //! phase     : u8
 //! member_count : u32 LE
 //! per member: id(u64) | raft_len(u32) | raft | client_len(u32) | client
+//! [TxnCommit]
+//! txn_id    : u64 LE
+//! count     : u32 LE
+//! per mutation:
+//!   key_len u32 | key | has_value u8 (0/1) | [value_len u32 | value if has_value]
 //! ```
 
 /// Phase of a membership configuration change (joint consensus).
@@ -52,6 +57,17 @@ pub enum RaftCommand {
         phase: ConfigChangePhase,
         members: Vec<ClusterMember>,
     },
+    /// Atomic multi-key transaction commit (type byte 4).
+    ///
+    /// Applied as one Raft log entry so all mutations become durable together
+    /// w.r.t. other Raft applies (all-or-nothing at the consensus layer).
+    /// `txn_id` is informational for logs/debugging; followers do not need an
+    /// open local transaction to apply the mutations.
+    TxnCommit {
+        txn_id: u64,
+        /// `(key, Some(value))` = put; `(key, None)` = delete.
+        mutations: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    },
 }
 
 impl RaftCommand {
@@ -79,6 +95,25 @@ impl RaftCommand {
                     out.extend_from_slice(&member.id.0.to_le_bytes());
                     push_string(&mut out, &member.raft_addr);
                     push_string(&mut out, &member.client_addr);
+                }
+            }
+            RaftCommand::TxnCommit { txn_id, mutations } => {
+                out.push(4u8);
+                out.extend_from_slice(&txn_id.to_le_bytes());
+                out.extend_from_slice(&(mutations.len() as u32).to_le_bytes());
+                for (key, value) in mutations {
+                    out.extend_from_slice(&(key.len() as u32).to_le_bytes());
+                    out.extend_from_slice(key);
+                    match value {
+                        Some(v) => {
+                            out.push(1u8);
+                            out.extend_from_slice(&(v.len() as u32).to_le_bytes());
+                            out.extend_from_slice(v);
+                        }
+                        None => {
+                            out.push(0u8);
+                        }
+                    }
                 }
             }
         }
@@ -131,6 +166,26 @@ impl RaftCommand {
                     });
                 }
                 Ok(RaftCommand::ConfigChange { phase, members })
+            }
+            4 => {
+                let txn_id = next_u64(&mut cur)?;
+                let count = next_u32(&mut cur)? as usize;
+                let mut mutations = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let key = next_bytes(&mut cur)?;
+                    let has_value = next_u8(&mut cur)?;
+                    let value = match has_value {
+                        0 => None,
+                        1 => Some(next_bytes(&mut cur)?),
+                        other => {
+                            return Err(format!(
+                                "invalid TxnCommit has_value flag: {other} (expected 0 or 1)"
+                            ));
+                        }
+                    };
+                    mutations.push((key, value));
+                }
+                Ok(RaftCommand::TxnCommit { txn_id, mutations })
             }
             t => Err(format!("unknown RaftCommand type: {t}")),
         }
@@ -252,5 +307,43 @@ mod tests {
                 && members[0].id == crate::NodeId(1)
                 && members[0].raft_addr.is_empty()
         ));
+    }
+
+    #[test]
+    fn round_trip_txn_commit_put_and_delete() {
+        let cmd = RaftCommand::TxnCommit {
+            txn_id: 42,
+            mutations: vec![
+                (b"a".to_vec(), Some(b"1".to_vec())),
+                (b"b".to_vec(), None),
+                (b"c".to_vec(), Some(b"three".to_vec())),
+            ],
+        };
+        let encoded = cmd.encode();
+        assert_eq!(encoded[0], 4u8, "TxnCommit type byte must be 4");
+        assert_eq!(RaftCommand::decode(&encoded).unwrap(), cmd);
+    }
+
+    #[test]
+    fn round_trip_txn_commit_empty_mutations() {
+        let cmd = RaftCommand::TxnCommit {
+            txn_id: 7,
+            mutations: vec![],
+        };
+        let encoded = cmd.encode();
+        assert_eq!(encoded[0], 4u8);
+        assert_eq!(RaftCommand::decode(&encoded).unwrap(), cmd);
+    }
+
+    #[test]
+    fn txn_commit_decode_rejects_bad_has_value() {
+        let mut bad = vec![4u8];
+        bad.extend_from_slice(&1u64.to_le_bytes()); // txn_id
+        bad.extend_from_slice(&1u32.to_le_bytes()); // count
+        bad.extend_from_slice(&1u32.to_le_bytes()); // key_len
+        bad.push(b'k');
+        bad.push(2u8); // invalid has_value
+        let err = RaftCommand::decode(&bad).unwrap_err();
+        assert!(err.contains("has_value"), "err={err}");
     }
 }

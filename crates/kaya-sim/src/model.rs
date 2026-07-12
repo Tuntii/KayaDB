@@ -101,6 +101,16 @@ impl RefModel {
                 Ok(())
             }
             RaftCommand::ConfigChange { .. } => Ok(()),
+            RaftCommand::TxnCommit { mutations, .. } => {
+                for (key, value) in mutations {
+                    let seq = self.alloc_seq();
+                    match value {
+                        Some(v) => self.put(key, v, seq),
+                        None => self.delete(&key, seq),
+                    }
+                }
+                Ok(())
+            }
         }
     }
 

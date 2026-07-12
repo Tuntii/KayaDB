@@ -129,6 +129,23 @@ async fn apply_command(
             .map(|r| Some(r.lsn))
             .map_err(|e| e.to_string()),
         Ok(RaftCommand::ConfigChange { .. }) => Ok(None),
+        Ok(RaftCommand::TxnCommit { mutations, .. }) => {
+            if mutations.is_empty() {
+                return Ok(None);
+            }
+            // Atomic w.r.t. other Raft applies: single log entry, single apply.
+            // Index + CDC fire per put/delete inside apply_mutations.
+            engine
+                .lock()
+                .await
+                .apply_mutations(
+                    mutations.into_iter().map(|(k, v)| (k, v)).collect(),
+                    WriteOptions::default(),
+                )
+                .await
+                .map(|_| None) // LSN correlation is optional for batch commits
+                .map_err(|e| e.to_string())
+        }
         Err(e) => Err(format!("corrupt command in log: {e}")),
     }
 }

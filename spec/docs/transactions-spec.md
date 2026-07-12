@@ -165,7 +165,8 @@ First writer to place an intent wins; the loser fails with `TXN_CONFLICT` (fail 
 ### 8.2 commit_ts assignment
 
 - **Distributed path:** propose a single Raft commit record; on apply, materialize all intents at the log-assigned sequence / `commit_ts` atomically w.r.t. other Raft applies.
-- **Single-node engine path (unit tests):** apply intents sequentially via existing `put`/`delete` (each gets its own WAL sequence). Record `commit_ts` as the **last** sequence assigned during materialization. SI remains correct for single-key conflicts; multi-key atomicity w.r.t. crash mid-materialization is best-effort on this path (see §10).
+- **Single-node engine path (unit tests):** `txn_take_commit` → `apply_mutations` (each put/delete gets its own WAL sequence). Record `commit_ts` as the **last** sequence. SI remains correct for single-key conflicts; multi-key WAL atomicity mid-batch is best-effort on this path only (see §10).
+- **Distributed server path (production):** one Raft log entry `RaftCommand::TxnCommit` (type byte 4) carries all mutations. Apply is all-or-nothing w.r.t. other Raft entries; recovery cannot observe a partial multi-key commit.
 
 Empty commit (no intents): succeeds; `commit_ts` may equal current `last_sequence` without writing.
 
@@ -192,7 +193,8 @@ No durable user-visible change. Other txns waiting on conflicts may proceed afte
 | Path | Contract |
 |---|---|
 | Phase-1 in-memory intents | Lost on crash; no committed partial user state from uncommitted txns |
-| Single-node sequential materialize | Mid-commit crash may leave a **prefix** of intents durable (each put/delete is individually WAL-protected). Clients must treat commit ACK as the durability boundary; un-ACKed commit may be partial. Acceptable for unit tests only. |
+| Single-node sequential materialize | Mid-commit crash may leave a **prefix** of intents durable (each put/delete is individually WAL-protected). Unit-test path only. |
+| Distributed `TxnCommit` (type 4) | Single Raft entry; all-or-nothing apply on recovery. Production path for multi-key SI commits. |
 | Raft single-group commit record | Intents (or intent effects) plus commit record are applied so recovery does **not** leave a half-committed multi-key transaction once the commit record is durable and applied. This is the production contract for M17 exit. |
 
 Recovery must not invent commits. Uncommitted intents never become visible as Latest versions without a commit.

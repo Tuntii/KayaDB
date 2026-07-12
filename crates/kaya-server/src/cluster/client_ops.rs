@@ -3,11 +3,10 @@
 //! ## Transactions (M17)
 //!
 //! TXN opcodes 9–12 stage write intents on the **leader** engine only. On
-//! `TXN_COMMIT`, each staged put/delete is proposed as an existing
-//! [`RaftCommand::Put`]/[`RaftCommand::Delete`] so committed data is
-//! Raft-replicated; local intents are then cleared. Multi-node SI remains
-//! best-effort until intents themselves are Raft-replicated (followers do
-//! not observe in-flight intents).
+//! `TXN_COMMIT`, intents are taken and proposed as a single atomic
+//! [`RaftCommand::TxnCommit`] (type 4) so multi-key materialization is
+//! all-or-nothing at the Raft apply layer. In-flight intents remain leader-local
+//! (followers do not observe uncommitted intents).
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -667,8 +666,9 @@ fn map_txn_err(
     }
 }
 
-/// Materialize staged intents via Raft Put/Delete proposes, then clear local
-/// txn state. Multi-node SI is best-effort until intents are Raft-replicated.
+/// Atomic multi-key commit: take local intents, propose a single
+/// [`RaftCommand::TxnCommit`], apply on all nodes via Raft. Intents are cleared
+/// before propose (fail-closed if propose fails — client restarts the txn).
 async fn txn_commit_via_raft(
     raft: &SharedRaft,
     engine: &SharedEngine,
@@ -682,7 +682,7 @@ async fn txn_commit_via_raft(
 
     let staged = {
         let mut eng = engine.lock().await;
-        match eng.txn_prepare_commit(txn_id) {
+        match eng.txn_take_commit(txn_id) {
             Ok(writes) => writes,
             Err(kaya_core::KayaError::TxnConflict) => {
                 return (
@@ -702,27 +702,25 @@ async fn txn_commit_via_raft(
         }
     };
 
-    for (key, value) in staged {
-        let cmd = match value {
-            Some(v) => RaftCommand::Put { key, value: v }.encode(),
-            None => RaftCommand::Delete { key }.encode(),
-        };
-        let (status, body) = propose_and_wait(raft, roster, propose_tx, cmd).await;
-        if status != STATUS_OK {
-            // Leave txn open so the client can rollback; partial materialization
-            // may already be durable (documented M17 sequential-commit caveat).
-            return (status, body);
-        }
+    let mutations: Vec<(Vec<u8>, Option<Vec<u8>>)> = staged
+        .into_iter()
+        .map(|(k, v)| (k, v))
+        .collect();
+    let cmd = RaftCommand::TxnCommit {
+        txn_id,
+        mutations,
+    }
+    .encode();
+
+    let (status, body) = propose_and_wait(raft, roster, propose_tx, cmd).await;
+    if status != STATUS_OK {
+        // Intents already taken; client must restart the transaction.
+        return (status, body);
     }
 
+    // Apply path already materialised mutations; report commit_ts from engine.
     let commit_ts = {
-        let mut eng = engine.lock().await;
-        if let Err(e) = eng.txn_finish(txn_id) {
-            return (
-                STATUS_ERROR,
-                encode_error_payload(&format!("commit applied but finish failed: {e}")),
-            );
-        }
+        let eng = engine.lock().await;
         eng.stats().last_sequence
     };
 

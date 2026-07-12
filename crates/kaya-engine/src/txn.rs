@@ -1,7 +1,9 @@
 //! Single-node Snapshot Isolation transactions with in-memory write intents (M17 phase 1).
 //!
 //! Intents live only in process memory. On open/recovery the intent map is empty; the
-//! distributed Raft commit path will re-establish durable intent/commit-record recovery.
+//! distributed Raft commit path re-establishes durable multi-key atomicity via a single
+//! [`RaftCommand::TxnCommit`](kaya_raft is not a dependency here — see kaya-server) entry
+//! applied with [`Engine::apply_mutations`].
 
 use std::collections::{HashMap, HashSet};
 
@@ -81,8 +83,10 @@ impl<D: Disk> Engine<D> {
     }
 
     /// Re-check write conflicts and return staged intents (sorted by key) without
-    /// materializing or clearing them. Used by the server to propose each write
-    /// via Raft before finishing the local txn.
+    /// materializing or clearing them.
+    ///
+    /// Prefer [`Self::txn_take_commit`] for the production Raft path (clears local
+    /// txn state so apply is pure and cannot double-apply intents).
     pub fn txn_prepare_commit(&mut self, txn_id: TxnId) -> Result<Vec<(Bytes, Option<Bytes>)>> {
         let meta = self.txn.txns.get(&txn_id).ok_or_else(|| {
             KayaError::invalid_argument(format!("unknown or finished transaction {txn_id}"))
@@ -103,6 +107,28 @@ impl<D: Disk> Engine<D> {
             }
         }
         Ok(out)
+    }
+
+    /// Conflict-check, extract mutations, and **remove** the transaction + intents.
+    ///
+    /// Used by the Raft commit path: mutations are proposed as a single
+    /// `TxnCommit` entry and applied on all nodes via [`Self::apply_mutations`].
+    /// If the subsequent propose fails, the client must restart the transaction
+    /// (intents are intentionally gone — production-acceptable fail-closed).
+    pub fn txn_take_commit(&mut self, txn_id: TxnId) -> Result<Vec<(Bytes, Option<Bytes>)>> {
+        let mutations = self.txn_prepare_commit(txn_id)?;
+        // Remove txn + intents after successful conflict check.
+        let meta = self.txn.txns.remove(&txn_id).ok_or_else(|| {
+            KayaError::invalid_argument(format!("unknown or finished transaction {txn_id}"))
+        })?;
+        for key in meta.keys {
+            if let Some(intent) = self.txn.intents.get(&key) {
+                if intent.txn_id == txn_id {
+                    self.txn.intents.remove(&key);
+                }
+            }
+        }
+        Ok(mutations)
     }
 
     /// Drop txn metadata and intents after external materialization (Raft) or
@@ -143,44 +169,45 @@ impl<D: Disk> Engine<D> {
         self.stage_intent(txn_id, key, None)
     }
 
-    /// Materialize all intents via durable put/delete, then clear txn state.
+    /// Apply all mutations durably as one logical commit.
+    ///
+    /// Each mutation still gets its own WAL sequence via existing `put`/`delete`
+    /// paths (so index maintenance and CDC fire). Mutations are applied without
+    /// yielding to other engine ops mid-batch (caller holds `&mut self`).
+    ///
+    /// **Durability note:** true single-fsync multi-record WAL atomicity is not
+    /// provided here — each put/delete is individually WAL-protected. Production
+    /// multi-key all-or-nothing is guaranteed by **Raft atomicity**: a single
+    /// `TxnCommit` log entry is applied completely or not at all on recovery.
+    ///
+    /// Returns the last [`SequenceNumber`] assigned (commit_ts), or the current
+    /// `last_sequence` when `mutations` is empty.
+    pub async fn apply_mutations(
+        &mut self,
+        mutations: Vec<(Bytes, Option<Bytes>)>,
+        opts: WriteOptions,
+    ) -> Result<SequenceNumber> {
+        let mut last_seq = SequenceNumber::new(self.stats.last_sequence);
+        for (key, value) in mutations {
+            let wr = match value {
+                Some(value) => self.put(key, value, opts.clone()).await?,
+                None => self.delete(key, opts.clone()).await?,
+            };
+            last_seq = wr.sequence;
+        }
+        Ok(last_seq)
+    }
+
+    /// Materialize prepared intents as durable mutations then finish (single-node).
+    ///
+    /// Uses [`Self::txn_take_commit`] → [`Self::apply_mutations`] so local commit
+    /// shares the same materialization path as the Raft apply path.
     ///
     /// Each intent gets its own WAL sequence (sequential apply). `commit_ts` is
     /// the last sequence assigned, or current `last_sequence` if the txn wrote nothing.
     pub async fn txn_commit(&mut self, txn_id: TxnId) -> Result<SequenceNumber> {
-        let meta = self.txn.txns.get(&txn_id).ok_or_else(|| {
-            KayaError::invalid_argument(format!("unknown or finished transaction {txn_id}"))
-        })?;
-        let keys: Vec<Bytes> = meta.keys.iter().cloned().collect();
-        let snapshot_ts = meta.snapshot_ts;
-
-        // Re-check conflicts at commit (defensive; puts already checked).
-        for key in &keys {
-            self.check_write_conflict(txn_id, key, snapshot_ts)?;
-        }
-
-        let opts = WriteOptions::default();
-        let mut last_seq = SequenceNumber::new(self.stats.last_sequence);
-
-        // Stable order for deterministic materialization.
-        let mut keys = keys;
-        keys.sort();
-
-        for key in keys {
-            let intent = match self.txn.intents.get(&key) {
-                Some(i) if i.txn_id == txn_id => i.clone(),
-                _ => continue,
-            };
-            let wr = match intent.value {
-                Some(value) => self.put(key.clone(), value, opts.clone()).await?,
-                None => self.delete(key.clone(), opts.clone()).await?,
-            };
-            last_seq = wr.sequence;
-            self.txn.intents.remove(&key);
-        }
-
-        self.txn.txns.remove(&txn_id);
-        Ok(last_seq)
+        let mutations = self.txn_take_commit(txn_id)?;
+        self.apply_mutations(mutations, WriteOptions::default()).await
     }
 
     /// Discard all intents for `txn_id`.
@@ -259,5 +286,147 @@ impl<D: Disk> Engine<D> {
             }
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod apply_mutations_tests {
+    use std::sync::Arc;
+
+    use kaya_core::{DurabilityMode, EngineConfig, KayaError};
+    use kaya_io::SimDisk;
+
+    use crate::{Engine, ReadOptions, WriteOptions};
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    fn strict_opts() -> WriteOptions {
+        WriteOptions {
+            durability: Some(DurabilityMode::Strict),
+            ..WriteOptions::default()
+        }
+    }
+
+    #[test]
+    fn apply_mutations_put_and_delete() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine
+                .put(b"del-me".to_vec(), b"gone".to_vec(), strict_opts())
+                .await
+                .unwrap();
+
+            let commit_ts = engine
+                .apply_mutations(
+                    vec![
+                        (b"a".to_vec(), Some(b"1".to_vec())),
+                        (b"b".to_vec(), Some(b"2".to_vec())),
+                        (b"del-me".to_vec(), None),
+                    ],
+                    strict_opts(),
+                )
+                .await
+                .unwrap();
+            assert!(commit_ts.get() > 0);
+            assert_eq!(
+                engine.get(b"a", ReadOptions::default()).await.unwrap(),
+                Some(b"1".to_vec())
+            );
+            assert_eq!(
+                engine.get(b"b", ReadOptions::default()).await.unwrap(),
+                Some(b"2".to_vec())
+            );
+            assert_eq!(
+                engine.get(b"del-me", ReadOptions::default()).await.unwrap(),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn apply_mutations_empty_returns_current_sequence() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine
+                .put(b"k".to_vec(), b"v".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            let before = engine.stats().last_sequence;
+            let seq = engine
+                .apply_mutations(vec![], WriteOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(seq.get(), before);
+        });
+    }
+
+    #[test]
+    fn txn_take_commit_clears_state() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            let (t, _) = engine.begin_txn();
+            engine.txn_put(t, b"a".to_vec(), b"1".to_vec()).unwrap();
+            engine.txn_put(t, b"b".to_vec(), b"2".to_vec()).unwrap();
+            engine.txn_delete(t, b"c".to_vec()).unwrap();
+
+            let mutations = engine.txn_take_commit(t).unwrap();
+            assert_eq!(mutations.len(), 3);
+            assert_eq!(mutations[0].0, b"a");
+            assert_eq!(mutations[0].1, Some(b"1".to_vec()));
+            assert_eq!(mutations[1].0, b"b");
+            assert_eq!(mutations[2].0, b"c");
+            assert_eq!(mutations[2].1, None);
+
+            // Txn gone; intents not visible / not held.
+            assert!(matches!(
+                engine.txn_get(t, b"a"),
+                Err(KayaError::InvalidArgument { .. })
+            ));
+            assert!(matches!(
+                engine.txn_take_commit(t),
+                Err(KayaError::InvalidArgument { .. })
+            ));
+            // Keys not yet materialised.
+            assert_eq!(engine.get(b"a", ReadOptions::default()).await.unwrap(), None);
+
+            // Another txn can now stage the same keys.
+            let (t2, _) = engine.begin_txn();
+            engine.txn_put(t2, b"a".to_vec(), b"x".to_vec()).unwrap();
+            engine.txn_rollback(t2).unwrap();
+        });
+    }
+
+    #[test]
+    fn txn_commit_uses_take_then_apply() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            let (t, _) = engine.begin_txn();
+            engine.txn_put(t, b"x".to_vec(), b"y".to_vec()).unwrap();
+            engine.txn_put(t, b"p".to_vec(), b"q".to_vec()).unwrap();
+            let commit_ts = engine.txn_commit(t).await.unwrap();
+            assert!(commit_ts.get() > 0);
+            assert_eq!(
+                engine.get(b"x", ReadOptions::default()).await.unwrap(),
+                Some(b"y".to_vec())
+            );
+            assert_eq!(
+                engine.get(b"p", ReadOptions::default()).await.unwrap(),
+                Some(b"q".to_vec())
+            );
+            assert!(matches!(
+                engine.txn_finish(t),
+                Err(KayaError::InvalidArgument { .. })
+            ));
+        });
     }
 }
