@@ -16,10 +16,12 @@ mod memtable;
 mod recovery;
 mod snapshot;
 mod stats;
+mod txn;
 
 pub use recovery::recover;
 pub use snapshot::SnapshotView;
 pub use stats::{CompactionResult, EngineStats, FlushResult, WriteResult};
+pub use txn::{Intent, TxnId};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WriteOptions {
@@ -103,6 +105,8 @@ pub struct Engine<D: Disk> {
     sstable_refcounts: std::collections::HashMap<u64, u32>,
     /// GC lower bound: compaction may drop versions with seq < watermark under Rules A–C.
     gc_watermark: u64,
+    /// In-memory write intents + open txn metadata (M17 phase 1; empty after open/recovery).
+    txn: txn::TxnTables,
     #[allow(dead_code)]
     lock_file: Option<std::fs::File>,
 }
@@ -254,6 +258,7 @@ impl<D: Disk> Engine<D> {
             live_sstables,
             sstable_refcounts: std::collections::HashMap::new(),
             gc_watermark: 0,
+            txn: txn::TxnTables::new(),
             lock_file,
         })
     }
@@ -1773,4 +1778,155 @@ mod tests {
         engine.set_gc_watermark(20);
         assert_eq!(engine.gc_watermark(), 20);
     }
+    #[test]
+    fn txn_ryw_put_then_get_sees_own_write() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            let t = engine.begin_txn();
+            engine.txn_put(t, b"k".to_vec(), b"mine".to_vec()).unwrap();
+            assert_eq!(engine.txn_get(t, b"k").unwrap(), Some(b"mine".to_vec()));
+            // Not visible to non-txn get until commit
+            assert_eq!(engine.get(b"k", ReadOptions::default()).await.unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn txn_concurrent_write_conflict_on_same_key() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            let t1 = engine.begin_txn();
+            let t2 = engine.begin_txn();
+            engine.txn_put(t1, b"k".to_vec(), b"v1".to_vec()).unwrap();
+            let err = engine.txn_put(t2, b"k".to_vec(), b"v2".to_vec());
+            assert!(
+                matches!(err, Err(KayaError::TxnConflict)),
+                "second txn should conflict on intent, got: {err:?}"
+            );
+            engine.txn_commit(t1).await.unwrap();
+            assert_eq!(
+                engine.get(b"k", ReadOptions::default()).await.unwrap(),
+                Some(b"v1".to_vec())
+            );
+        });
+    }
+
+    #[test]
+    fn txn_si_write_conflict_after_other_commit() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine
+                .put(b"k".to_vec(), b"old".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            let t1 = engine.begin_txn();
+            let t2 = engine.begin_txn();
+            engine.txn_put(t2, b"k".to_vec(), b"from-t2".to_vec()).unwrap();
+            engine.txn_commit(t2).await.unwrap();
+            assert_eq!(engine.txn_get(t1, b"k").unwrap(), Some(b"old".to_vec()));
+            let err = engine.txn_put(t1, b"k".to_vec(), b"from-t1".to_vec());
+            assert!(
+                matches!(err, Err(KayaError::TxnConflict)),
+                "SI write-write conflict expected, got: {err:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn txn_snapshot_read_ignores_later_commits() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine
+                .put(b"k".to_vec(), b"v0".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            let t1 = engine.begin_txn();
+            let t2 = engine.begin_txn();
+            engine.txn_put(t2, b"k".to_vec(), b"v1".to_vec()).unwrap();
+            engine.txn_commit(t2).await.unwrap();
+            assert_eq!(
+                engine.get(b"k", ReadOptions::default()).await.unwrap(),
+                Some(b"v1".to_vec())
+            );
+            assert_eq!(engine.txn_get(t1, b"k").unwrap(), Some(b"v0".to_vec()));
+        });
+    }
+
+    #[test]
+    fn txn_rollback_clears_intents() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            let t1 = engine.begin_txn();
+            engine.txn_put(t1, b"k".to_vec(), b"temp".to_vec()).unwrap();
+            engine.txn_rollback(t1).unwrap();
+            let t2 = engine.begin_txn();
+            engine.txn_put(t2, b"k".to_vec(), b"ok".to_vec()).unwrap();
+            engine.txn_commit(t2).await.unwrap();
+            assert_eq!(
+                engine.get(b"k", ReadOptions::default()).await.unwrap(),
+                Some(b"ok".to_vec())
+            );
+            assert!(matches!(
+                engine.txn_get(t1, b"k"),
+                Err(KayaError::InvalidArgument { .. })
+            ));
+        });
+    }
+
+    #[test]
+    fn txn_commit_persists_after_reopen() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = EngineConfig::default();
+            {
+                let mut engine = Engine::open(config.clone(), disk.clone()).await.unwrap();
+                let t = engine.begin_txn();
+                engine.txn_put(t, b"a".to_vec(), b"1".to_vec()).unwrap();
+                engine.txn_put(t, b"b".to_vec(), b"2".to_vec()).unwrap();
+                engine.txn_delete(t, b"c".to_vec()).unwrap();
+                let commit_ts = engine.txn_commit(t).await.unwrap();
+                assert!(commit_ts.get() > 0);
+                assert_eq!(
+                    engine.get(b"a", ReadOptions::default()).await.unwrap(),
+                    Some(b"1".to_vec())
+                );
+            }
+            disk.crash();
+            let mut engine2 = Engine::open(config, disk).await.unwrap();
+            assert_eq!(
+                engine2.get(b"a", ReadOptions::default()).await.unwrap(),
+                Some(b"1".to_vec())
+            );
+            assert_eq!(
+                engine2.get(b"b", ReadOptions::default()).await.unwrap(),
+                Some(b"2".to_vec())
+            );
+            let t = engine2.begin_txn();
+            engine2.txn_put(t, b"a".to_vec(), b"new".to_vec()).unwrap();
+            engine2.txn_rollback(t).unwrap();
+        });
+    }
+
+    #[test]
+    fn txn_delete_intent_ryw_and_commit() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine
+                .put(b"k".to_vec(), b"v".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            let t = engine.begin_txn();
+            assert_eq!(engine.txn_get(t, b"k").unwrap(), Some(b"v".to_vec()));
+            engine.txn_delete(t, b"k".to_vec()).unwrap();
+            assert_eq!(engine.txn_get(t, b"k").unwrap(), None);
+            engine.txn_commit(t).await.unwrap();
+            assert_eq!(engine.get(b"k", ReadOptions::default()).await.unwrap(), None);
+        });
+    }
+
 }

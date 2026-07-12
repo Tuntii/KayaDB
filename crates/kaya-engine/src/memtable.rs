@@ -86,7 +86,7 @@ impl<D: Disk> Engine<D> {
         result
     }
 
-    fn get_inner(&mut self, key: &[u8], read_at: ReadTimestamp) -> Result<Option<Bytes>> {
+    pub(crate) fn get_inner(&mut self, key: &[u8], read_at: ReadTimestamp) -> Result<Option<Bytes>> {
         let read_ts = read_at.as_u64();
         // Memtable first: a hit (Put or Delete) at read_ts short-circuits.
         // No visible version → fall through to SSTs (may hold older versions).

@@ -43,6 +43,10 @@ pub enum KayaError {
     UnsupportedVersion { found: u16 },
     #[error("data directory lock conflict")]
     LockConflict,
+    /// Write-write or intent conflict under Snapshot Isolation (M17).
+    /// Protocol status code suggested: 3 (`TXN_CONFLICT`).
+    #[error("transaction conflict")]
+    TxnConflict,
     #[error("invariant violation {id}: {message}")]
     InvariantViolation { id: String, message: String },
     #[error("internal error: {message}")]
@@ -75,6 +79,7 @@ impl KayaError {
             Self::InvalidArgument { .. } | Self::UnsupportedVersion { .. } => 4,
             Self::InvariantViolation { .. } => 5,
             Self::LockConflict => 6,
+            Self::TxnConflict => 7,
             Self::Io { .. } | Self::DiskFull | Self::FsyncFailed | Self::Internal { .. } => 1,
         }
     }
@@ -92,6 +97,10 @@ impl KayaError {
             Self::LockConflict => Some(
                 "Another process holds the data-directory lock. Stop the other KayaDB \
                  instance (or clear a stale lock) and retry.",
+            ),
+            Self::TxnConflict => Some(
+                "A concurrent transaction wrote the same key (or holds an intent). Retry \
+                 the transaction from BEGIN.",
             ),
             Self::DiskFull => Some(
                 "Free space on the data volume (compact or archive old SSTables) and retry; \
