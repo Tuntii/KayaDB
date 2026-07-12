@@ -66,6 +66,14 @@ stop the node first — a live backup is safe for the immutable SSTables but the
 WAL/manifest may be mid-write. Add `--json` for machine-readable output
 (`copied`, `skipped`, `bytes_copied`).
 
+
+## CDC checkpoints (M19 foundation)
+
+Engine::cdc_checkpoint(consumer_id) persists a consumer's last delivered
+sequence under {data_dir}/cdc/cursors/{id}. Incremental kayactl backup
+remains a filesystem tree copy today; a later M19 step can use CDC checkpoints
+as watermarks for logical incremental export. See spec/docs/cdc-spec.md.
+
 ## Automation
 See `kayactl recover --dry-run` for inspecting a data directory before reuse.
 

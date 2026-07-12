@@ -388,6 +388,8 @@ pub struct EngineConfig {
     pub limits: LimitsConfig,
     pub compaction: CompactionConfig,
     pub disable_locking: bool,
+    /// When true (default), successful user put/delete append CDC events to `cdc/log.jsonl`.
+    pub enable_cdc: bool,
 }
 
 impl Default for EngineConfig {
@@ -401,6 +403,7 @@ impl Default for EngineConfig {
             limits: LimitsConfig::default(),
             compaction: CompactionConfig::default(),
             disable_locking: false,
+            enable_cdc: true,
         }
     }
 }

@@ -22,6 +22,13 @@ impl<D: Disk> Engine<D> {
             .await?;
         self.maintain_indexes_after_put(&key, old.as_deref(), &value, &opts)
             .await?;
+        self.append_cdc_event(crate::cdc::CdcEvent {
+            seq: wr.sequence.get(),
+            key: key.clone(),
+            value: Some(value),
+            op: crate::cdc::CdcOp::Put,
+        })
+        .await?;
         Ok(wr)
     }
 
@@ -32,6 +39,13 @@ impl<D: Disk> Engine<D> {
         let wr = self.write_delete(key.clone(), opts.clone()).await?;
         self.maintain_indexes_after_delete(&key, old.as_deref(), &opts)
             .await?;
+        self.append_cdc_event(crate::cdc::CdcEvent {
+            seq: wr.sequence.get(),
+            key: key.clone(),
+            value: None,
+            op: crate::cdc::CdcOp::Delete,
+        })
+        .await?;
         Ok(wr)
     }
 

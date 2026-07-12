@@ -10,6 +10,7 @@ use kaya_lsm::{
 };
 use kaya_wal::{recover_wal, WalRecoveryReport, WalWarning, WalWriter};
 
+mod cdc;
 mod compaction;
 mod flush;
 mod index;
@@ -19,6 +20,7 @@ mod snapshot;
 mod stats;
 mod txn;
 
+pub use cdc::{CdcCursor, CdcEvent, CdcOp, CDC_CURSORS_DIR, CDC_LOG_PATH};
 pub use recovery::recover;
 pub use snapshot::SnapshotView;
 pub use stats::{CompactionResult, EngineStats, FlushResult, WriteResult};
@@ -111,6 +113,8 @@ pub struct Engine<D: Disk> {
     txn: txn::TxnTables,
     /// Registered secondary indexes (M18 foundation); loaded from system meta keys on open.
     indexes: std::collections::BTreeMap<String, index::IndexDef>,
+    /// CDC changefeed state (M19 foundation); loaded from `cdc/log.jsonl` when enabled.
+    cdc: cdc::CdcState,
     #[allow(dead_code)]
     lock_file: Option<std::fs::File>,
 }
@@ -264,10 +268,13 @@ impl<D: Disk> Engine<D> {
             gc_watermark: 0,
             txn: txn::TxnTables::new(),
             indexes: std::collections::BTreeMap::new(),
+            cdc: cdc::CdcState::new(),
             lock_file,
         };
         // Load durable index metadata after the engine is constructed.
         engine.load_index_metadata()?;
+        // Load durable CDC log + consumer cursors when enabled.
+        engine.load_cdc_state().await?;
         Ok(engine)
     }
 
@@ -1325,7 +1332,11 @@ mod tests {
             };
 
             let disk = Arc::new(SimDisk::with_faults(schedule));
-            let config = EngineConfig::default();
+            // Disable CDC so fault op indices still target the flush path (CDC adds append/fsync).
+            let config = EngineConfig {
+                enable_cdc: false,
+                ..EngineConfig::default()
+            };
 
             let mut engine = Engine::open(config.clone(), disk.clone()).await.unwrap();
             engine
