@@ -75,6 +75,10 @@ Look for labels or areas such as:
 - New benchmark workloads
 - Simulator trace coverage
 - Inspector output formatting (`kayactl inspect`)
+- **eBPF / observability** — extend or add bpftrace scripts under `scripts/ebpf/`
+  (e.g. new per-file filters, latency views); good self-contained Linux tasks
+- **New language clients** — port `clients/kaya-py` (Python) or `clients/kaya-go`
+  (Go) to TypeScript/JavaScript or Zig using `docs/clients/client-wire-protocol.md`
 
 ## Questions?
 

@@ -37,6 +37,10 @@ name = "engine_workload"
 harness = false
 
 [[bench]]
+name = "mixed_workload"
+harness = false
+
+[[bench]]
 name = "smoke"
 harness = false
 

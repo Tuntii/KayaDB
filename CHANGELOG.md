@@ -31,6 +31,12 @@ Roadmap parallel-track close-out: durable directory-entry semantics (Track B), r
 ### Added (Track E — SIEM audit export)
 - Optional remote audit forwarding: `--audit-syslog <host:port>` / `KAYA_AUDIT_SYSLOG` streams each audit record to a SIEM collector as an RFC 5424 syslog datagram over UDP (best-effort, never blocks the data path). `docs/security.md` §7 SIEM row updated from accepted-risk to implemented
 
+### Added (Track F — benchmarks) & Track A/G roadmap close-out
+- `kaya-bench/benches/mixed_workload.rs`: large-value (64 KiB), high-key-count (5 000 keys, flush + cold SSTable reads), and interleaved put/get/delete/scan benchmarks (Track F workload shapes)
+- eBPF Makefile targets `make datadir` (per-file/data-dir filtered trace via the existing `durability-syscalls.bt`) and `make parallel` (fsync + block + timeline probes concurrently, DURATION-bounded, separate logs)
+- `CONTRIBUTING.md` "Good first issues" now points at eBPF-script and language-client-porting areas
+- ROADMAP marked all short/medium-term parallel-track items done; remaining items are explicitly `⬜ deferred` (TS/JS & Zig clients, TLA+ expansion, web dashboard, cross-node production tracing, io_uring completion tracing, privileged-CI stap/perf, Track H research) — each needs its own spec
+
 ### Added (Track F — latency observability)
 - `LatencyHistogram` in `kaya-core`: dependency-free fixed-bucket (Prometheus-compatible `le` bounds) histogram with `observe`, `percentile_us` (p50/p99), `mean_us`, `merge`, and cumulative-bucket export
 - Read-path latency is now measured: `EngineStats.get_total_us/get_max_us` and `scan_total_us/scan_max_us` (`get()`/`scan_prefix()` were previously unmeasured)

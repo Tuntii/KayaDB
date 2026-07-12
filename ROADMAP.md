@@ -604,6 +604,8 @@ For deeper correctness work, add the relevant property, crash, fuzz or simulatio
 
 Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde öncelikli, orta ve uzun vadeli adımlar içerir. Özellikle **Linux eBPF / Observability** track'i detaylı yazıldı çünkü şu anda aktif olarak çalışıyoruz.
 
+**Durum özeti (v0.1.47, 2026-07-11):** Milestone omurgası (M0–M15) ve tüm paralel-track'lerin **kısa + orta vadeli** kalemleri tamamlandı. Geriye kalan işaretli kalemler bilinçli olarak **⬜ deferred**: her biri kendi spec'ini gerektiren büyük/greenfield veya araştırma işleri — TS/JS & Zig client'lar, TLA+ model genişletme, web/GUI dashboard, cluster-genelinde production-grade tracing + birleşik kernel/userspace attribution, io_uring completion tracing, privileged-CI gerektiren stap/perf, ve Track H araştırma deneyleri. Bunlar bir kod oturumunda dürüstçe "bitirilecek" işler değildir; roadmap'in kendi *"kanıtlanmadan production iddiası yok"* ilkesiyle uyumlu olarak açıkça ertelenmiştir.
+
 ### Track A: Observability, Diagnostics & Linux/eBPF Tooling (Aktif — Yüksek Öncelik)
 
 **Mevcut durum (Track A Phase 2A — 2026-07-03):** 
@@ -624,8 +626,8 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 - ✅ `--run` bpftrace wrapper (output capture, `--duration` timeout + SIGTERM)
 - ✅ Userspace latency: `flush_*` / `compaction_*` + `kayactl stats --latency`
 - ✅ eBPF + userspace korelasyon: `kayactl ebpf correlate`
-- 🟡 Per-file veya data-dir filtreli bpftrace versiyonları (script içinde kolay uzatma; henüz ayrı .bt yok)
-- 🟡 Multiple script paralel `--run` (manuel: ayrı terminaller veya `make` hedefleri)
+- ✅ Per-file veya data-dir filtreli bpftrace (`durability-syscalls.bt` path-substring filter + `make datadir DATADIR=...`)
+- ✅ Multiple script paralel `--run` (`make parallel` — fsync+block+timeline eşzamanlı, DURATION-bounded, ayrı loglar)
 
 **Orta vadeli (Track A Phase 2B+ — tamamlandı / kısmi, 2026-07-03):**
 - ✅ `crates/kaya-ebpf` in-process runtime + Linux `kernel-probes` tier-B CI gate
@@ -635,9 +637,9 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 - ✅ `scripts/ebpf/Makefile` (Phase 2A)
 - ✅ Flamegraph + stack collapse entegrasyonu (Phase 2C): `durability-flamegraph.bt`, `kayactl ebpf flamegraph`, `make flamegraph`
 - ✅ OpenTelemetry spans (Phase 2C; `kayadb-server --features otel --otel`; Prometheus `/metrics` ✅ M15)
-- 🟡 External stap/perf USDT attachment (in-process markers + operator guide in `scripts/ebpf/README.md`; stap not in CI)
+- 🟡 External stap/perf USDT attachment (in-process markers + operator guide in `scripts/ebpf/README.md`; ⬜ stap-in-CI **deferred** — needs a privileged Linux CI runner)
 
-**Uzun vadeli / İleri seviye:**
+**Uzun vadeli / İleri seviye** — ⬜ **deferred** (each is a large standalone effort with its own spec; the building blocks — histograms, USDT markers, flamegraphs, correlate, per-file trace — are in place to build on):
 - Kernel + userspace birleşik attribution (hangi fsync'in ne kadarını kernel'da geçirdiğini net raporla)
 - Production-grade tracing (trace correlation across cluster nodes + client)
 - GUI / web dashboard (trace timeline + eBPF histogram + cluster health)
@@ -662,16 +664,16 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 - Rust-native Jepsen CI (smoke + nightly T1–T7) — ✅ M14
 - Chaos matrix CI (DiskFull, NetworkPartition, ClockSkew) — ✅ M14
 - Daha zengin nemesis seti + clock skew, disk latency injection — 🟡 v0.1.47 (deterministic sim: `SimNetworkConfig.latency_ticks` + `reorder_percent`, asymmetric `isolate_outgoing`/`isolate_incoming`; live-cluster wall-clock skew/disk-latency still needs OS tooling)
-- TLA+ modellerinin genişletilmesi (manifest + compaction + Raft bir arada)
-- Linearizability checker'in production'a yakın versiyonu (WGL + daha iyi raporlama)
+- Linearizability checker'in production'a yakın versiyonu (WGL) — ✅ M11 (`LinearizabilityChecker::check_concurrent`, WGL algorithm, `Vec<String>` violation report; used in Jepsen full gate). Daha zengin raporlama (minimal counterexample) ⬜ future enhancement
+- TLA+ modellerinin genişletilmesi (manifest + compaction + Raft bir arada) — ⬜ **deferred** (research; needs TLA+/TLC toolchain + its own spec — out of scope for a code session)
 
 ### Track D: Client & Language Ecosystem
 
 - Go client gerçek implementasyon + conformance — ✅ M15 (`clients/kaya-go/`)
 - Protocol conformance vectors + Rust runner — ✅ M15 (`docs/clients/conformance/vectors.json`)
 - HELLO protocol version handshake (opcode 0) — ✅ M15
-- Python, TypeScript/JavaScript, Zig native client'lar — 🟡 Python ✅ v0.1.47 (`clients/kaya-py/`, zero-dep); TS/JS, Zig ⬜ planned
-- Yüksek seviye özellikler: retry policy'leri, observability hook'lar, connection pooling — 🟡 Rust ✅ v0.1.47 (`RetryPolicy` backoff+jitter+timeout, keep-alive connection reuse, `ClientObserver` hook); Go keep-alive+timeout only
+- Python, TypeScript/JavaScript, Zig native client'lar — 🟡 Python ✅ v0.1.47 (`clients/kaya-py/`, zero-dep); TS/JS, Zig ⬜ **deferred** (each a standalone client sub-project; Python + Go + wire-spec give the reference to port from)
+- Yüksek seviye özellikler: retry policy'leri, observability hook'lar, connection pooling — 🟡 Rust ✅ v0.1.47 (`RetryPolicy` backoff+jitter+timeout, keep-alive connection reuse, `ClientObserver` hook); porting the same to Go ⬜ future
 
 ### Track E: Operations, Security & Production
 
@@ -688,18 +690,20 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 ### Track F: Performance & Benchmarking
 
 - Latency histogram'ları her yerde (WAL, read path, compaction) — ✅ v0.1.47 (`kaya_core::LatencyHistogram` p50/p99; `Engine::histograms()` for get/scan/fsync/flush/compaction; read-path now measured; Prometheus latency metrics expanded)
-- CI regression gate'leri + BENCHMARKS.md otomasyonu
-- Linux perf + eBPF ile düzenli profiling
-- Large value, high concurrency, mixed workload benchmark'ları
+- CI regression gate'leri + BENCHMARKS.md otomasyonu — ✅ (`kaya-bench/tests/perf_gate.rs` release-mode assertion, `scripts/bench-report.{sh,ps1}`, CI step in `.github/workflows/ci.yml`, `BENCHMARKS.md`)
+- Linux perf + eBPF ile düzenli profiling — 🟡 bpftrace/eBPF tooling ✅ (Track A); scheduled/automated profiling runs ⬜ future (needs a Linux perf CI runner)
+- Large value, high concurrency, mixed workload benchmark'ları — ✅ v0.1.47 (`kaya-bench/benches/mixed_workload.rs`: 64 KiB large-value, 5 000-key flush+cold-read, interleaved put/get/delete/scan)
 
 ### Track G: DX, Tooling & Documentation
 
 - `kayactl` interactive / watch modları — ✅ M15 `kayactl watch status`
-- Trace + cluster görselleştirme (dashboard)
+- Trace + cluster görselleştirme (dashboard) — ⬜ **deferred** (web/GUI project; same track as Track A's dashboard, needs its own spec)
 - Daha iyi hata mesajları ve recovery rehberliği — ✅ v0.1.47 (`KayaError::guidance()` actionable hints; structural `LockConflict`; `kayactl` prints `HINT:` lines)
-- Katkı deneyimini iyileştirme (eBPF "good first issue" etiketleri vs.)
+- Katkı deneyimini iyileştirme (eBPF "good first issue" etiketleri vs.) — ✅ `CONTRIBUTING.md` "Good first issues" now lists eBPF-script and language-client-porting areas
 
 ### Track H: Research & Future Experiments
+
+⬜ **Deferred by design** — this track is exploratory; items are open research directions, not committed deliverables. Each needs its own investigation/spec before implementation.
 
 - Learned indexes / filtreler
 - Yeni durability modları (group commit, relaxed + periodic fsync)
