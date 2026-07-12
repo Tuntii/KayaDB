@@ -6,6 +6,7 @@
 //! frame_len : u32 LE   (byte count of everything that follows)
 //! from_id   : u64 LE
 //! to_id     : u64 LE
+//! group_id  : u64 LE   (multi-raft group; 0 = single-group / legacy)
 //! msg_type  : u8       (1 = VoteRequest, 2 = VoteResponse,
 //!                       3 = AppendRequest, 4 = AppendResponse)
 //! <message-specific fields>
@@ -138,6 +139,7 @@ pub fn encode_envelope(env: &Envelope) -> Vec<u8> {
     let mut body = Vec::new();
     push_u64(&mut body, env.from.0);
     push_u64(&mut body, env.to.0);
+    push_u64(&mut body, env.group_id);
     match &env.message {
         Message::VoteRequest(m) => {
             push_u8(&mut body, MSG_VOTE_REQUEST);
@@ -217,6 +219,7 @@ pub fn decode_envelope(data: &[u8]) -> Result<Envelope, String> {
     let mut cur = data;
     let from = NodeId(take_u64(&mut cur)?);
     let to = NodeId(take_u64(&mut cur)?);
+    let group_id = take_u64(&mut cur)?;
     let msg_type = take_u8(&mut cur)?;
 
     let message = match msg_type {
@@ -324,7 +327,7 @@ pub fn decode_envelope(data: &[u8]) -> Result<Envelope, String> {
         t => return Err(format!("unknown Raft message type: {t}")),
     };
 
-    Ok(Envelope { from, to, message })
+    Ok(Envelope { from, to, group_id, message })
 }
 
 // ── client protocol payload helpers ──────────────────────────────────────────
@@ -683,10 +686,30 @@ mod tests {
     use kaya_raft::{AppendRequest, LogEntry};
 
     #[test]
+    #[test]
+    fn round_trip_group_id_nonzero() {
+        let env = Envelope {
+            from: NodeId(1),
+            to: NodeId(2),
+            group_id: 42,
+            message: Message::VoteResponse(VoteResponse {
+                term: Term(1),
+                vote_granted: false,
+            }),
+        };
+        let encoded = encode_envelope(&env);
+        let decoded = decode_envelope(&encoded[4..]).unwrap();
+        assert_eq!(decoded.group_id, 42);
+        assert_eq!(decoded.from, NodeId(1));
+        assert_eq!(decoded.to, NodeId(2));
+    }
+
+    #[test]
     fn round_trip_vote_request() {
         let env = Envelope {
             from: NodeId(1),
             to: NodeId(2),
+            group_id: 0,
             message: Message::VoteRequest(VoteRequest {
                 term: Term(3),
                 candidate_id: NodeId(1),
@@ -712,6 +735,7 @@ mod tests {
         let env = Envelope {
             from: NodeId(2),
             to: NodeId(1),
+            group_id: 0,
             message: Message::VoteResponse(VoteResponse {
                 term: Term(3),
                 vote_granted: true,
@@ -741,6 +765,7 @@ mod tests {
         let env = Envelope {
             from: NodeId(1),
             to: NodeId(3),
+            group_id: 0,
             message: Message::AppendRequest(AppendRequest {
                 term: Term(2),
                 leader_id: NodeId(1),
@@ -769,6 +794,7 @@ mod tests {
         let env = Envelope {
             from: NodeId(1),
             to: NodeId(3),
+            group_id: 0,
             message: Message::InstallSnapshotRequest(InstallSnapshotRequest {
                 term: Term(4),
                 leader_id: NodeId(1),
@@ -794,6 +820,7 @@ mod tests {
         let env = Envelope {
             from: NodeId(3),
             to: NodeId(1),
+            group_id: 0,
             message: Message::InstallSnapshotResponse(InstallSnapshotResponse {
                 term: Term(4),
                 success: true,
@@ -815,6 +842,7 @@ mod tests {
         let env = Envelope {
             from: NodeId(1),
             to: NodeId(2),
+            group_id: 0,
             message: Message::ConfigChangeRequest(ConfigChangeRequest {
                 term: Term(7),
                 old_peers: vec![NodeId(1), NodeId(2)],
@@ -839,6 +867,7 @@ mod tests {
         let env = Envelope {
             from: NodeId(2),
             to: NodeId(1),
+            group_id: 0,
             message: Message::ConfigChangeResponse(ConfigChangeResponse {
                 term: Term(7),
                 success: true,
@@ -858,6 +887,7 @@ mod tests {
         let env = Envelope {
             from: NodeId(2),
             to: NodeId(1),
+            group_id: 0,
             message: Message::AppendResponse(AppendResponse {
                 term: Term(2),
                 success: true,

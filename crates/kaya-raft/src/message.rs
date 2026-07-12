@@ -87,15 +87,36 @@ pub struct InstallSnapshotResponse {
 }
 
 /// A directed message between two Raft nodes.
+///
+/// `group_id` multiplexes multi-raft traffic on a shared transport (M20).
+/// Group `0` is the legacy single-group default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Envelope {
     pub from: NodeId,
     pub to: NodeId,
+    /// Raft group this message belongs to (`0` = single-group / legacy).
+    pub group_id: u64,
     pub message: Message,
 }
 
 impl Envelope {
+    /// Construct an envelope for the legacy single group (`group_id = 0`).
     pub fn new(from: NodeId, to: NodeId, message: Message) -> Self {
-        Self { from, to, message }
+        Self {
+            from,
+            to,
+            group_id: 0,
+            message,
+        }
+    }
+
+    /// Construct an envelope for an explicit multi-raft group.
+    pub fn with_group(from: NodeId, to: NodeId, group_id: u64, message: Message) -> Self {
+        Self {
+            from,
+            to,
+            group_id,
+            message,
+        }
     }
 }
