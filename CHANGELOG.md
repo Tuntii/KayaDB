@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (M23 — Cross-shard transactions production path)
+- **2PC engine records (shared-engine):** `\x00txn/rec/{txn_id}` + `\x00txn/intent/{txn_id}/{key}`; `Engine::apply_txn_prepare` / `apply_txn_commit_2pc` / `apply_txn_abort_2pc`; commit materializes intents via `apply_mutations` (index+CDC fire)
+- **RaftCommand types 5/6/7:** `TxnPrepare` / `TxnCommit2pc` / `TxnAbort2pc` (types 1–4 layouts unchanged)
+- **Coordinator:** `txn_coord::commit_cross_group` on multi-group `TXN_COMMIT` (lex-smallest-key coordinator group); **sequential** prepare then commit/abort proposes; single-group stays type-4 `TxnCommit`; client opcodes unchanged (range-transparent)
+- **Recovery (minimal):** startup scan aborts local `Preparing`/`Prepared` records (fail-closed; no durable global decision log)
+- **TLA+ sketch:** `spec/specs/txn/TwoPhaseCommit.tla` + `.cfg` (prepare/decide/recover; TXN-2PC invariants)
+- **IT:** `test_cross_range_txn_commit`; multi-range bank `test_multi_range_bank_sum_invariant` (SI transfers across ranges, sum holds)
+- Spec: `spec/docs/transactions-spec.md` §17
+- ROADMAP: M23 production path closed; M24+ open; no full v0.2.0 / north-star claim yet. *Out of path:* parallel prepare/commit stretch, HLC uncertainty-interval clamp, multi-range Jepsen bank under full chaos matrix
+
 ### Added (M22 — Rebalancing, merges & placement production path)
 - **Range merge (shared-engine):** `StaticRangeTable::merge_with_next` + wire `MERGE_RANGE` (17) + `kayactl range merge`; IT `test_range_merge_recombines`. Routing-only merge (no physical key move); orphan Raft group after merge stays hosted (reclaim follow-on)
 - **Leadership transfer:** admin `TRANSFER_LEADER` (18) — leader steps down for free election among voters (no TimeoutNow / forced target win); operator-token path; rolling-restart runbook note

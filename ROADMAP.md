@@ -1,7 +1,7 @@
 # KayaDB Development Roadmap
 
 **Status:** Living roadmap  
-**Last updated:** 2026-07-17 (M22 rebalancing/merges/placement production path closed; M23+ open)
+**Last updated:** 2026-07-17 (M23 cross-shard 2PC production path closed; M24+ open)
 
 > **"Geniş ve yaşayan yol haritası"** — Bu belge hem tarihi başarıları arşivler, hem şu anki odak noktalarını gösterir, hem de uzun vadeli vizyonu (birden fazla paralel track ile) detaylandırır. Tasarım-öncelikli ve correctness-öncelikli felsefe korunur.
 
@@ -76,7 +76,7 @@ Goal: close post-M14 parallel-track gaps across security, client ecosystem, obse
 
 ## Next arc: M16–M25 — Distributed Transactional KV
 
-**Status (2026-07-17):** **M16–M22 closed** (txn path through range merge/placement ops). M23–M25 remain open. We still do **not** claim full v0.2.0 / north-star production readiness until M24–M25 exit gates.
+**Status (2026-07-17):** **M16–M23 closed** (txn path through cross-shard 2PC). M24–M25 remain open. We still do **not** claim full v0.2.0 / north-star production readiness until M24–M25 exit gates.
 
 **Hedef kimlik (M25):** range sharding + multi-raft + **cross-shard transaction** (Raft üzerine 2PC) — CockroachDB/TiKV çekirdeği sınıfında, adım adım kanıtlanarak. API yüzeyi programatik kalır: **KV + txn + secondary index** (SQL yok; post-M25 v2 adayı). Sıralama: **önce transaction, sonra sharding** — cross-shard txn zaten MVCC + timestamp altyapısı ister; önce tek grupta Jepsen'le kanıtla, sonra dağıt.
 
@@ -93,8 +93,8 @@ Her milestone değişmez disiplini korur: **spec → sim → gerçek implementas
 
 5. **M20 — Multi-raft foundation ✅ production path** — Complete (2026-07-12): Envelope.group_id; per-group storage; MultiRaftHost + StaticRangeTable; HLC; **ClusterNode always hosts MultiRaftHost (≥ group 0)** with static range routing; HLC commit_ts via `EngineConfig.use_hlc` / multi-group auto-enable. Spec: `spec/docs/multi-raft-spec.md`. *IT:* `test_multi_raft_static_ranges_put_get`. *Follow-on (M21+):* dynamic splits / RANGE_MOVED, cross-group 2PC (M23), per-range Jepsen, full OTel trace-context, live clock-skew nemesis.
 6. **M21 — Range metadata, routing & splits ✅** — Complete (2026-07-16): epoch’d meta range table (`StaticRangeTable` / `RangeTable`), `split_at` + runtime group host, wire `LIST_RANGES` (15) / `SPLIT_RANGE` (16), `STATUS_RANGE_MOVED` (11), client `list_ranges`/`split_range` cache, `kayactl range list|split`, IT `test_range_split_no_lost_writes`. Spec: `spec/docs/range-routing-spec.md`. *Shared-engine routing split* (no physical key move).
-7. **M22 — Rebalancing, merges & placement ✅ production path** — Complete (2026-07-17): shared-engine `merge_with_next` + wire `MERGE_RANGE` (17) + `kayactl range merge` (no physical key move; orphan group reclaim follow-on); admin `TRANSFER_LEADER` (18) (step-down; no TimeoutNow); learner membership flag + `PROMOTE_LEARNER` (19) (learners receive log, do not vote/campaign); **advisory** `REBALANCE_PLAN` (20) range-count heuristic (**no live migrate / MOVE_RANGE**); drain mode (`--drain` / `KAYA_DRAIN`) + decommission runbook; Dashboard v1 read-only HTTP (`--dashboard-addr`: `/health`, `/v1/ranges`, `/v1/raft`). Spec: `spec/docs/range-routing-spec.md`. *Not in this path:* live range migrate, locality tags, auto size-threshold split, TimeoutNow preferred-candidate election, full chaos add/drain/decommission gate (operator workflow documented; chaos matrix remains M23/M25).
-8. **M23 — Cross-shard transactions ⬜** — Raft üzerine 2PC (txn record + intents, coordinator crash recovery), HLC commit ts + uncertainty interval, parallel-commit stretch. ⬅ *TLA+ genişletme (2/2):* 2PC + recovery modeli. *Exit:* multi-range Jepsen bank, split+merge+rebalance+kill+partition kombinasyonu altında yeşil.
+7. **M22 — Rebalancing, merges & placement ✅ production path** — Complete (2026-07-17): shared-engine `merge_with_next` + wire `MERGE_RANGE` (17) + `kayactl range merge` (no physical key move; orphan group reclaim follow-on); admin `TRANSFER_LEADER` (18) (step-down; no TimeoutNow); learner membership flag + `PROMOTE_LEARNER` (19) (learners receive log, do not vote/campaign); **advisory** `REBALANCE_PLAN` (20) range-count heuristic (**no live migrate / MOVE_RANGE**); drain mode (`--drain` / `KAYA_DRAIN`) + decommission runbook; Dashboard v1 read-only HTTP (`--dashboard-addr`: `/health`, `/v1/ranges`, `/v1/raft`). Spec: `spec/docs/range-routing-spec.md`. *Not in this path:* live range migrate, locality tags, auto size-threshold split, TimeoutNow preferred-candidate election, full chaos add/drain/decommission gate (operator workflow documented; chaos matrix remains M25).
+8. **M23 — Cross-shard transactions ✅ production path** — Complete (2026-07-17): shared-engine 2PC records (`\x00txn/rec|intent/…`, `apply_txn_{prepare,commit_2pc,abort_2pc}`); RaftCommand types 5/6/7 (`TxnPrepare` / `TxnCommit2pc` / `TxnAbort2pc`); server `txn_coord::commit_cross_group` when `TXN_COMMIT` spans >1 group via `StaticRangeTable` (client-transparent); **sequential** prepare then commit/abort proposes (not parallel-commit stretch); conservative startup recovery (local `Preparing`/`Prepared` → abort); TLA+ sketch `spec/specs/txn/TwoPhaseCommit.tla`; IT `test_cross_range_txn_commit` + multi-range bank `test_multi_range_bank_sum_invariant`. Spec: `spec/docs/transactions-spec.md` §17. *Not in this path:* parallel prepare/commit stretch, HLC uncertainty-interval wait/clamp, durable global decision log, multi-range Jepsen bank under split+merge+rebalance+kill+partition chaos (→ M25).
 
 ### Faz 3 — Hardening + kanıt
 
@@ -699,7 +699,7 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 - Chaos matrix CI (DiskFull, NetworkPartition, ClockSkew) — ✅ M14
 - Daha zengin nemesis seti + clock skew, disk latency injection — 🟡 v0.1.47 (deterministic sim: `SimNetworkConfig.latency_ticks` + `reorder_percent`, asymmetric `isolate_outgoing`/`isolate_incoming`; live-cluster wall-clock skew/disk-latency still needs OS tooling)
 - Linearizability checker'in production'a yakın versiyonu (WGL) — ✅ M11 (`LinearizabilityChecker::check_concurrent`, WGL algorithm, `Vec<String>` violation report; used in Jepsen full gate). Daha zengin raporlama (minimal counterexample) ⬜ → **M25**
-- TLA+ modellerinin genişletilmesi (manifest + compaction + Raft bir arada) — ⬜ **deferred → M17 (commit protokolü) + M23 (2PC + recovery)** (TLA+/TLC toolchain kendi spec'iyle gelir)
+- TLA+ modellerinin genişletilmesi (manifest + compaction + Raft bir arada) — 🟡 M17 single-group commit ✅ + M23 2PC sketch ✅ (`spec/specs/txn/`); full multi-module (manifest+compaction+Raft) model still open
 
 ### Track D: Client & Language Ecosystem
 
