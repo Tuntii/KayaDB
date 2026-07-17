@@ -131,6 +131,7 @@ pub(crate) async fn client_accept_loop(
     audit_log: SharedAuditLog,
     network_partitioned: Option<Arc<AtomicBool>>,
     max_connections: usize,
+    drain: bool,
 ) {
     // Backpressure: stop accepting when `max_connections` handlers are live;
     // further connections queue in the OS backlog until a permit frees up.
@@ -184,6 +185,7 @@ pub(crate) async fn client_accept_loop(
                 op_tok,
                 cli_tok,
                 audit,
+                drain,
             )
             .await;
         });
@@ -210,6 +212,7 @@ async fn handle_connection<S>(
     operator_token: Option<String>,
     client_token: Option<String>,
     audit_log: SharedAuditLog,
+    drain: bool,
 ) where
     S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin,
 {
@@ -234,6 +237,7 @@ async fn handle_connection<S>(
             self_client,
             operator_token.clone(),
             client_token.clone(),
+            drain,
         )
         .await;
         if let Some(audit) = audit_log.as_ref() {
@@ -413,6 +417,7 @@ async fn dispatch(
     self_client: SocketAddr,
     operator_token: Option<String>,
     client_token: Option<String>,
+    drain: bool,
 ) -> DispatchOutcome {
     let operator_auth = if operator_token.is_some() {
         "operator"
@@ -819,7 +824,7 @@ async fn dispatch(
 
         // STATS
         6 => {
-            let (status, body) = build_stats_response(raft, engine, &roster_snapshot).await;
+            let (status, body) = build_stats_response(raft, engine, &roster_snapshot, drain).await;
             outcome(status, body, client_auth, None)
         }
 
@@ -1049,6 +1054,14 @@ async fn dispatch(
         // SPLIT_RANGE (16) — split range at key; host new group; bump meta epoch.
         SPLIT_RANGE_OPCODE => match decode_split_range_request(&payload) {
             Ok(split_key) => {
+                if drain {
+                    return outcome(
+                        STATUS_ERROR,
+                        encode_error_payload("node is draining; refuse new range hosting"),
+                        client_auth,
+                        None,
+                    );
+                }
                 if !is_leader_of(raft, GroupId::ZERO) {
                     let hint = get_leader_hint(raft, &roster_snapshot);
                     return outcome(STATUS_NOT_LEADER, hint, client_auth, None);

@@ -64,6 +64,7 @@ Monitor until `peer_count` decreases on all remaining nodes.
 - After removal, you can safely shut down the node process and delete its data dir (after making sure it is no longer in the roster).
 
 See also:
+- `docs/runbooks/decommission-node.md` (transfer leaders → remove → wipe data_dir)
 - `docs/runbooks/rolling-restart.md`
 - `docs/runbooks/mtls-sidecar.md` (TLS connection details)
 - `docs/security.md` (operator credentials + native TLS sections)

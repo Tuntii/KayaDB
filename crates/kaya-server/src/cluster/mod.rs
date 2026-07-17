@@ -119,6 +119,12 @@ pub struct ClusterConfig {
     pub use_hlc: bool,
     /// Static key-range -> Raft group routing. Default is single group 0 (whole keyspace).
     pub range_table: StaticRangeTable,
+    /// When true, this node is draining for decommission: status JSON reports
+    /// `"drain": true`. Existing leadership still works until the operator
+    /// transfers it away; operators must transfer leaders before removal
+    /// (see `docs/runbooks/decommission-node.md`). New range hosting via
+    /// SPLIT_RANGE is rejected on a draining node.
+    pub drain: bool,
 }
 
 impl ClusterConfig {
@@ -167,6 +173,7 @@ impl ClusterConfig {
             otel_enabled: false,
             use_hlc: false,
             range_table: StaticRangeTable::single_group(GroupId::ZERO),
+            drain: false,
         }
     }
 
@@ -256,6 +263,12 @@ impl ClusterConfig {
     /// Configure static key-range -> Raft group routing (multi-raft production path).
     pub fn with_static_ranges(mut self, ranges: Vec<StaticRange>) -> Self {
         self.range_table = StaticRangeTable::from_ranges(ranges);
+        self
+    }
+
+    /// Mark this node as draining for decommission (status reports `"drain": true`).
+    pub fn with_drain(mut self) -> Self {
+        self.drain = true;
         self
     }
 }
@@ -590,6 +603,13 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     let self_client = config.client_addr;
     let operator_token = config.operator_token.clone();
     let client_token = config.client_token.clone();
+    let drain = config.drain;
+    if drain {
+        eprintln!(
+            "[node {}] drain mode: status will report drain=true; transfer leaders before remove",
+            config.node_id.0
+        );
+    }
 
     let shared_audit = if config.audit_log {
         let opened = AuditLog::open(&config.data_dir, config.node_id).and_then(|log| match config
@@ -643,6 +663,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         shared_audit,
         config.network_partitioned.clone(),
         config.max_client_connections,
+        drain,
     );
     // Load persisted Raft snapshot once at startup (before the event loop applies entries).
     snapshot::install_persisted_snapshot_at_startup(

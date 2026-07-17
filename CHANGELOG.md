@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (M22 — Decommission drain)
+- Drain mode: `kayadb-server --drain` or `KAYA_DRAIN=1` marks a node for decommission; STATS/status JSON includes `"drain": true` (existing leadership still works until transfer; SPLIT_RANGE on a draining node is rejected)
+- Runbook: `docs/runbooks/decommission-node.md` (transfer leaders → remove member → wipe `data_dir`)
+
 ### Added (M21 — Range metadata, routing & splits)
 - Epoch’d range descriptors + `StaticRangeTable::split_at` / meta_epoch (shared-engine routing split)
 - Runtime Raft group hosting on split (`ensure_group_hosted`)

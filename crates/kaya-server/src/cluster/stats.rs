@@ -9,6 +9,7 @@ pub(crate) async fn build_stats_response(
     host: &SharedRaftHost,
     engine: &SharedEngine,
     roster: &NodeRoster,
+    drain: bool,
 ) -> (u16, Vec<u8>) {
     let (role, term, commit_idx, applied_idx, peer_count, group_count) = {
         let r = host.lock().unwrap();
@@ -41,10 +42,11 @@ pub(crate) async fn build_stats_response(
     };
 
     let engine_stats = engine.lock().await.stats();
+    let drain_json = if drain { "true" } else { "false" };
 
     let stats_json = format!(
-        "{{\"role\":\"{}\",\"term\":{},\"commit_index\":{},\"applied_index\":{},\"peer_count\":{},\"raft_groups\":{},\"engine\":{{\"put_count\":{},\"get_count\":{},\"delete_count\":{},\"scan_count\":{},\"wal_bytes_written\":{},\"wal_fsync_count\":{},\"wal_fsync_total_us\":{},\"wal_fsync_max_us\":{},\"memtable_entries\":{},\"sstable_count\":{},\"last_sequence\":{},\"flush_total_us\":{},\"flush_max_us\":{},\"flush_count\":{},\"compaction_total_us\":{},\"compaction_max_us\":{},\"compaction_count\":{},\"block_cache_hits\":{},\"block_cache_misses\":{},\"recovery_duration_us\":{}}}}}",
-        role, term, commit_idx, applied_idx, peer_count, group_count,
+        "{{\"role\":\"{}\",\"term\":{},\"commit_index\":{},\"applied_index\":{},\"peer_count\":{},\"raft_groups\":{},\"drain\":{},\"engine\":{{\"put_count\":{},\"get_count\":{},\"delete_count\":{},\"scan_count\":{},\"wal_bytes_written\":{},\"wal_fsync_count\":{},\"wal_fsync_total_us\":{},\"wal_fsync_max_us\":{},\"memtable_entries\":{},\"sstable_count\":{},\"last_sequence\":{},\"flush_total_us\":{},\"flush_max_us\":{},\"flush_count\":{},\"compaction_total_us\":{},\"compaction_max_us\":{},\"compaction_count\":{},\"block_cache_hits\":{},\"block_cache_misses\":{},\"recovery_duration_us\":{}}}}}",
+        role, term, commit_idx, applied_idx, peer_count, group_count, drain_json,
         engine_stats.put_count, engine_stats.get_count, engine_stats.delete_count, engine_stats.scan_count,
         engine_stats.wal_bytes_written, engine_stats.wal_fsync_count, engine_stats.wal_fsync_total_us, engine_stats.wal_fsync_max_us, engine_stats.memtable_entries, engine_stats.sstable_count, engine_stats.last_sequence,
         engine_stats.flush_total_us, engine_stats.flush_max_us, engine_stats.flush_count,

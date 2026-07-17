@@ -126,6 +126,19 @@ fn run() -> Result<(), String> {
         args.retain(|a| a != "--no-metrics");
     }
 
+    // --drain / KAYA_DRAIN=1: decommission drain mode (status JSON reports "drain": true).
+    let drain_flag = args.iter().any(|a| a == "--drain");
+    if drain_flag {
+        args.retain(|a| a != "--drain");
+    }
+    let drain_env = env::var("KAYA_DRAIN")
+        .map(|v| {
+            let t = v.trim();
+            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false);
+    let drain = drain_flag || drain_env;
+
     let metrics_addr: Option<SocketAddr> = if no_metrics {
         None
     } else {
@@ -235,6 +248,9 @@ fn run() -> Result<(), String> {
     }
     if join_cluster {
         config = config.with_join_cluster();
+    }
+    if drain {
+        config = config.with_drain();
     }
     if let Some(max) = max_client_connections {
         config = config.with_max_client_connections(max);
