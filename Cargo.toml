@@ -18,7 +18,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.110"
+version = "0.1.113"
 description = "Correctness-first, inspectable, embeddable storage engine with deterministic fault injection, LSM-tree storage, and Raft consensus"
 edition = "2021"
 license = "MIT OR Apache-2.0"

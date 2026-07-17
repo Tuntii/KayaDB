@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.1.113] - 2026-07-17
+
+**Release theme:** M21 polish + M22–M25 production path (range routing, 2PC, encryption, ACL, clients). **v0.2.0 candidate** — residuals remain; not an unqualified production-SLA claim.
+
+
 ### Fixed (post-arc polish)
 - **2PC `Committing` state (byte 5):** `apply_txn_commit_2pc` durably writes `Committing` before materializing user keys; startup recovery finishes `Committing` (never aborts it); `Preparing`/`Prepared` still abort fail-closed
 - **ACL gate:** when PrefixAcl is configured, `CDC_POLL` / `CDC_CHECKPOINT` and `SPLIT_RANGE` / `MERGE_RANGE` require a client token that appears on some ACL rule (same as `TXN_BEGIN`)
