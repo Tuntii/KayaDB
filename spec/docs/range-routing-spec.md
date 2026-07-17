@@ -1,8 +1,8 @@
 # Range Metadata, Routing, Splits & Merges (M21/M22)
 
-**Status:** Draft v0.2  
-**Scope:** Meta range table with epochs, dynamic split/merge, client cache, RANGE_MOVED  
-**Milestone:** M21 (split), M22 (merge)
+**Status:** Production path v1.0 (M21 split + M22 merge/placement; 2026-07-17)  
+**Scope:** Meta range table with epochs, dynamic split/merge, client cache, RANGE_MOVED; advisory rebalance; no live migrate  
+**Milestone:** M21 (split), M22 (merge, transfer, learners, advisory balancer, drain, dashboard v1)
 
 ---
 
@@ -150,9 +150,14 @@ raw bytes; otherwise UTF-8.
 | Client range cache API | Yes (`list_ranges` / `split_range`) |
 | No lost writes across split (IT) | Yes (`test_range_split_no_lost_writes`) |
 | Split+merge round-trip (IT) | Yes (`test_range_merge_recombines`) |
-| Multi-node range move / learner | Partial (learner promote yes; live migrate no) |
+| Multi-node range move / learner | Partial (learner + promote yes; live migrate no) |
+| TRANSFER_LEADER (18) | Yes (step-down; no TimeoutNow) |
+| PROMOTE_LEARNER (19) | Yes |
 | Advisory REBALANCE_PLAN (20) | Yes (range-count; no live migrate) |
+| Drain mode + decommission runbook | Yes |
+| Dashboard v1 (read-only HTTP) | Yes (`/health`, `/v1/ranges`, `/v1/raft`) |
 | Auto size-threshold split | No (manual + API first) |
+| Live range migrate / MOVE_RANGE | No (follow-on) |
 | Orphan group reclaim after merge | No (follow-on) |
 
 ---
@@ -161,4 +166,4 @@ raw bytes; otherwise UTF-8.
 
 - `spec/docs/multi-raft-spec.md` (M20 foundation)
 - `kaya_raft::StaticRangeTable::split_at` / `merge_with_next`
-- `kaya-server` opcodes 15/16/17
+- `kaya-server` opcodes 15/16/17/18/19/20

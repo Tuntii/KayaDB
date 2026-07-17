@@ -9,9 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added (M22 — Decommission drain)
-- Drain mode: `kayadb-server --drain` or `KAYA_DRAIN=1` marks a node for decommission; STATS/status JSON includes `"drain": true` (existing leadership still works until transfer; SPLIT_RANGE on a draining node is rejected)
-- Runbook: `docs/runbooks/decommission-node.md` (transfer leaders → remove member → wipe `data_dir`)
+### Added (M22 — Rebalancing, merges & placement production path)
+- **Range merge (shared-engine):** `StaticRangeTable::merge_with_next` + wire `MERGE_RANGE` (17) + `kayactl range merge`; IT `test_range_merge_recombines`. Routing-only merge (no physical key move); orphan Raft group after merge stays hosted (reclaim follow-on)
+- **Leadership transfer:** admin `TRANSFER_LEADER` (18) — leader steps down for free election among voters (no TimeoutNow / forced target win); operator-token path; rolling-restart runbook note
+- **Learner replicas:** `ClusterMember.is_learner` (forward-compatible encode); learners receive log but do not vote or campaign; admin `PROMOTE_LEARNER` (19); learner remove allowed without voter-floor violation
+- **Advisory balancer:** `plan_range_count` + admin `REBALANCE_PLAN` (20) + `kayactl range rebalance-plan` — range-count heuristic only; **does not** move data, transfer leases, or change the meta table (no live migrate)
+- **Drain / decommission:** `kayadb-server --drain` / `KAYA_DRAIN=1`; STATS JSON `"drain": true|false`; draining node rejects `SPLIT_RANGE`; runbook `docs/runbooks/decommission-node.md` (transfer leaders → remove member → wipe `data_dir`)
+- **Dashboard v1:** optional `--dashboard-addr` read-only HTTP — `GET /health`, `/v1/ranges`, `/v1/raft`
+- Spec: `spec/docs/range-routing-spec.md` (merge algorithm, REBALANCE_PLAN advisory, exit table)
+- ROADMAP: M22 production path closed; M23+ open; no full v0.2.0 / north-star claim yet. *Out of path:* live range migrate, locality tags, auto size-threshold split
 
 ### Added (M21 — Range metadata, routing & splits)
 - Epoch’d range descriptors + `StaticRangeTable::split_at` / meta_epoch (shared-engine routing split)

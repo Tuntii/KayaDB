@@ -1,7 +1,7 @@
 # KayaDB Development Roadmap
 
 **Status:** Living roadmap  
-**Last updated:** 2026-07-16 (M21 range metadata/routing/splits closed; M22+ open)
+**Last updated:** 2026-07-17 (M22 rebalancing/merges/placement production path closed; M23+ open)
 
 > **"Geniş ve yaşayan yol haritası"** — Bu belge hem tarihi başarıları arşivler, hem şu anki odak noktalarını gösterir, hem de uzun vadeli vizyonu (birden fazla paralel track ile) detaylandırır. Tasarım-öncelikli ve correctness-öncelikli felsefe korunur.
 
@@ -76,7 +76,7 @@ Goal: close post-M14 parallel-track gaps across security, client ecosystem, obse
 
 ## Next arc: M16–M25 — Distributed Transactional KV
 
-**Status (2026-07-16):** **M16–M21 closed** (txn path through range split). M22–M25 remain open. We still do **not** claim full v0.2.0 / north-star production readiness until M24–M25 exit gates.
+**Status (2026-07-17):** **M16–M22 closed** (txn path through range merge/placement ops). M23–M25 remain open. We still do **not** claim full v0.2.0 / north-star production readiness until M24–M25 exit gates.
 
 **Hedef kimlik (M25):** range sharding + multi-raft + **cross-shard transaction** (Raft üzerine 2PC) — CockroachDB/TiKV çekirdeği sınıfında, adım adım kanıtlanarak. API yüzeyi programatik kalır: **KV + txn + secondary index** (SQL yok; post-M25 v2 adayı). Sıralama: **önce transaction, sonra sharding** — cross-shard txn zaten MVCC + timestamp altyapısı ister; önce tek grupta Jepsen'le kanıtla, sonra dağıt.
 
@@ -92,8 +92,8 @@ Her milestone değişmez disiplini korur: **spec → sim → gerçek implementas
 ### Faz 2 — Dağıtım (multi-raft + sharding)
 
 5. **M20 — Multi-raft foundation ✅ production path** — Complete (2026-07-12): Envelope.group_id; per-group storage; MultiRaftHost + StaticRangeTable; HLC; **ClusterNode always hosts MultiRaftHost (≥ group 0)** with static range routing; HLC commit_ts via `EngineConfig.use_hlc` / multi-group auto-enable. Spec: `spec/docs/multi-raft-spec.md`. *IT:* `test_multi_raft_static_ranges_put_get`. *Follow-on (M21+):* dynamic splits / RANGE_MOVED, cross-group 2PC (M23), per-range Jepsen, full OTel trace-context, live clock-skew nemesis.
-6. **M21 — Range metadata, routing & splits ✅** — Complete (2026-07-16): epoch’d meta range table (`StaticRangeTable` / `RangeTable`), `split_at` + runtime group host, wire `LIST_RANGES` (15) / `SPLIT_RANGE` (16), `STATUS_RANGE_MOVED` (11), client `list_ranges`/`split_range` cache, `kayactl range list|split`, IT `test_range_split_no_lost_writes`. Spec: `spec/docs/range-routing-spec.md`. *Shared-engine routing split* (no physical key move). *Follow-on (M22):* rebalance, learner→promote, auto size-threshold, multi-node RANGE_MOVED.
-7. **M22 — Rebalancing, merges & placement ⬜** — Learner→promote replica taşıma, lease/leadership transfer, store-bazlı balancer + locality etiketleri, cold-range merge, decommission runbook. ⬅ *Dashboard v1* (read-only cluster/range viewer). *Exit:* chaos altında node add/drain/decommission kesintisiz.
+6. **M21 — Range metadata, routing & splits ✅** — Complete (2026-07-16): epoch’d meta range table (`StaticRangeTable` / `RangeTable`), `split_at` + runtime group host, wire `LIST_RANGES` (15) / `SPLIT_RANGE` (16), `STATUS_RANGE_MOVED` (11), client `list_ranges`/`split_range` cache, `kayactl range list|split`, IT `test_range_split_no_lost_writes`. Spec: `spec/docs/range-routing-spec.md`. *Shared-engine routing split* (no physical key move).
+7. **M22 — Rebalancing, merges & placement ✅ production path** — Complete (2026-07-17): shared-engine `merge_with_next` + wire `MERGE_RANGE` (17) + `kayactl range merge` (no physical key move; orphan group reclaim follow-on); admin `TRANSFER_LEADER` (18) (step-down; no TimeoutNow); learner membership flag + `PROMOTE_LEARNER` (19) (learners receive log, do not vote/campaign); **advisory** `REBALANCE_PLAN` (20) range-count heuristic (**no live migrate / MOVE_RANGE**); drain mode (`--drain` / `KAYA_DRAIN`) + decommission runbook; Dashboard v1 read-only HTTP (`--dashboard-addr`: `/health`, `/v1/ranges`, `/v1/raft`). Spec: `spec/docs/range-routing-spec.md`. *Not in this path:* live range migrate, locality tags, auto size-threshold split, TimeoutNow preferred-candidate election, full chaos add/drain/decommission gate (operator workflow documented; chaos matrix remains M23/M25).
 8. **M23 — Cross-shard transactions ⬜** — Raft üzerine 2PC (txn record + intents, coordinator crash recovery), HLC commit ts + uncertainty interval, parallel-commit stretch. ⬅ *TLA+ genişletme (2/2):* 2PC + recovery modeli. *Exit:* multi-range Jepsen bank, split+merge+rebalance+kill+partition kombinasyonu altında yeşil.
 
 ### Faz 3 — Hardening + kanıt
@@ -676,7 +676,7 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 **Uzun vadeli / İleri seviye** — ⬜ **deferred, artık M16–M25 arc'ında planlı** (building blocks — histograms, USDT markers, flamegraphs, correlate, per-file trace — hazır):
 - Kernel + userspace birleşik attribution (hangi fsync'in ne kadarını kernel'da geçirdiğini net raporla) → **M24**
 - Production-grade tracing (trace correlation across cluster nodes + client) → **M20 (v1) / M24 (full)**
-- GUI / web dashboard (trace timeline + eBPF histogram + cluster health) → **M22 (v1) / M24 (v2)**
+- GUI / web dashboard — ✅ M22 v1 (read-only cluster/range/raft JSON via `--dashboard-addr`); full trace timeline + eBPF histogram → **M24 (v2)**
 - io_uring completion tracing (Track B ile birleşik) → **M24**
 
 **Non-goals (değişmez):**
@@ -731,7 +731,7 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 ### Track G: DX, Tooling & Documentation
 
 - `kayactl` interactive / watch modları — ✅ M15 `kayactl watch status`
-- Trace + cluster görselleştirme (dashboard) — ⬜ **deferred → M22 (v1) / M24 (v2)** (web/GUI project; same track as Track A's dashboard)
+- Trace + cluster görselleştirme (dashboard) — 🟡 M22 v1 ✅ (`GET /health|/v1/ranges|/v1/raft`); full timeline + eBPF ⬜ → **M24 (v2)**
 - Daha iyi hata mesajları ve recovery rehberliği — ✅ v0.1.47 (`KayaError::guidance()` actionable hints; structural `LockConflict`; `kayactl` prints `HINT:` lines)
 - Katkı deneyimini iyileştirme (eBPF "good first issue" etiketleri vs.) — ✅ `CONTRIBUTING.md` "Good first issues" now lists eBPF-script and language-client-porting areas
 
