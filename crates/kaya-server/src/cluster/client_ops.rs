@@ -1,12 +1,15 @@
 //! Client protocol: PUT/GET/DELETE/SCAN/TXN routing and membership proposals.
 //!
-//! ## Transactions (M17)
+//! ## Transactions (M17 / M23)
 //!
 //! TXN opcodes 9–12 stage write intents on the **leader** engine only. On
-//! `TXN_COMMIT`, intents are taken and proposed as a single atomic
-//! [`RaftCommand::TxnCommit`] (type 4) so multi-key materialization is
-//! all-or-nothing at the Raft apply layer. In-flight intents remain leader-local
-//! (followers do not observe uncommitted intents).
+//! `TXN_COMMIT`, intents are taken and:
+//! - **single group:** proposed as type-4 [`RaftCommand::TxnCommit`];
+//! - **cross group:** coordinated 2PC via `TxnPrepare` / `TxnCommit2pc` /
+//!   `TxnAbort2pc` ([`super::txn_coord`]).
+//!
+//! In-flight intents remain leader-local (followers do not observe uncommitted
+//! intents).
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1193,9 +1196,13 @@ fn map_txn_err(
     }
 }
 
-/// Atomic multi-key commit: take local intents, propose a single
-/// [`RaftCommand::TxnCommit`], apply on all nodes via Raft. Intents are cleared
-/// before propose (fail-closed if propose fails — client restarts the txn).
+/// Atomic multi-key commit: take local intents, then either:
+/// - **single group:** propose type-4 [`RaftCommand::TxnCommit`]; or
+/// - **cross group:** run 2PC (`TxnPrepare` / `TxnCommit2pc` / `TxnAbort2pc`)
+///   via [`super::txn_coord::commit_cross_group`].
+///
+/// Intents are cleared before propose (fail-closed if propose fails — client
+/// restarts the txn).
 async fn txn_commit_via_raft(
     raft: &SharedRaftHost,
     engine: &SharedEngine,
@@ -1229,26 +1236,43 @@ async fn txn_commit_via_raft(
 
     let mutations: Vec<(Vec<u8>, Option<Vec<u8>>)> = staged.into_iter().collect();
 
-    // Cross-group atomic txn is not supported in the multi-raft foundation.
-    let mut groups = std::collections::BTreeSet::new();
+    // Partition mutations by range → Raft group.
+    let mut by_group: std::collections::HashMap<GroupId, Vec<(Vec<u8>, Option<Vec<u8>>)>> =
+        std::collections::HashMap::new();
     {
         let t = range_table.read().await;
-        for (k, _) in &mutations {
-            groups.insert(lookup_group(&t, k).0);
+        for (k, v) in mutations {
+            let gid = lookup_group(&t, &k);
+            by_group.entry(gid).or_default().push((k, v));
         }
     }
-    if groups.len() > 1 {
-        return (
-            STATUS_INVALID_ARGUMENT,
-            encode_error_payload("cross-group transaction not supported"),
-        );
+
+    if by_group.len() > 1 {
+        // Cross-group 2PC path (M23).
+        let result = super::txn_coord::commit_cross_group(txn_id, by_group, |gid, cmd| {
+            propose_cmd_result(raft, roster, propose_tx, gid, cmd)
+        })
+        .await;
+
+        return match result {
+            Ok(()) => {
+                let commit_ts = {
+                    let eng = engine.lock().await;
+                    eng.stats().last_sequence
+                };
+                (STATUS_OK, encode_txn_commit_response(commit_ts))
+            }
+            Err(e) if e == "not_leader" => (STATUS_NOT_LEADER, get_leader_hint(raft, roster)),
+            Err(e) => (STATUS_ERROR, encode_error_payload(&e)),
+        };
     }
-    let group_id = groups
-        .iter()
+
+    let group_id = by_group
+        .keys()
         .next()
         .copied()
-        .map(GroupId)
         .unwrap_or(GroupId::ZERO);
+    let mutations = by_group.into_values().next().unwrap_or_default();
 
     let cmd = RaftCommand::TxnCommit { txn_id, mutations }.encode();
 
@@ -1265,6 +1289,27 @@ async fn txn_commit_via_raft(
     };
 
     (STATUS_OK, encode_txn_commit_response(commit_ts))
+}
+
+/// Propose a [`RaftCommand`] and map the wire status into `Result`.
+async fn propose_cmd_result(
+    raft: &SharedRaftHost,
+    roster: &NodeRoster,
+    propose_tx: &mpsc::Sender<ProposeReq>,
+    group_id: GroupId,
+    cmd: RaftCommand,
+) -> Result<(), String> {
+    let (status, body) = propose_and_wait(raft, roster, propose_tx, group_id, cmd.encode()).await;
+    if status == STATUS_OK {
+        return Ok(());
+    }
+    if status == STATUS_NOT_LEADER {
+        return Err("not_leader".to_owned());
+    }
+    match kaya_net::decode_error_payload(&body) {
+        Ok(msg) => Err(msg),
+        Err(_) => Err(format!("propose failed with status {status}")),
+    }
 }
 
 /// Snapshot of group-0 voters + full membership for config-change builders.

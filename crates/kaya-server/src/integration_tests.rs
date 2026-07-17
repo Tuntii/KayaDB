@@ -1575,6 +1575,108 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
+    /// Cross-range multi-key TXN_COMMIT via 2PC (M23).
+    ///
+    /// Static two ranges (split at `m`), txn puts one key on each side, commit
+    /// must materialize both keys.
+    #[serial]
+    #[tokio::test]
+    async fn test_cross_range_txn_commit() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_cross_txn_{}", test_id));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let r = get_free_port().await;
+        let c = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{}", r).parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{}", c).parse().unwrap();
+
+        // [a, m) → group 1, [m, z) → group 2
+        let ranges = vec![
+            StaticRange::new(b"a".to_vec(), b"m".to_vec(), GroupId(1)),
+            StaticRange::new(b"m".to_vec(), b"z".to_vec(), GroupId(2)),
+        ];
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![])
+            .with_static_ranges(ranges);
+
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "single-node multi-raft leader not ready for cross-range txn");
+
+        // BEGIN
+        let (status, body) = roundtrip(client_addr, TXN_BEGIN_OPCODE, &[]).await.unwrap();
+        assert_eq!(status, STATUS_OK, "TXN_BEGIN");
+        let (txn_id, _) = decode_txn_begin_response(&body).unwrap();
+
+        // Put key on left range (group 1)
+        let put_left =
+            encode_txn_op_payload(txn_id, TXN_OP_PUT, b"apple", Some(b"red"));
+        let (status, _) = roundtrip(client_addr, TXN_OP_OPCODE, &put_left)
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK, "TXN_OP put apple");
+
+        // Put key on right range (group 2)
+        let put_right =
+            encode_txn_op_payload(txn_id, TXN_OP_PUT, b"mango", Some(b"yellow"));
+        let (status, _) = roundtrip(client_addr, TXN_OP_OPCODE, &put_right)
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK, "TXN_OP put mango");
+
+        // Uncommitted intents not visible outside the txn
+        let (status, _) = roundtrip(client_addr, 2, &encode_key_payload(b"apple"))
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_NOT_FOUND);
+        let (status, _) = roundtrip(client_addr, 2, &encode_key_payload(b"mango"))
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_NOT_FOUND);
+
+        // COMMIT — must run 2PC across groups 1 and 2
+        let commit_payload = encode_txn_id_payload(txn_id);
+        let (status, body) = roundtrip(client_addr, TXN_COMMIT_OPCODE, &commit_payload)
+            .await
+            .unwrap();
+        assert_eq!(
+            status, STATUS_OK,
+            "TXN_COMMIT cross-range 2PC should succeed, body={}",
+            String::from_utf8_lossy(&body)
+        );
+        let commit_ts = decode_txn_commit_response(&body).unwrap();
+        assert!(commit_ts > 0);
+
+        // Both keys visible after commit
+        let (status, body) = roundtrip(client_addr, 2, &encode_key_payload(b"apple"))
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK, "apple after 2PC commit");
+        assert_eq!(decode_value_payload(&body).unwrap(), b"red");
+
+        let (status, body) = roundtrip(client_addr, 2, &encode_key_payload(b"mango"))
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK, "mango after 2PC commit");
+        assert_eq!(decode_value_payload(&body).unwrap(), b"yellow");
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
     /// Single-node multi-raft: two static ranges, puts route to independent groups.
     #[serial]
     #[tokio::test]

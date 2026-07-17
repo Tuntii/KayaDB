@@ -18,6 +18,7 @@ mod election;
 mod replication;
 mod snapshot;
 mod stats;
+mod txn_coord;
 
 pub use balancer::{plan_range_count, RangeMove, RebalancePlan};
 
@@ -371,9 +372,22 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     }
 
     let disk = Arc::new(FileDisk::new(engine_cfg.data_dir.clone()));
-    let engine = Engine::open(engine_cfg, disk)
+    let mut engine = Engine::open(engine_cfg, disk)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
+    // Minimal 2PC crash recovery: abort any Preparing/Prepared records left from
+    // a prior process (conservative; no durable global decision observed).
+    match txn_coord::recover_incomplete_2pc(&mut engine).await {
+        Ok(0) => {}
+        Ok(n) => eprintln!(
+            "[node {}] 2PC recovery: aborted {n} incomplete participant record(s)",
+            config.node_id.0
+        ),
+        Err(e) => eprintln!(
+            "[node {}] warning: 2PC recovery scan failed: {e}",
+            config.node_id.0
+        ),
+    }
     let shared_engine: SharedEngine = Arc::new(tokio::sync::Mutex::new(engine));
 
     // ── multi-raft host (always ≥ group 0) ────────────────────────────────────
