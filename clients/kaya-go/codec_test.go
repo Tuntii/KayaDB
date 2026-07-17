@@ -211,6 +211,125 @@ func TestEncodeDecodeClientAuthPayload(t *testing.T) {
 	}
 }
 
+func TestEncodeDecodeTxnBeginResponse(t *testing.T) {
+	cases := []struct {
+		txnID      uint64
+		snapshotTS uint64
+	}{
+		{0, 0},
+		{1, 0},
+		{7, 42},
+		{^uint64(0), 99},
+	}
+	for _, tc := range cases {
+		encoded := encodeTxnBeginResponse(tc.txnID, tc.snapshotTS)
+		id, ts, err := decodeTxnBeginResponse(encoded)
+		if err != nil {
+			t.Fatalf("decode txn begin: %v", err)
+		}
+		if id != tc.txnID || ts != tc.snapshotTS {
+			t.Fatalf("txn begin mismatch: got (%d,%d) want (%d,%d)", id, ts, tc.txnID, tc.snapshotTS)
+		}
+	}
+	if _, _, err := decodeTxnBeginResponse(nil); err == nil {
+		t.Fatal("expected error for empty txn begin")
+	}
+}
+
+func TestEncodeDecodeTxnOpPayload(t *testing.T) {
+	// GET
+	get := encodeTxnOpPayload(7, TxnOpGet, []byte("k"), nil)
+	id, op, key, val, err := decodeTxnOpPayload(get)
+	if err != nil {
+		t.Fatalf("decode get: %v", err)
+	}
+	if id != 7 || op != TxnOpGet || string(key) != "k" || val != nil {
+		t.Fatalf("get mismatch: id=%d op=%d key=%q val=%v", id, op, key, val)
+	}
+
+	// PUT
+	put := encodeTxnOpPayload(2, TxnOpPut, []byte("k"), []byte("v"))
+	id, op, key, val, err = decodeTxnOpPayload(put)
+	if err != nil {
+		t.Fatalf("decode put: %v", err)
+	}
+	if id != 2 || op != TxnOpPut || string(key) != "k" || string(val) != "v" {
+		t.Fatalf("put mismatch: id=%d op=%d key=%q val=%q", id, op, key, val)
+	}
+
+	// DELETE
+	del := encodeTxnOpPayload(3, TxnOpDelete, []byte("k"), nil)
+	id, op, key, val, err = decodeTxnOpPayload(del)
+	if err != nil {
+		t.Fatalf("decode delete: %v", err)
+	}
+	if id != 3 || op != TxnOpDelete || string(key) != "k" || val != nil {
+		t.Fatalf("delete mismatch: id=%d op=%d key=%q val=%v", id, op, key, val)
+	}
+
+	// empty key put
+	empty := encodeTxnOpPayload(1, TxnOpPut, []byte{}, []byte{})
+	id, op, key, val, err = decodeTxnOpPayload(empty)
+	if err != nil {
+		t.Fatalf("decode empty put: %v", err)
+	}
+	if id != 1 || op != TxnOpPut || len(key) != 0 || len(val) != 0 {
+		t.Fatalf("empty put mismatch")
+	}
+
+	if _, _, _, _, err := decodeTxnOpPayload(mustHex("01000000")); err == nil {
+		t.Fatal("expected error for truncated txn op")
+	}
+	// unknown op kind (op=9)
+	bad := encodeTxnOpPayload(1, 9, []byte("k"), nil)
+	if _, _, _, _, err := decodeTxnOpPayload(bad); err == nil {
+		t.Fatal("expected error for unknown txn op kind")
+	}
+}
+
+func TestEncodeDecodeTxnIDAndCommit(t *testing.T) {
+	for _, id := range []uint64{0, 1, 7, 42, ^uint64(0)} {
+		enc := encodeTxnIDPayload(id)
+		got, err := decodeTxnIDPayload(enc)
+		if err != nil {
+			t.Fatalf("decode txn id: %v", err)
+		}
+		if got != id {
+			t.Fatalf("txn id mismatch: got %d want %d", got, id)
+		}
+	}
+	if _, err := decodeTxnIDPayload(nil); err == nil {
+		t.Fatal("expected error for empty txn id")
+	}
+
+	for _, ts := range []uint64{0, 12, 99, ^uint64(0)} {
+		enc := encodeTxnCommitResponse(ts)
+		got, err := decodeTxnCommitResponse(enc)
+		if err != nil {
+			t.Fatalf("decode commit ts: %v", err)
+		}
+		if got != ts {
+			t.Fatalf("commit ts mismatch: got %d want %d", got, ts)
+		}
+	}
+	if _, err := decodeTxnCommitResponse(nil); err == nil {
+		t.Fatal("expected error for empty commit response")
+	}
+}
+
+func TestTxnOpcodesMatchWire(t *testing.T) {
+	if OpTxnBegin != 9 || OpTxnOp != 10 || OpTxnCommit != 11 || OpTxnRollback != 12 {
+		t.Fatalf("txn opcodes mismatch: begin=%d op=%d commit=%d rollback=%d",
+			OpTxnBegin, OpTxnOp, OpTxnCommit, OpTxnRollback)
+	}
+	if TxnOpGet != 1 || TxnOpPut != 2 || TxnOpDelete != 3 {
+		t.Fatalf("txn op kinds mismatch")
+	}
+	if StatusTxnConflict != 3 {
+		t.Fatalf("STATUS_TXN_CONFLICT = %d, want 3", StatusTxnConflict)
+	}
+}
+
 func TestEncodeClientFramePutHelloWorld(t *testing.T) {
 	payload := encodePutPayload([]byte("hello"), []byte("world"))
 	frame := encodeClientFrame(OpPut, payload)

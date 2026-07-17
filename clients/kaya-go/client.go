@@ -14,11 +14,13 @@ const (
 
 // KayaClient is a TCP client for the KayaDB wire protocol.
 type KayaClient struct {
-	addr          string
-	maxRedirects  int
-	timeout       time.Duration
-	conn          net.Conn
-	clientToken   *string
+	addr         string
+	maxRedirects int
+	timeout      time.Duration
+	conn         net.Conn
+	clientToken  *string
+	retry        RetryPolicy
+	backoffSeed  uint64
 }
 
 // Connect creates a client targeting addr (host:port). The TCP connection is
@@ -31,10 +33,13 @@ func Connect(addr string) (*KayaClient, error) {
 		addr:         addr,
 		maxRedirects: defaultMaxRedirects,
 		timeout:      defaultTimeout,
+		retry:        DefaultRetryPolicy(),
+		backoffSeed:  seedFromAddr(addr),
 	}, nil
 }
 
-// SetClientToken sets the token sent with data-path operations (PUT/GET/DELETE/SCAN/STATS).
+// SetClientToken sets the token sent with data-path operations
+// (PUT/GET/DELETE/SCAN/STATS/TXN_*/CDC).
 func (c *KayaClient) SetClientToken(token string) {
 	if token == "" {
 		c.clientToken = nil
@@ -43,7 +48,8 @@ func (c *KayaClient) SetClientToken(token string) {
 	c.clientToken = &token
 }
 
-// SetTimeout configures per-operation read/write deadlines.
+// SetTimeout configures the fallback per-operation read/write deadline when
+// RetryPolicy.RequestTimeout is zero.
 func (c *KayaClient) SetTimeout(d time.Duration) {
 	c.timeout = d
 }
@@ -51,6 +57,20 @@ func (c *KayaClient) SetTimeout(d time.Duration) {
 // SetMaxRedirects configures how many NOT_LEADER redirects to follow.
 func (c *KayaClient) SetMaxRedirects(n int) {
 	c.maxRedirects = n
+}
+
+// SetRetryPolicy replaces the transport retry policy (attempts, backoff, jitter,
+// per-attempt timeout). Leader redirects keep their own budget via SetMaxRedirects.
+func (c *KayaClient) SetRetryPolicy(p RetryPolicy) {
+	if p.MaxAttempts < 1 {
+		p.MaxAttempts = 1
+	}
+	c.retry = p
+}
+
+// RetryPolicy returns a copy of the current retry policy.
+func (c *KayaClient) RetryPolicy() RetryPolicy {
+	return c.retry
 }
 
 // Addr returns the current target address (updated after leader redirects).
@@ -70,15 +90,28 @@ func (c *KayaClient) Close() error {
 
 func (c *KayaClient) wirePayload(opcode uint8, payload []byte) []byte {
 	switch opcode {
-	case OpPut, OpGet, OpDelete, OpScan, OpStats, OpCdcPoll, OpCdcCheckpoint:
+	case OpPut, OpGet, OpDelete, OpScan, OpStats,
+		OpTxnBegin, OpTxnOp, OpTxnCommit, OpTxnRollback,
+		OpCdcPoll, OpCdcCheckpoint:
 		return encodeClientAuthPayload(payload, c.clientToken)
 	default:
 		return payload
 	}
 }
 
+func (c *KayaClient) attemptTimeout() time.Duration {
+	if c.retry.RequestTimeout > 0 {
+		return c.retry.RequestTimeout
+	}
+	return c.timeout
+}
+
 func (c *KayaClient) dial(ctx context.Context) (net.Conn, error) {
-	d := net.Dialer{Timeout: c.timeout}
+	timeout := c.attemptTimeout()
+	d := net.Dialer{}
+	if timeout > 0 {
+		d.Timeout = timeout
+	}
 	conn, err := d.DialContext(ctx, "tcp", c.addr)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrConnection, err)
@@ -105,56 +138,111 @@ func (c *KayaClient) closeConn() {
 	}
 }
 
+// oneRoundtrip performs a single request/response on the current connection.
+func (c *KayaClient) oneRoundtrip(ctx context.Context, opcode uint8, wirePayload []byte) (uint16, []byte, error) {
+	if err := c.ensureConn(ctx); err != nil {
+		return 0, nil, err
+	}
+
+	timeout := c.attemptTimeout()
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+		_ = c.conn.SetWriteDeadline(deadline)
+	} else {
+		_ = c.conn.SetWriteDeadline(time.Time{})
+	}
+	// Also respect parent context deadline when tighter.
+	if dl, ok := ctx.Deadline(); ok && (deadline.IsZero() || dl.Before(deadline)) {
+		_ = c.conn.SetWriteDeadline(dl)
+		deadline = dl
+	}
+
+	frame := encodeClientFrame(opcode, wirePayload)
+	if _, err := c.conn.Write(frame); err != nil {
+		c.closeConn()
+		return 0, nil, fmt.Errorf("%w: %v", ErrConnection, err)
+	}
+
+	if !deadline.IsZero() {
+		_ = c.conn.SetReadDeadline(deadline)
+	} else {
+		_ = c.conn.SetReadDeadline(time.Time{})
+	}
+	status, body, err := readResponse(c.conn)
+	if err != nil {
+		c.closeConn()
+		// Classify deadline as timeout when possible.
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			return 0, nil, ErrTimeout
+		}
+		return 0, nil, fmt.Errorf("%w: %v", ErrConnection, err)
+	}
+	return status, body, nil
+}
+
 func (c *KayaClient) roundtripWithRedirect(ctx context.Context, opcode uint8, payload []byte) (uint16, []byte, error) {
 	wirePayload := c.wirePayload(opcode, payload)
-	var lastErr error
+	maxAttempts := c.retry.MaxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
 
-	for attempt := 0; attempt <= c.maxRedirects; attempt++ {
+	var lastErr error
+	transportAttempts := 0
+	redirects := 0
+
+	for {
 		if err := ctx.Err(); err != nil {
 			return 0, nil, err
 		}
 
-		if err := c.ensureConn(ctx); err != nil {
-			lastErr = err
-			continue
-		}
-
-		deadline := time.Now().Add(c.timeout)
-		_ = c.conn.SetWriteDeadline(deadline)
-		frame := encodeClientFrame(opcode, wirePayload)
-		if _, err := c.conn.Write(frame); err != nil {
-			c.closeConn()
-			lastErr = fmt.Errorf("%w: %v", ErrConnection, err)
-			continue
-		}
-
-		_ = c.conn.SetReadDeadline(deadline)
-		status, body, err := readResponse(c.conn)
+		status, body, err := c.oneRoundtrip(ctx, opcode, wirePayload)
 		if err != nil {
 			c.closeConn()
+			transportAttempts++
 			lastErr = err
+			if transportAttempts >= maxAttempts {
+				return 0, nil, lastErr
+			}
+			backoff := c.retry.Backoff(uint32(transportAttempts-1), &c.backoffSeed)
+			if backoff > 0 {
+				timer := time.NewTimer(backoff)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return 0, nil, ctx.Err()
+				case <-timer.C:
+				}
+			}
 			continue
 		}
 
 		if status == StatusNotLeader {
+			c.closeConn()
+			if redirects >= c.maxRedirects {
+				return status, body, nil
+			}
 			hint := string(body)
 			if hint != "" {
 				c.addr = hint
-				c.closeConn()
-				continue
 			}
-			c.closeConn()
-			lastErr = ErrNotLeader
+			backoff := c.retry.Backoff(uint32(redirects), &c.backoffSeed)
+			redirects++
+			if backoff > 0 {
+				timer := time.NewTimer(backoff)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return 0, nil, ctx.Err()
+				case <-timer.C:
+				}
+			}
 			continue
 		}
 
 		return status, body, nil
 	}
-
-	if lastErr != nil {
-		return 0, nil, lastErr
-	}
-	return 0, nil, ErrTimeout
 }
 
 func handleStatus(status uint16, body []byte) error {
@@ -163,6 +251,8 @@ func handleStatus(status uint16, body []byte) error {
 		return nil
 	case StatusNotFound:
 		return ErrNotFound
+	case StatusTxnConflict:
+		return ErrTxnConflict
 	case StatusInvalidArgument:
 		msg, _ := decodeErrorPayload(body)
 		if msg == "" {

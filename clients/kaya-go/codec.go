@@ -16,8 +16,16 @@ const (
 	OpScan          uint8 = 4
 	OpHealth        uint8 = 5
 	OpStats         uint8 = 6
+	OpTxnBegin      uint8 = 9
+	OpTxnOp         uint8 = 10
+	OpTxnCommit     uint8 = 11
+	OpTxnRollback   uint8 = 12
 	OpCdcPoll       uint8 = 13
 	OpCdcCheckpoint uint8 = 14
+
+	TxnOpGet    uint8 = 1
+	TxnOpPut    uint8 = 2
+	TxnOpDelete uint8 = 3
 
 	CdcEventPut    uint8 = 1
 	CdcEventDelete uint8 = 2
@@ -25,8 +33,10 @@ const (
 	StatusOK              uint16 = 0
 	StatusInvalidArgument uint16 = 1
 	StatusNotFound        uint16 = 2
+	StatusTxnConflict     uint16 = 3
 	StatusServerError     uint16 = 9
 	StatusNotLeader       uint16 = 10
+	StatusRangeMoved      uint16 = 11
 )
 
 // CdcEvent is a single changefeed record from CDC_POLL.
@@ -194,6 +204,107 @@ func decodeErrorPayload(data []byte) (string, error) {
 		return "", fmt.Errorf("invalid UTF-8 in error payload")
 	}
 	return string(msgBytes), nil
+}
+
+// encodeTxnBeginResponse encodes TXN_BEGIN OK: txn_id(u64) | snapshot_ts(u64).
+func encodeTxnBeginResponse(txnID, snapshotTS uint64) []byte {
+	buf := make([]byte, 16)
+	binary.LittleEndian.PutUint64(buf[0:8], txnID)
+	binary.LittleEndian.PutUint64(buf[8:16], snapshotTS)
+	return buf
+}
+
+// decodeTxnBeginResponse decodes TXN_BEGIN OK body.
+func decodeTxnBeginResponse(data []byte) (txnID, snapshotTS uint64, err error) {
+	if len(data) < 16 {
+		return 0, 0, fmt.Errorf("truncated txn begin response")
+	}
+	txnID = binary.LittleEndian.Uint64(data[0:8])
+	snapshotTS = binary.LittleEndian.Uint64(data[8:16])
+	return txnID, snapshotTS, nil
+}
+
+// encodeTxnOpPayload encodes TXN_OP:
+// txn_id(u64) | op(u8) | key_len(u32) | key | [value_len(u32) | value for put].
+func encodeTxnOpPayload(txnID uint64, op uint8, key, value []byte) []byte {
+	size := 8 + 1 + 4 + len(key)
+	if op == TxnOpPut {
+		size += 4 + len(value)
+	}
+	buf := make([]byte, size)
+	binary.LittleEndian.PutUint64(buf[0:8], txnID)
+	buf[8] = op
+	binary.LittleEndian.PutUint32(buf[9:13], uint32(len(key)))
+	copy(buf[13:], key)
+	if op == TxnOpPut {
+		off := 13 + len(key)
+		binary.LittleEndian.PutUint32(buf[off:off+4], uint32(len(value)))
+		copy(buf[off+4:], value)
+	}
+	return buf
+}
+
+// decodeTxnOpPayload decodes a TXN_OP request body.
+func decodeTxnOpPayload(data []byte) (txnID uint64, op uint8, key, value []byte, err error) {
+	if len(data) < 8+1+4 {
+		return 0, 0, nil, nil, fmt.Errorf("truncated txn op payload")
+	}
+	txnID = binary.LittleEndian.Uint64(data[0:8])
+	op = data[8]
+	keyLen := binary.LittleEndian.Uint32(data[9:13])
+	cur := data[13:]
+	if len(cur) < int(keyLen) {
+		return 0, 0, nil, nil, fmt.Errorf("truncated txn op key")
+	}
+	key = append([]byte(nil), cur[:keyLen]...)
+	cur = cur[keyLen:]
+	switch op {
+	case TxnOpPut:
+		if len(cur) < 4 {
+			return 0, 0, nil, nil, fmt.Errorf("truncated txn op value len")
+		}
+		valueLen := binary.LittleEndian.Uint32(cur[0:4])
+		cur = cur[4:]
+		if len(cur) < int(valueLen) {
+			return 0, 0, nil, nil, fmt.Errorf("truncated txn op value")
+		}
+		value = append([]byte(nil), cur[:valueLen]...)
+	case TxnOpGet, TxnOpDelete:
+		// no value
+	default:
+		return 0, 0, nil, nil, fmt.Errorf("unknown TXN_OP kind: %d", op)
+	}
+	return txnID, op, key, value, nil
+}
+
+// encodeTxnIDPayload encodes TXN_COMMIT / TXN_ROLLBACK: txn_id(u64).
+func encodeTxnIDPayload(txnID uint64) []byte {
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, txnID)
+	return buf
+}
+
+// decodeTxnIDPayload decodes a txn_id body.
+func decodeTxnIDPayload(data []byte) (uint64, error) {
+	if len(data) < 8 {
+		return 0, fmt.Errorf("truncated txn id payload")
+	}
+	return binary.LittleEndian.Uint64(data[0:8]), nil
+}
+
+// encodeTxnCommitResponse encodes TXN_COMMIT OK: commit_ts(u64).
+func encodeTxnCommitResponse(commitTS uint64) []byte {
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, commitTS)
+	return buf
+}
+
+// decodeTxnCommitResponse decodes TXN_COMMIT OK body.
+func decodeTxnCommitResponse(data []byte) (uint64, error) {
+	if len(data) < 8 {
+		return 0, fmt.Errorf("truncated txn commit response")
+	}
+	return binary.LittleEndian.Uint64(data[0:8]), nil
 }
 
 func encodeCdcPollRequest(consumerID string, fromSeq uint64, limit uint32) []byte {
