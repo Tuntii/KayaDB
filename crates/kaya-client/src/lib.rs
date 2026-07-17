@@ -4,13 +4,16 @@ pub use retry::{ClientObserver, OpObservation, OpOutcome, RetryPolicy, SharedObs
 
 use kaya_core::{KayaError, Result};
 use kaya_net::{
-    decode_error_payload, decode_hello_response, decode_scan_response, decode_txn_begin_response,
-    decode_txn_commit_response, decode_value_payload, encode_client_auth_payload,
-    encode_hello_request, encode_key_payload, encode_put_payload, encode_scan_payload,
-    encode_txn_id_payload, encode_txn_op_payload, request_on_stream, HELLO_OPCODE, PROTO_VERSION,
-    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK, STATUS_TXN_CONFLICT,
-    TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT,
-    TXN_ROLLBACK_OPCODE,
+    decode_cdc_poll_response, decode_error_payload, decode_hello_response,
+    decode_list_ranges_response, decode_scan_response, decode_txn_begin_response,
+    decode_txn_commit_response, decode_value_payload, encode_cdc_checkpoint_request,
+    encode_cdc_poll_request, encode_client_auth_payload, encode_hello_request, encode_key_payload,
+    encode_put_payload, encode_scan_payload, encode_split_range_request, encode_txn_id_payload,
+    encode_txn_op_payload, request_on_stream, CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE,
+    CDC_EVENT_PUT, CDC_POLL_OPCODE, HELLO_OPCODE, LIST_RANGES_OPCODE, PROTO_VERSION,
+    SPLIT_RANGE_OPCODE, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
+    STATUS_RANGE_MOVED, STATUS_TXN_CONFLICT, TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_DELETE,
+    TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
 };
 
 #[cfg(feature = "tls")]
@@ -41,10 +44,43 @@ pub struct KayaClient {
     /// op). Invalidated on error or leader redirect.
     conn: Option<TcpStream>,
     conn_addr: Option<SocketAddr>,
+    /// Cached range table meta epoch + descriptors (M21 client range cache).
+    range_cache: Option<RangeCache>,
     #[cfg(feature = "trace")]
     trace: Option<LinearizabilityChecker>,
     #[cfg(feature = "tls")]
     tls_config: Option<TlsConfig>,
+}
+
+/// One cached range descriptor from LIST_RANGES.
+#[derive(Debug, Clone)]
+pub struct CachedRange {
+    pub range_id: u64,
+    pub epoch: u64,
+    pub group_id: u64,
+    pub start_key: Vec<u8>,
+    pub end_key: Vec<u8>,
+}
+
+/// Client-side range cache for RANGE_MOVED retries (M21).
+#[derive(Debug, Clone)]
+pub struct RangeCache {
+    pub meta_epoch: u64,
+    pub ranges: Vec<CachedRange>,
+}
+
+impl RangeCache {
+    pub fn lookup_group(&self, key: &[u8]) -> Option<u64> {
+        for r in &self.ranges {
+            if key < r.start_key.as_slice() {
+                continue;
+            }
+            if r.end_key.is_empty() || key < r.end_key.as_slice() {
+                return Some(r.group_id);
+            }
+        }
+        None
+    }
 }
 
 /// Snapshot Isolation transaction handle.
@@ -72,6 +108,7 @@ impl KayaClient {
             backoff_seed: seed_from_addr(addr),
             conn: None,
             conn_addr: None,
+            range_cache: None,
             #[cfg(feature = "trace")]
             trace: None,
             #[cfg(feature = "tls")]
@@ -90,6 +127,7 @@ impl KayaClient {
             backoff_seed: seed_from_addr(addr),
             conn: None,
             conn_addr: None,
+            range_cache: None,
             #[cfg(feature = "trace")]
             trace: None,
             tls_config: Some(tls_config),
@@ -173,11 +211,121 @@ impl KayaClient {
     }
 
     fn wire_payload(&self, opcode: u8, payload: &[u8]) -> Vec<u8> {
-        // Data-path + TXN opcodes may carry an optional client token prefix.
-        if matches!(opcode, 1..=4 | 6 | 9..=12) {
+        // Data-path + TXN + CDC + range opcodes may carry an optional client token prefix.
+        if matches!(opcode, 1..=4 | 6 | 9..=16) {
             encode_client_auth_payload(payload, self.client_token.as_deref())
         } else {
             payload.to_vec()
+        }
+    }
+
+    /// Fetch the meta range table and refresh the local range cache.
+    pub async fn list_ranges(&mut self) -> Result<RangeCache> {
+        let (status, body) = self.send_with_retry(LIST_RANGES_OPCODE, &[]).await?;
+        if status == STATUS_OK {
+            let (meta_epoch, ranges) =
+                decode_list_ranges_response(&body).map_err(KayaError::corruption)?;
+            let cache = RangeCache {
+                meta_epoch,
+                ranges: ranges
+                    .into_iter()
+                    .map(|(range_id, epoch, group_id, start_key, end_key)| CachedRange {
+                        range_id,
+                        epoch,
+                        group_id,
+                        start_key,
+                        end_key,
+                    })
+                    .collect(),
+            };
+            self.range_cache = Some(cache.clone());
+            Ok(cache)
+        } else if status == STATUS_INVALID_ARGUMENT {
+            let msg =
+                decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            Err(KayaError::invalid_argument(msg))
+        } else {
+            let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
+            Err(KayaError::internal(msg))
+        }
+    }
+
+    /// Split the range containing `split_key` (leader of group 0). Refreshes range cache.
+    pub async fn split_range(&mut self, split_key: &[u8]) -> Result<RangeCache> {
+        let payload = encode_split_range_request(split_key);
+        let (status, body) = self.send_with_retry(SPLIT_RANGE_OPCODE, &payload).await?;
+        if status == STATUS_OK {
+            // Response is the two half descriptors; refresh full table for cache.
+            let _ = decode_list_ranges_response(&body).map_err(KayaError::corruption)?;
+            self.list_ranges().await
+        } else if status == STATUS_INVALID_ARGUMENT {
+            let msg =
+                decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            Err(KayaError::invalid_argument(msg))
+        } else if status == STATUS_RANGE_MOVED {
+            // Stale view — refresh and surface.
+            let _ = self.list_ranges().await;
+            Err(KayaError::invalid_argument(
+                "range moved during split; cache refreshed",
+            ))
+        } else {
+            let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
+            Err(KayaError::internal(msg))
+        }
+    }
+
+    /// Current range cache (if previously listed / refreshed).
+    pub fn range_cache(&self) -> Option<&RangeCache> {
+        self.range_cache.as_ref()
+    }
+
+    /// Poll changefeed events after `from_seq` (at-least-once), up to `limit`.
+    ///
+    /// Events are produced on the Raft apply path (Put/Delete/TxnCommit). Returns
+    /// `(seq, is_put, key, value)` — `value` is `Some` for puts.
+    pub async fn cdc_poll(
+        &mut self,
+        consumer_id: &str,
+        from_seq: u64,
+        limit: u32,
+    ) -> Result<Vec<(u64, bool, Vec<u8>, Option<Vec<u8>>)>> {
+        let payload = encode_cdc_poll_request(consumer_id, from_seq, limit);
+        let (status, body) = self.send_with_retry(CDC_POLL_OPCODE, &payload).await?;
+        if status == STATUS_OK {
+            let events = decode_cdc_poll_response(&body).map_err(KayaError::corruption)?;
+            Ok(events
+                .into_iter()
+                .map(|(seq, op, key, value)| {
+                    let is_put = op == CDC_EVENT_PUT;
+                    debug_assert!(is_put || op == CDC_EVENT_DELETE);
+                    (seq, is_put, key, value)
+                })
+                .collect())
+        } else if status == STATUS_INVALID_ARGUMENT {
+            let msg =
+                decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            Err(KayaError::invalid_argument(msg))
+        } else {
+            let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
+            Err(KayaError::internal(msg))
+        }
+    }
+
+    /// Persist the consumer's last polled CDC sequence on the leader.
+    pub async fn cdc_checkpoint(&mut self, consumer_id: &str) -> Result<()> {
+        let payload = encode_cdc_checkpoint_request(consumer_id);
+        let (status, body) = self
+            .send_with_retry(CDC_CHECKPOINT_OPCODE, &payload)
+            .await?;
+        if status == STATUS_OK {
+            Ok(())
+        } else if status == STATUS_INVALID_ARGUMENT {
+            let msg =
+                decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            Err(KayaError::invalid_argument(msg))
+        } else {
+            let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
+            Err(KayaError::internal(msg))
         }
     }
 

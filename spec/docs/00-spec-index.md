@@ -37,6 +37,7 @@ KayaDB'nin ana tezi:
 | secondary-index-spec.md | Secondary indexes over primary KV (M18 foundation) | P1 |
 | cdc-spec.md | CDC / changefeeds foundation (M19) | P1 |
 | multi-raft-spec.md | Multi-raft host, static ranges, HLC (M20 foundation) | P1 |
+| range-routing-spec.md | Range meta table, splits, RANGE_MOVED (M21) | P1 |
 | `manifest-spec.md` | Manifest record format and publication rules | P1 |
 | `simulation-spec.md` | Seeded simulator, nemesis, trace replay | P1 |
 | `cli-ux-spec.md` | `kayactl` command UX and inspect outputs | P1 |

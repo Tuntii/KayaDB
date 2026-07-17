@@ -1592,16 +1592,8 @@ mod tests {
         let client_addr: SocketAddr = format!("127.0.0.1:{}", c).parse().unwrap();
 
         let ranges = vec![
-            StaticRange {
-                start_key: b"a".to_vec(),
-                end_key: b"m".to_vec(),
-                group_id: GroupId(1),
-            },
-            StaticRange {
-                start_key: b"m".to_vec(),
-                end_key: b"z".to_vec(),
-                group_id: GroupId(2),
-            },
+            StaticRange::new(b"a".to_vec(), b"m".to_vec(), GroupId(1)),
+            StaticRange::new(b"m".to_vec(), b"z".to_vec(), GroupId(2)),
         ];
         let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![])
             .with_static_ranges(ranges);
@@ -1663,6 +1655,109 @@ mod tests {
                 || data_dir.join("groups").is_dir(),
             "expected groups/ directory for multi-raft layout"
         );
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// M21: split under load loses no writes; LIST_RANGES reflects meta epoch.
+    #[serial]
+    #[tokio::test]
+    async fn test_range_split_no_lost_writes() {
+        use kaya_net::{
+            decode_list_ranges_response, encode_split_range_request, LIST_RANGES_OPCODE,
+            SPLIT_RANGE_OPCODE,
+        };
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_range_split_{}", test_id));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let r = get_free_port().await;
+        let c = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{}", r).parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{}", c).parse().unwrap();
+
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![]);
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "node should elect");
+
+        for i in 0..20u8 {
+            let key = format!("k{i:02}");
+            let put = encode_put_payload(key.as_bytes(), b"pre");
+            let (status, _) = roundtrip(client_addr, 1, &put).await.unwrap();
+            assert_eq!(status, STATUS_OK, "pre-split put {key}");
+        }
+
+        let (status, body) = roundtrip(
+            client_addr,
+            SPLIT_RANGE_OPCODE,
+            &encode_split_range_request(b"k10"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, STATUS_OK, "split should succeed");
+        let (meta_epoch, halves) = decode_list_ranges_response(&body).unwrap();
+        assert!(meta_epoch >= 1);
+        assert_eq!(halves.len(), 2);
+
+        // New group may need a moment to elect on single-node.
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                break;
+            }
+        }
+
+        for i in 0..20u8 {
+            let key = format!("k{i:02}");
+            let put = encode_put_payload(key.as_bytes(), b"post");
+            let mut ok = false;
+            for _ in 0..20 {
+                let (status, _) = roundtrip(client_addr, 1, &put).await.unwrap();
+                if status == STATUS_OK {
+                    ok = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+            assert!(ok, "post-split put {key}");
+        }
+
+        for i in 0..20u8 {
+            let key = format!("k{i:02}");
+            let (status, body) = roundtrip(client_addr, 2, &encode_key_payload(key.as_bytes()))
+                .await
+                .unwrap();
+            assert_eq!(status, STATUS_OK, "get {key}");
+            assert_eq!(
+                decode_value_payload(&body).unwrap(),
+                b"post",
+                "value for {key}"
+            );
+        }
+
+        let (status, body) = roundtrip(client_addr, LIST_RANGES_OPCODE, &[])
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK);
+        let (epoch2, ranges) = decode_list_ranges_response(&body).unwrap();
+        assert!(epoch2 >= meta_epoch);
+        assert!(ranges.len() >= 2);
 
         handle.abort();
         let _ = std::fs::remove_dir_all(&data_dir);

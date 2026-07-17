@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (M21 — Range metadata, routing & splits)
+- Epoch’d range descriptors + `StaticRangeTable::split_at` / meta_epoch (shared-engine routing split)
+- Runtime Raft group hosting on split (`ensure_group_hosted`)
+- Wire: `LIST_RANGES` (15), `SPLIT_RANGE` (16), `STATUS_RANGE_MOVED` (11)
+- Rust client: `list_ranges` / `split_range` + `RangeCache`
+- `kayactl --server … range list|split`
+- IT: `test_range_split_no_lost_writes`
+- Spec: `spec/docs/range-routing-spec.md`
+
+### Added (M18/M19 polish)
+- **Secondary indexes polish:** field extractors (`WholeValue` / `Prefix` / `Field`), meta v2, online backfill pause/resume/step, `verify_index` divergence gate, chaos churn test, `kayactl index create|list|drop|scan|verify|backfill`
+- **CDC polish:** `cdc_compact` (rewrite log below min consumer seq), backup watermark file + `kayactl backup --cdc-consumer`, crash/reopen failover continuity test
+- **CDC wire:** opcodes 13 (`CDC_POLL`) / 14 (`CDC_CHECKPOINT`); Rust `KayaClient` + Go `CdcPoll`/`CdcCheckpoint`; conformance vectors v2
+- Specs updated: `spec/docs/secondary-index-spec.md`, `spec/docs/cdc-spec.md`
+
 ### Added (M16–M20 production path close-out)
 - **Atomic multi-key SI commit:** `RaftCommand::TxnCommit` (type 4) — single Raft log entry; `txn_take_commit` + `Engine::apply_mutations`; no sequential N Put/Delete proposes
 - **HLC commit timestamps:** `EngineConfig.use_hlc` + `WalWriter::ensure_min_sequence`; multi-group ClusterNode auto-enables HLC

@@ -19,7 +19,10 @@ pub use message::{
     AppendRequest, AppendResponse, ConfigChangeRequest, ConfigChangeResponse, Envelope,
     InstallSnapshotRequest, InstallSnapshotResponse, Message, VoteRequest, VoteResponse,
 };
-pub use multi_raft::{multi_raft_group_dir, GroupId, MultiRaftHost, StaticRange, StaticRangeTable};
+pub use multi_raft::{
+    multi_raft_group_dir, GroupId, MultiRaftHost, RangeDescriptor, RangeTable, StaticRange,
+    StaticRangeTable,
+};
 pub use node::{RaftConfig, RaftNode, RaftStatus, Role};
 pub use storage::{
     decode_hard_state, decode_log_file, default_hard_state, encode_hard_state, encode_log_file,

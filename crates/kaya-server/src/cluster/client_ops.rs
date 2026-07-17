@@ -13,17 +13,33 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use kaya_engine::{ReadOptions, ScanOptions};
+use std::path::PathBuf;
+
+use kaya_engine::CdcOp;
 use kaya_net::{
-    decode_hello_request, decode_key_payload, decode_member_payload, decode_put_payload,
-    decode_remove_member_payload, decode_scan_payload, decode_txn_id_payload,
-    decode_txn_op_payload, encode_error_payload, encode_hello_response, encode_scan_response,
+    decode_cdc_checkpoint_request, decode_cdc_poll_request, decode_hello_request,
+    decode_key_payload, decode_member_payload, decode_put_payload, decode_remove_member_payload,
+    decode_scan_payload, decode_split_range_request, decode_txn_id_payload, decode_txn_op_payload,
+    encode_cdc_poll_response, encode_error_payload, encode_hello_response,
+    encode_list_ranges_response, encode_range_moved_payload, encode_scan_response,
     encode_txn_begin_response, encode_txn_commit_response, encode_value_payload, read_client_frame,
-    send_envelopes, write_client_response, NodeRoster, PROTO_VERSION, STATUS_ERROR,
-    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK, STATUS_TXN_CONFLICT,
-    TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT,
-    TXN_ROLLBACK_OPCODE,
+    send_envelopes, write_client_response, NodeRoster, LIST_RANGES_OPCODE, PROTO_VERSION,
+    SPLIT_RANGE_OPCODE, STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER,
+    STATUS_OK, STATUS_RANGE_MOVED, STATUS_TXN_CONFLICT, CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE,
+    CDC_EVENT_PUT, CDC_POLL_OPCODE, TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET,
+    TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
 };
-use kaya_raft::{ClusterMember, GroupId, NodeId, StaticRangeTable};
+use kaya_raft::{
+    multi_raft_group_dir, ClusterMember, GroupId, NodeId, RaftConfig, RaftNode, StaticRangeTable,
+};
+use tokio::sync::RwLock;
+
+use crate::apply_index::RaftApplyIndex;
+use crate::raft_persister::RaftPersister;
+use super::{
+    SharedApplyIndexes, SharedEngine, SharedPending, SharedPendingReads, SharedPersisters,
+    SharedRaftHost,
+};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
@@ -36,9 +52,23 @@ use crate::operator_auth::{
 };
 
 use super::stats::build_stats_response;
-use super::{SharedEngine, SharedPending, SharedPendingReads, SharedRaftHost};
 
 type SharedAuditLog = Option<Arc<AuditLog>>;
+/// Mutable range / meta table (M21).
+pub(crate) type SharedRangeTable = Arc<RwLock<StaticRangeTable>>;
+
+/// Context needed to create Raft groups at runtime during splits.
+#[derive(Clone)]
+pub(crate) struct SplitRuntime {
+    pub raft: SharedRaftHost,
+    pub persisters: SharedPersisters,
+    pub apply_indexes: SharedApplyIndexes,
+    pub data_dir: PathBuf,
+    pub node_id: NodeId,
+    pub peers: Vec<NodeId>,
+    pub election_timeout_ticks: u64,
+    pub heartbeat_interval_ticks: u64,
+}
 
 struct DispatchOutcome {
     status: u16,
@@ -86,7 +116,8 @@ pub(crate) async fn client_accept_loop(
     read_propose_tx: mpsc::Sender<ReadIndexReq>,
     next_read_req_id: Arc<AtomicU64>,
     roster: SharedRoster,
-    range_table: Arc<StaticRangeTable>,
+    range_table: SharedRangeTable,
+    split_rt: SplitRuntime,
     self_id: NodeId,
     self_raft: SocketAddr,
     self_client: SocketAddr,
@@ -123,6 +154,7 @@ pub(crate) async fn client_accept_loop(
         let next_id = next_read_req_id.clone();
         let ros = roster.clone();
         let ranges = range_table.clone();
+        let split = split_rt.clone();
         let op_tok = operator_token.clone();
         let cli_tok = client_token.clone();
         let audit = audit_log.clone();
@@ -140,6 +172,7 @@ pub(crate) async fn client_accept_loop(
                 next_id,
                 ros,
                 ranges,
+                split,
                 self_id,
                 self_raft,
                 self_client,
@@ -164,7 +197,8 @@ async fn handle_connection<S>(
     read_propose_tx: mpsc::Sender<ReadIndexReq>,
     next_read_req_id: Arc<AtomicU64>,
     roster: SharedRoster,
-    range_table: Arc<StaticRangeTable>,
+    range_table: SharedRangeTable,
+    split_rt: SplitRuntime,
     self_id: NodeId,
     self_raft: SocketAddr,
     self_client: SocketAddr,
@@ -184,6 +218,7 @@ async fn handle_connection<S>(
             &engine,
             &roster,
             &range_table,
+            &split_rt,
             &propose_tx,
             &read_propose_tx,
             &next_read_req_id,
@@ -241,12 +276,60 @@ fn is_leader_of(raft: &SharedRaftHost, group_id: GroupId) -> bool {
     raft.lock().unwrap().is_leader_of(group_id)
 }
 
+/// Ensure a Raft group exists on this host (create empty node + persist paths).
+fn ensure_group_hosted(rt: &SplitRuntime, group_id: GroupId) -> Result<(), String> {
+    {
+        let host = rt.raft.lock().unwrap();
+        if host.get(group_id).is_some() {
+            return Ok(());
+        }
+    }
+    let group_dir = multi_raft_group_dir(&rt.data_dir, group_id);
+    if group_id.0 != 0 {
+        std::fs::create_dir_all(&group_dir).map_err(|e| e.to_string())?;
+    }
+    let raft_cfg = RaftConfig {
+        id: rt.node_id,
+        peers: rt.peers.clone(),
+        election_timeout_ticks: rt.election_timeout_ticks,
+        heartbeat_interval_ticks: rt.heartbeat_interval_ticks,
+    };
+    let mut persister = RaftPersister::open(&group_dir).map_err(|e| e.to_string())?;
+    let apply = RaftApplyIndex::open(&group_dir).map_err(|e| e.to_string())?;
+    let node = match persister.load_state()? {
+        Some(state) => {
+            let seed = state.clone();
+            let mut n = RaftNode::recover(raft_cfg, state);
+            n.set_recovered_apply_floor(kaya_raft::LogIndex(0));
+            persister.seed_last_persisted(seed);
+            n
+        }
+        None => RaftNode::new(raft_cfg),
+    };
+    {
+        let mut host = rt.raft.lock().unwrap();
+        if host.get(group_id).is_none() {
+            host.insert(group_id, node);
+        }
+    }
+    {
+        let mut p = rt.persisters.lock().unwrap();
+        p.entry(group_id.0).or_insert(persister);
+    }
+    {
+        let mut a = rt.apply_indexes.lock().unwrap();
+        a.entry(group_id.0).or_insert(apply);
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch(
     raft: &SharedRaftHost,
     engine: &SharedEngine,
     roster: &SharedRoster,
-    range_table: &StaticRangeTable,
+    range_table: &SharedRangeTable,
+    split_rt: &SplitRuntime,
     propose_tx: &mpsc::Sender<ProposeReq>,
     read_propose_tx: &mpsc::Sender<ReadIndexReq>,
     next_read_req_id: &Arc<AtomicU64>,
@@ -385,9 +468,10 @@ async fn dispatch(
         }
     }
 
-    // Data-path opcodes 1-4, 6 (STATS), and 9-12 (TXN) with optional client token
+    // Data-path opcodes 1-4, 6 (STATS), 9-16 (TXN/CDC/ranges) with optional client token
     // enforcement. HEALTH (5) stays open for liveness probes.
-    let payload = if matches!(opcode, 1..=4 | 6 | 9..=12) {
+    // SPLIT_RANGE (16) also accepts operator token via admin path when configured.
+    let payload = if matches!(opcode, 1..=4 | 6 | 9..=16) {
         let (clean_payload, presented) = if payload.len() >= CLIENT_AUTH_PREFIX.len()
             && payload.starts_with(CLIENT_AUTH_PREFIX)
         {
@@ -427,7 +511,29 @@ async fn dispatch(
         1 => match decode_put_payload(&payload) {
             Ok((key, value)) => {
                 let key_len = key.len();
-                let group_id = lookup_group(range_table, &key);
+                let group_id = {
+                    let t = range_table.read().await;
+                    lookup_group(&t, &key)
+                };
+                // If the group is missing (race after split), signal RANGE_MOVED.
+                if raft.lock().unwrap().get(group_id).is_none() {
+                    let t = range_table.read().await;
+                    if let Some(r) = t.lookup_range(&key) {
+                        return outcome(
+                            STATUS_RANGE_MOVED,
+                            encode_range_moved_payload(
+                                t.meta_epoch(),
+                                r.range_id,
+                                r.epoch,
+                                r.group_id.0,
+                                &r.start_key,
+                                &r.end_key,
+                            ),
+                            client_auth,
+                            Some(key_len),
+                        );
+                    }
+                }
                 let cmd = RaftCommand::Put { key, value }.encode();
                 let (status, body) =
                     propose_and_wait(raft, &roster_snapshot, propose_tx, group_id, cmd).await;
@@ -444,7 +550,10 @@ async fn dispatch(
         // GET
         2 => match decode_key_payload(&payload) {
             Ok(key) => {
-                let group_id = lookup_group(range_table, &key);
+                let group_id = {
+                    let t = range_table.read().await;
+                    lookup_group(&t, &key)
+                };
                 let req_id = next_read_req_id.fetch_add(1, Ordering::SeqCst);
                 match propose_read_and_wait(raft, read_propose_tx, group_id, req_id).await {
                     Ok(()) => match engine.lock().await.get(&key, ReadOptions::default()).await {
@@ -478,7 +587,10 @@ async fn dispatch(
         3 => match decode_key_payload(&payload) {
             Ok(key) => {
                 let key_len = key.len();
-                let group_id = lookup_group(range_table, &key);
+                let group_id = {
+                    let t = range_table.read().await;
+                    lookup_group(&t, &key)
+                };
                 let cmd = RaftCommand::Delete { key }.encode();
                 let (status, body) =
                     propose_and_wait(raft, &roster_snapshot, propose_tx, group_id, cmd).await;
@@ -495,7 +607,10 @@ async fn dispatch(
         // SCAN
         4 => match decode_scan_payload(&payload) {
             Ok(prefix) => {
-                let group_id = lookup_group(range_table, &prefix);
+                let group_id = {
+                    let t = range_table.read().await;
+                    lookup_group(&t, &prefix)
+                };
                 let req_id = next_read_req_id.fetch_add(1, Ordering::SeqCst);
                 match propose_read_and_wait(raft, read_propose_tx, group_id, req_id).await {
                     Ok(()) => {
@@ -667,6 +782,171 @@ async fn dispatch(
             ),
         },
 
+        // CDC_POLL (13) — leader-local changefeed poll (events from Raft apply path).
+        CDC_POLL_OPCODE => match decode_cdc_poll_request(&payload) {
+            Ok((consumer_id, from_seq, limit)) => {
+                if !is_leader_of(raft, GroupId::ZERO) {
+                    let hint = get_leader_hint(raft, &roster_snapshot);
+                    return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
+                }
+                let mut eng = engine.lock().await;
+                match eng.cdc_subscribe(&consumer_id, Some(from_seq)) {
+                    Ok(mut cursor) => match eng.cdc_poll(&mut cursor, limit as usize) {
+                        Ok(events) => {
+                            let wire: Vec<_> = events
+                                .into_iter()
+                                .map(|e| {
+                                    let op = match e.op {
+                                        CdcOp::Put => CDC_EVENT_PUT,
+                                        CdcOp::Delete => CDC_EVENT_DELETE,
+                                    };
+                                    (e.seq, op, e.key, e.value)
+                                })
+                                .collect();
+                            outcome(STATUS_OK, encode_cdc_poll_response(&wire), client_auth, None)
+                        }
+                        Err(e) => outcome(
+                            STATUS_ERROR,
+                            encode_error_payload(&e.to_string()),
+                            client_auth,
+                            None,
+                        ),
+                    },
+                    Err(e @ kaya_core::KayaError::InvalidArgument { .. }) => outcome(
+                        STATUS_INVALID_ARGUMENT,
+                        encode_error_payload(&e.to_string()),
+                        client_auth,
+                        None,
+                    ),
+                    Err(e) => outcome(
+                        STATUS_ERROR,
+                        encode_error_payload(&e.to_string()),
+                        client_auth,
+                        None,
+                    ),
+                }
+            }
+            Err(e) => outcome(
+                STATUS_INVALID_ARGUMENT,
+                encode_error_payload(&e),
+                client_auth,
+                None,
+            ),
+        },
+
+        // CDC_CHECKPOINT (14)
+        CDC_CHECKPOINT_OPCODE => match decode_cdc_checkpoint_request(&payload) {
+            Ok(consumer_id) => {
+                if !is_leader_of(raft, GroupId::ZERO) {
+                    let hint = get_leader_hint(raft, &roster_snapshot);
+                    return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
+                }
+                match engine.lock().await.cdc_checkpoint(&consumer_id).await {
+                    Ok(()) => outcome(STATUS_OK, vec![], client_auth, None),
+                    Err(e @ kaya_core::KayaError::InvalidArgument { .. }) => outcome(
+                        STATUS_INVALID_ARGUMENT,
+                        encode_error_payload(&e.to_string()),
+                        client_auth,
+                        None,
+                    ),
+                    Err(e) => outcome(
+                        STATUS_ERROR,
+                        encode_error_payload(&e.to_string()),
+                        client_auth,
+                        None,
+                    ),
+                }
+            }
+            Err(e) => outcome(
+                STATUS_INVALID_ARGUMENT,
+                encode_error_payload(&e),
+                client_auth,
+                None,
+            ),
+        },
+
+        // LIST_RANGES (15) — meta table snapshot for client range cache.
+        LIST_RANGES_OPCODE => {
+            let t = range_table.read().await;
+            let wire: Vec<_> = t
+                .ranges()
+                .iter()
+                .map(|r| {
+                    (
+                        r.range_id,
+                        r.epoch,
+                        r.group_id.0,
+                        r.start_key.clone(),
+                        r.end_key.clone(),
+                    )
+                })
+                .collect();
+            outcome(
+                STATUS_OK,
+                encode_list_ranges_response(t.meta_epoch(), &wire),
+                client_auth,
+                None,
+            )
+        }
+
+        // SPLIT_RANGE (16) — split range at key; host new group; bump meta epoch.
+        SPLIT_RANGE_OPCODE => match decode_split_range_request(&payload) {
+            Ok(split_key) => {
+                if !is_leader_of(raft, GroupId::ZERO) {
+                    let hint = get_leader_hint(raft, &roster_snapshot);
+                    return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
+                }
+                // Peek new group id under write lock, host it, then commit split.
+                let new_gid = {
+                    let t = range_table.read().await;
+                    t.peek_next_group_id()
+                };
+                if let Err(e) = ensure_group_hosted(split_rt, new_gid) {
+                    return outcome(STATUS_ERROR, encode_error_payload(&e), client_auth, None);
+                }
+                let mut t = range_table.write().await;
+                match t.split_at(&split_key) {
+                    Ok((left, right, gid)) => {
+                        debug_assert_eq!(gid, new_gid);
+                        let wire = vec![
+                            (
+                                left.range_id,
+                                left.epoch,
+                                left.group_id.0,
+                                left.start_key,
+                                left.end_key,
+                            ),
+                            (
+                                right.range_id,
+                                right.epoch,
+                                right.group_id.0,
+                                right.start_key,
+                                right.end_key,
+                            ),
+                        ];
+                        outcome(
+                            STATUS_OK,
+                            encode_list_ranges_response(t.meta_epoch(), &wire),
+                            client_auth,
+                            Some(split_key.len()),
+                        )
+                    }
+                    Err(e) => outcome(
+                        STATUS_INVALID_ARGUMENT,
+                        encode_error_payload(&e),
+                        client_auth,
+                        None,
+                    ),
+                }
+            }
+            Err(e) => outcome(
+                STATUS_INVALID_ARGUMENT,
+                encode_error_payload(&e),
+                client_auth,
+                None,
+            ),
+        },
+
         other => outcome(
             STATUS_ERROR,
             encode_error_payload(&format!("unknown opcode: {other}")),
@@ -710,7 +990,7 @@ async fn txn_commit_via_raft(
     raft: &SharedRaftHost,
     engine: &SharedEngine,
     roster: &NodeRoster,
-    range_table: &StaticRangeTable,
+    range_table: &SharedRangeTable,
     propose_tx: &mpsc::Sender<ProposeReq>,
     txn_id: u64,
 ) -> (u16, Vec<u8>) {
@@ -741,8 +1021,11 @@ async fn txn_commit_via_raft(
 
     // Cross-group atomic txn is not supported in the multi-raft foundation.
     let mut groups = std::collections::BTreeSet::new();
-    for (k, _) in &mutations {
-        groups.insert(lookup_group(range_table, k).0);
+    {
+        let t = range_table.read().await;
+        for (k, _) in &mutations {
+            groups.insert(lookup_group(&t, k).0);
+        }
     }
     if groups.len() > 1 {
         return (

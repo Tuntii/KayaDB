@@ -18,7 +18,7 @@ later be partitioned into ranges (M21+). This foundation provides:
 - Hybrid logical clocks (`kaya_core::Hlc`) wired as optional engine `commit_ts`
 - **`ClusterNode` multi-group production path** via `MultiRaftHost` (always ≥ group 0)
 
-Dynamic splits, RANGE_MOVED, and per-range Jepsen remain follow-on work.
+Dynamic splits and RANGE_MOVED: see `range-routing-spec.md` (M21). Per-range Jepsen remains follow-on.
 
 ---
 

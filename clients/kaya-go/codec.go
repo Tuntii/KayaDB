@@ -10,19 +10,32 @@ import (
 const (
 	MaxFrameLen = 64 * 1024 * 1024
 
-	OpPut    uint8 = 1
-	OpGet    uint8 = 2
-	OpDelete uint8 = 3
-	OpScan   uint8 = 4
-	OpHealth uint8 = 5
-	OpStats  uint8 = 6
+	OpPut           uint8 = 1
+	OpGet           uint8 = 2
+	OpDelete        uint8 = 3
+	OpScan          uint8 = 4
+	OpHealth        uint8 = 5
+	OpStats         uint8 = 6
+	OpCdcPoll       uint8 = 13
+	OpCdcCheckpoint uint8 = 14
 
-	StatusOK               uint16 = 0
-	StatusInvalidArgument  uint16 = 1
-	StatusNotFound         uint16 = 2
-	StatusServerError      uint16 = 9
-	StatusNotLeader        uint16 = 10
+	CdcEventPut    uint8 = 1
+	CdcEventDelete uint8 = 2
+
+	StatusOK              uint16 = 0
+	StatusInvalidArgument uint16 = 1
+	StatusNotFound        uint16 = 2
+	StatusServerError     uint16 = 9
+	StatusNotLeader       uint16 = 10
 )
+
+// CdcEvent is a single changefeed record from CDC_POLL.
+type CdcEvent struct {
+	Seq   uint64
+	IsPut bool
+	Key   []byte
+	Value []byte // nil for deletes
+}
 
 // CLIENT\x00 prefix for optional client token framing (matches kaya-net).
 var clientAuthPrefix = []byte("CLIENT\x00")
@@ -181,6 +194,66 @@ func decodeErrorPayload(data []byte) (string, error) {
 		return "", fmt.Errorf("invalid UTF-8 in error payload")
 	}
 	return string(msgBytes), nil
+}
+
+func encodeCdcPollRequest(consumerID string, fromSeq uint64, limit uint32) []byte {
+	id := []byte(consumerID)
+	buf := make([]byte, 2+len(id)+8+4)
+	binary.LittleEndian.PutUint16(buf[0:2], uint16(len(id)))
+	copy(buf[2:], id)
+	binary.LittleEndian.PutUint64(buf[2+len(id):2+len(id)+8], fromSeq)
+	binary.LittleEndian.PutUint32(buf[2+len(id)+8:], limit)
+	return buf
+}
+
+func decodeCdcPollResponse(data []byte) ([]CdcEvent, error) {
+	if len(data) < 4 {
+		return nil, fmt.Errorf("truncated cdc poll response")
+	}
+	count := binary.LittleEndian.Uint32(data[0:4])
+	cur := data[4:]
+	out := make([]CdcEvent, 0, count)
+	for i := uint32(0); i < count; i++ {
+		if len(cur) < 8+1+4 {
+			return nil, fmt.Errorf("truncated cdc event header")
+		}
+		seq := binary.LittleEndian.Uint64(cur[0:8])
+		op := cur[8]
+		cur = cur[9:]
+		keyLen := binary.LittleEndian.Uint32(cur[0:4])
+		cur = cur[4:]
+		if len(cur) < int(keyLen) {
+			return nil, fmt.Errorf("truncated cdc event key")
+		}
+		key := append([]byte(nil), cur[:keyLen]...)
+		cur = cur[keyLen:]
+		var value []byte
+		isPut := op == CdcEventPut
+		if isPut {
+			if len(cur) < 4 {
+				return nil, fmt.Errorf("truncated cdc event value len")
+			}
+			valueLen := binary.LittleEndian.Uint32(cur[0:4])
+			cur = cur[4:]
+			if len(cur) < int(valueLen) {
+				return nil, fmt.Errorf("truncated cdc event value")
+			}
+			value = append([]byte(nil), cur[:valueLen]...)
+			cur = cur[valueLen:]
+		} else if op != CdcEventDelete {
+			return nil, fmt.Errorf("unknown cdc event op %d", op)
+		}
+		out = append(out, CdcEvent{Seq: seq, IsPut: isPut, Key: key, Value: value})
+	}
+	return out, nil
+}
+
+func encodeCdcCheckpointRequest(consumerID string) []byte {
+	id := []byte(consumerID)
+	buf := make([]byte, 2+len(id))
+	binary.LittleEndian.PutUint16(buf[0:2], uint16(len(id)))
+	copy(buf[2:], id)
+	return buf
 }
 
 // encodeClientAuthPayload optionally prefixes inner with CLIENT\x00 | token_len(u16) | token.

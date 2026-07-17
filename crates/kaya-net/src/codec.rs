@@ -52,6 +52,19 @@ pub const TXN_OP_OPCODE: u8 = 10;
 pub const TXN_COMMIT_OPCODE: u8 = 11;
 /// TXN_ROLLBACK — discard staged intents.
 pub const TXN_ROLLBACK_OPCODE: u8 = 12;
+/// CDC_POLL — subscribe-or-resume + poll change events from the leader engine.
+pub const CDC_POLL_OPCODE: u8 = 13;
+/// CDC_CHECKPOINT — persist consumer cursor on the leader engine.
+pub const CDC_CHECKPOINT_OPCODE: u8 = 14;
+/// LIST_RANGES — return meta range table (M21).
+pub const LIST_RANGES_OPCODE: u8 = 15;
+/// SPLIT_RANGE — split a range at a key (M21 admin; leader of group 0).
+pub const SPLIT_RANGE_OPCODE: u8 = 16;
+
+/// CDC event op: put.
+pub const CDC_EVENT_PUT: u8 = 1;
+/// CDC event op: delete.
+pub const CDC_EVENT_DELETE: u8 = 2;
 
 /// TXN_OP kind: point get under the txn snapshot (with RYW).
 pub const TXN_OP_GET: u8 = 1;
@@ -93,6 +106,18 @@ fn take_u8(cur: &mut &[u8]) -> Result<u8, String> {
     }
     let v = cur[0];
     *cur = &cur[1..];
+    Ok(v)
+}
+
+fn take_u16(cur: &mut &[u8]) -> Result<u16, String> {
+    if cur.len() < 2 {
+        return Err(format!(
+            "unexpected EOF reading u16 (have {} bytes)",
+            cur.len()
+        ));
+    }
+    let v = u16::from_le_bytes([cur[0], cur[1]]);
+    *cur = &cur[2..];
     Ok(v)
 }
 
@@ -666,6 +691,166 @@ pub fn encode_txn_commit_response(commit_ts: u64) -> Vec<u8> {
 pub fn decode_txn_commit_response(data: &[u8]) -> Result<u64, String> {
     let mut cur = data;
     take_u64(&mut cur)
+}
+
+/// Encode CDC_POLL request:
+/// `consumer_len(u16 LE) | consumer | from_seq(u64 LE) | limit(u32 LE)`.
+pub fn encode_cdc_poll_request(consumer_id: &str, from_seq: u64, limit: u32) -> Vec<u8> {
+    let id = consumer_id.as_bytes();
+    let mut out = Vec::with_capacity(2 + id.len() + 8 + 4);
+    out.extend_from_slice(&(id.len() as u16).to_le_bytes());
+    out.extend_from_slice(id);
+    out.extend_from_slice(&from_seq.to_le_bytes());
+    out.extend_from_slice(&limit.to_le_bytes());
+    out
+}
+
+/// Decode CDC_POLL request → `(consumer_id, from_seq, limit)`.
+pub fn decode_cdc_poll_request(data: &[u8]) -> Result<(String, u64, u32), String> {
+    let mut cur = data;
+    let id_len = take_u16(&mut cur)? as usize;
+    let id_bytes = take_bytes(&mut cur, id_len)?;
+    let consumer_id = String::from_utf8(id_bytes).map_err(|_| "cdc consumer_id not utf-8".to_owned())?;
+    let from_seq = take_u64(&mut cur)?;
+    let limit = take_u32(&mut cur)?;
+    Ok((consumer_id, from_seq, limit))
+}
+
+/// One CDC event on the wire: `(seq, op, key, value)` — value is `Some` for put.
+pub type CdcEventWire = (u64, u8, Vec<u8>, Option<Vec<u8>>);
+
+/// Encode CDC_POLL OK response: `count(u32 LE)` then events
+/// `seq(u64) | op(u8) | key_len(u32) | key | [value_len(u32) | value if put]`.
+pub fn encode_cdc_poll_response(events: &[CdcEventWire]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(events.len() as u32).to_le_bytes());
+    for (seq, op, key, value) in events {
+        out.extend_from_slice(&seq.to_le_bytes());
+        out.push(*op);
+        out.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        out.extend_from_slice(key);
+        if *op == CDC_EVENT_PUT {
+            let v = value.as_deref().unwrap_or(&[]);
+            out.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            out.extend_from_slice(v);
+        }
+    }
+    out
+}
+
+/// Decode CDC_POLL OK response.
+pub fn decode_cdc_poll_response(data: &[u8]) -> Result<Vec<CdcEventWire>, String> {
+    let mut cur = data;
+    let count = take_u32(&mut cur)? as usize;
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let seq = take_u64(&mut cur)?;
+        let op = take_u8(&mut cur)?;
+        let key_len = take_u32(&mut cur)? as usize;
+        let key = take_bytes(&mut cur, key_len)?;
+        let value = if op == CDC_EVENT_PUT {
+            let value_len = take_u32(&mut cur)? as usize;
+            Some(take_bytes(&mut cur, value_len)?)
+        } else if op == CDC_EVENT_DELETE {
+            None
+        } else {
+            return Err(format!("unknown cdc event op {op}"));
+        };
+        out.push((seq, op, key, value));
+    }
+    Ok(out)
+}
+
+/// Encode CDC_CHECKPOINT request: `consumer_len(u16 LE) | consumer`.
+pub fn encode_cdc_checkpoint_request(consumer_id: &str) -> Vec<u8> {
+    let id = consumer_id.as_bytes();
+    let mut out = Vec::with_capacity(2 + id.len());
+    out.extend_from_slice(&(id.len() as u16).to_le_bytes());
+    out.extend_from_slice(id);
+    out
+}
+
+/// Decode CDC_CHECKPOINT request.
+pub fn decode_cdc_checkpoint_request(data: &[u8]) -> Result<String, String> {
+    let mut cur = data;
+    let id_len = take_u16(&mut cur)? as usize;
+    let id_bytes = take_bytes(&mut cur, id_len)?;
+    String::from_utf8(id_bytes).map_err(|_| "cdc consumer_id not utf-8".to_owned())
+}
+
+/// Wire form of one range descriptor for LIST_RANGES / RANGE_MOVED.
+/// `(range_id, epoch, group_id, start_key, end_key)`.
+pub type RangeDescWire = (u64, u64, u64, Vec<u8>, Vec<u8>);
+
+/// Encode LIST_RANGES response:
+/// `meta_epoch(u64 LE) | count(u32 LE) | repeated
+///  range_id(u64) | epoch(u64) | group_id(u64)
+///  | start_len(u32) | start | end_len(u32) | end`.
+pub fn encode_list_ranges_response(meta_epoch: u64, ranges: &[RangeDescWire]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&meta_epoch.to_le_bytes());
+    out.extend_from_slice(&(ranges.len() as u32).to_le_bytes());
+    for (range_id, epoch, group_id, start, end) in ranges {
+        out.extend_from_slice(&range_id.to_le_bytes());
+        out.extend_from_slice(&epoch.to_le_bytes());
+        out.extend_from_slice(&group_id.to_le_bytes());
+        out.extend_from_slice(&(start.len() as u32).to_le_bytes());
+        out.extend_from_slice(start);
+        out.extend_from_slice(&(end.len() as u32).to_le_bytes());
+        out.extend_from_slice(end);
+    }
+    out
+}
+
+/// Decode LIST_RANGES response → `(meta_epoch, ranges)`.
+pub fn decode_list_ranges_response(data: &[u8]) -> Result<(u64, Vec<RangeDescWire>), String> {
+    let mut cur = data;
+    let meta_epoch = take_u64(&mut cur)?;
+    let count = take_u32(&mut cur)? as usize;
+    let mut ranges = Vec::with_capacity(count);
+    for _ in 0..count {
+        let range_id = take_u64(&mut cur)?;
+        let epoch = take_u64(&mut cur)?;
+        let group_id = take_u64(&mut cur)?;
+        let start_len = take_u32(&mut cur)? as usize;
+        let start = take_bytes(&mut cur, start_len)?;
+        let end_len = take_u32(&mut cur)? as usize;
+        let end = take_bytes(&mut cur, end_len)?;
+        ranges.push((range_id, epoch, group_id, start, end));
+    }
+    Ok((meta_epoch, ranges))
+}
+
+/// Encode SPLIT_RANGE request: `split_key_len(u32 LE) | split_key`.
+pub fn encode_split_range_request(split_key: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + split_key.len());
+    out.extend_from_slice(&(split_key.len() as u32).to_le_bytes());
+    out.extend_from_slice(split_key);
+    out
+}
+
+/// Decode SPLIT_RANGE request.
+pub fn decode_split_range_request(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut cur = data;
+    let len = take_u32(&mut cur)? as usize;
+    take_bytes(&mut cur, len)
+}
+
+/// Encode RANGE_MOVED body: single updated descriptor covering the key
+/// (`range_id, epoch, group_id, start, end`) using the list-ranges item layout
+/// with `meta_epoch` prefix and count=1.
+pub fn encode_range_moved_payload(
+    meta_epoch: u64,
+    range_id: u64,
+    epoch: u64,
+    group_id: u64,
+    start: &[u8],
+    end: &[u8],
+) -> Vec<u8> {
+    encode_list_ranges_response(
+        meta_epoch,
+        &[(range_id, epoch, group_id, start.to_vec(), end.to_vec())],
+    )
 }
 
 /// Encode an error string as a response payload: `msg_len(u32) | msg_bytes`.

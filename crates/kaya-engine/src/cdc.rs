@@ -1,11 +1,14 @@
-//! CDC changefeed foundation (M19).
+//! CDC changefeed (M19 + polish).
 //!
-//! Records user-visible put/delete events after a successful WAL append, appends
-//! them to a durable JSONL file sink under `cdc/log.jsonl`, and exposes per-consumer
-//! cursors with at-least-once poll semantics.
+//! Records user-visible put/delete events after a successful WAL append (including
+//! Raft apply of Put/Delete/TxnCommit), appends them to a durable JSONL file sink
+//! under `cdc/log.jsonl`, and exposes per-consumer cursors with at-least-once poll
+//! semantics.
 //!
-//! This is an **engine-local** foundation (not yet Raft-log based, no TCP sink,
-//! no leader-failover chaos proof). See `spec/docs/cdc-spec.md`.
+//! Polish: log compaction below the minimum consumer checkpoint, backup watermark
+//! helpers, and crash/reopen (failover-style) continuity tests.
+//!
+//! See `spec/docs/cdc-spec.md`.
 
 use std::collections::HashMap;
 
@@ -18,6 +21,8 @@ use super::Engine;
 pub const CDC_LOG_PATH: &str = "cdc/log.jsonl";
 /// Directory for durable per-consumer cursor files.
 pub const CDC_CURSORS_DIR: &str = "cdc/cursors";
+/// Optional backup watermark file written by `kayactl backup --cdc-consumer`.
+pub const CDC_BACKUP_WATERMARK: &str = "cdc/backup_watermark";
 
 const LOG_VERSION: u8 = 1;
 
@@ -459,8 +464,7 @@ impl<D: Disk> Engine<D> {
 
     /// Persist the consumer's last polled sequence under `cdc/cursors/{id}`.
     ///
-    /// Incremental `kayactl backup` remains file-tree based today; a future
-    /// enhancement can use these checkpoints as CDC-aware backup watermarks.
+    /// Used as a CDC watermark for `kayactl backup --incremental --cdc-consumer`.
     pub async fn cdc_checkpoint(&mut self, consumer_id: &str) -> Result<()> {
         if !self.config.enable_cdc {
             return Err(KayaError::invalid_argument(
@@ -482,6 +486,103 @@ impl<D: Disk> Engine<D> {
         self.disk.truncate(&path, payload.len() as u64).await?;
         self.disk.fsync_file(&path).await?;
         Ok(())
+    }
+
+    /// Lowest consumer checkpoint (or 0 if none). Events with `seq <=` this value
+    /// are safe to drop from the durable log for all known consumers.
+    pub fn cdc_min_consumer_seq(&self) -> u64 {
+        self.cdc.consumer_last_seq.values().copied().min().unwrap_or(0)
+    }
+
+    /// Compact the CDC log, dropping events with `seq <= retain_below` (inclusive).
+    ///
+    /// When `retain_below` is `None`, uses [`Self::cdc_min_consumer_seq`]. Returns
+    /// the number of events removed. Rewrites `cdc/log.jsonl` and updates memory.
+    pub async fn cdc_compact(&mut self, retain_below: Option<u64>) -> Result<usize> {
+        if !self.config.enable_cdc {
+            return Err(KayaError::invalid_argument(
+                "cdc is disabled (EngineConfig.enable_cdc = false)",
+            ));
+        }
+        let cutoff = retain_below.unwrap_or_else(|| self.cdc_min_consumer_seq());
+        if cutoff == 0 {
+            return Ok(0);
+        }
+        let before = self.cdc.events.len();
+        self.cdc.events.retain(|e| e.seq > cutoff);
+        let removed = before - self.cdc.events.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        // Rewrite the durable log.
+        let path = log_rel_path()?;
+        let mut body = String::new();
+        for ev in &self.cdc.events {
+            body.push_str(&encode_event_line(ev));
+        }
+        self.disk.write_at(&path, 0, body.as_bytes()).await?;
+        self.disk.truncate(&path, body.len() as u64).await?;
+        self.disk.fsync_file(&path).await?;
+        Ok(removed)
+    }
+
+    /// Read a durable consumer checkpoint without mutating poll state.
+    pub fn cdc_consumer_seq(&self, consumer_id: &str) -> Result<u64> {
+        validate_consumer_id(consumer_id)?;
+        Ok(self
+            .cdc
+            .consumer_last_seq
+            .get(consumer_id)
+            .copied()
+            .unwrap_or(0))
+    }
+
+    /// Persist a backup watermark (highest seq included in a backup) to
+    /// `cdc/backup_watermark`. Used by `kayactl backup --cdc-consumer`.
+    pub async fn cdc_write_backup_watermark(&mut self, seq: u64) -> Result<()> {
+        if !self.config.enable_cdc {
+            return Err(KayaError::invalid_argument(
+                "cdc is disabled (EngineConfig.enable_cdc = false)",
+            ));
+        }
+        let path = RelativePath::new(CDC_BACKUP_WATERMARK)?;
+        let payload = format!("{seq}\n");
+        self.disk.write_at(&path, 0, payload.as_bytes()).await?;
+        self.disk.truncate(&path, payload.len() as u64).await?;
+        self.disk.fsync_file(&path).await?;
+        Ok(())
+    }
+
+    /// Read `cdc/backup_watermark` if present.
+    pub async fn cdc_read_backup_watermark(&self) -> Result<Option<u64>> {
+        if !self.config.enable_cdc {
+            return Ok(None);
+        }
+        let path = RelativePath::new(CDC_BACKUP_WATERMARK)?;
+        let disk = self.disk.clone();
+        match disk.file_len(&path).await {
+            Ok(0) | Err(KayaError::NotFound) => Ok(None),
+            Ok(len) => {
+                let mut buf = vec![0u8; len as usize];
+                let mut offset = 0u64;
+                while offset < len {
+                    let n = disk
+                        .read_at(&path, offset, &mut buf[offset as usize..])
+                        .await?;
+                    if n == 0 {
+                        break;
+                    }
+                    offset += n as u64;
+                }
+                let s = std::str::from_utf8(&buf[..offset as usize])
+                    .map_err(|_| KayaError::corruption("cdc backup watermark not utf-8"))?
+                    .trim();
+                Ok(Some(s.parse::<u64>().map_err(|_| {
+                    KayaError::corruption("cdc backup watermark not a u64")
+                })?))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Number of events currently held in the in-memory CDC log (tests / stats).
@@ -649,6 +750,102 @@ mod tests {
                 .unwrap();
             assert_eq!(engine.cdc_event_count(), 0);
             assert!(engine.cdc_subscribe("c", Some(0)).is_err());
+        });
+    }
+
+    #[test]
+    fn cdc_compact_drops_checkpointed_prefix() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            for i in 0..5u8 {
+                engine
+                    .put(vec![b'k', i], vec![b'v', i], strict_opts())
+                    .await
+                    .unwrap();
+            }
+            let mut cursor = engine.cdc_subscribe("backup", Some(0)).unwrap();
+            let batch = engine.cdc_poll(&mut cursor, 3).unwrap();
+            assert_eq!(batch.len(), 3);
+            engine.cdc_checkpoint("backup").await.unwrap();
+            let cutoff = cursor.last_seq;
+            let removed = engine.cdc_compact(None).await.unwrap();
+            assert_eq!(removed, 3);
+            assert_eq!(engine.cdc_event_count(), 2);
+            // Polling from 0 still only sees retained events (at-least-once
+            // does not resurrect compacted prefix).
+            let mut replay = engine.cdc_subscribe("other", Some(0)).unwrap();
+            let rest = engine.cdc_poll(&mut replay, 100).unwrap();
+            assert!(rest.iter().all(|e| e.seq > cutoff));
+        });
+    }
+
+    #[test]
+    fn cdc_failover_reopen_loses_no_checkpointed_events() {
+        // Simulates leader failover by crash + reopen on the same durable disk:
+        // a consumer that checkpointed must not lose subsequent events, and
+        // replaying from the checkpoint must redeliver only unacked seqs.
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = EngineConfig::default();
+            let seen_after_ckpt = {
+                let mut engine = Engine::open(config.clone(), disk.clone()).await.unwrap();
+                for i in 0..4u8 {
+                    engine
+                        .put(vec![b'a', i], vec![b'v', i], strict_opts())
+                        .await
+                        .unwrap();
+                }
+                let mut c = engine.cdc_subscribe("feed", Some(0)).unwrap();
+                let first = engine.cdc_poll(&mut c, 2).unwrap();
+                assert_eq!(first.len(), 2);
+                engine.cdc_checkpoint("feed").await.unwrap();
+
+                for i in 4..7u8 {
+                    engine
+                        .put(vec![b'a', i], vec![b'v', i], strict_opts())
+                        .await
+                        .unwrap();
+                }
+                let more = engine.cdc_poll(&mut c, 100).unwrap();
+                let seqs: Vec<u64> = more.iter().map(|e| e.seq).collect();
+                assert_eq!(seqs.len(), 5); // 2 remaining from first batch + 3 new
+                seqs
+            };
+
+            disk.crash();
+            let mut engine = Engine::open(config, disk).await.unwrap();
+            // Resume from durable checkpoint — must include everything after ckpt.
+            let mut c = engine.cdc_subscribe("feed", None).unwrap();
+            let recovered = engine.cdc_poll(&mut c, 100).unwrap();
+            let recovered_seqs: Vec<u64> = recovered.iter().map(|e| e.seq).collect();
+            assert_eq!(
+                recovered_seqs, seen_after_ckpt,
+                "failover reopen must not lose post-checkpoint events"
+            );
+        });
+    }
+
+    #[test]
+    fn cdc_backup_watermark_roundtrip() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine
+                .put(b"k".to_vec(), b"v".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            let mut c = engine.cdc_subscribe("backup", Some(0)).unwrap();
+            let ev = engine.cdc_poll(&mut c, 1).unwrap();
+            engine.cdc_checkpoint("backup").await.unwrap();
+            engine
+                .cdc_write_backup_watermark(ev[0].seq)
+                .await
+                .unwrap();
+            assert_eq!(
+                engine.cdc_read_backup_watermark().await.unwrap(),
+                Some(ev[0].seq)
+            );
         });
     }
 }

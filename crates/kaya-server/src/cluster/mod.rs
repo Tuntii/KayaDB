@@ -412,7 +412,18 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     let shared_raft: SharedRaftHost = Arc::new(Mutex::new(host));
     let shared_persisters: SharedPersisters = Arc::new(Mutex::new(persister_map));
     let apply_indexes: SharedApplyIndexes = Arc::new(Mutex::new(apply_map));
-    let shared_range_table = Arc::new(config.range_table.clone());
+    let shared_range_table: client_ops::SharedRangeTable =
+        Arc::new(tokio::sync::RwLock::new(config.range_table.clone()));
+    let split_rt = client_ops::SplitRuntime {
+        raft: shared_raft.clone(),
+        persisters: shared_persisters.clone(),
+        apply_indexes: apply_indexes.clone(),
+        data_dir: config.data_dir.clone(),
+        node_id: config.node_id,
+        peers: peers.clone(),
+        election_timeout_ticks: config.election_timeout_ticks,
+        heartbeat_interval_ticks: config.heartbeat_interval_ticks,
+    };
 
     let mut roster = config.roster.clone();
     load_persisted_roster(&config.data_dir, &mut roster);
@@ -619,6 +630,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         next_id,
         ros.clone(),
         shared_range_table,
+        split_rt,
         self_id,
         self_raft,
         self_client,

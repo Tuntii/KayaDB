@@ -3,12 +3,15 @@
 //! Run: `cargo test -p kaya-net conformance_vectors`
 
 use kaya_net::{
-    decode_admin_payload, decode_client_auth_payload, decode_error_payload, decode_key_payload,
+    decode_admin_payload, decode_cdc_checkpoint_request, decode_cdc_poll_request,
+    decode_cdc_poll_response, decode_client_auth_payload, decode_error_payload, decode_key_payload,
     decode_put_payload, decode_scan_response, decode_txn_begin_response,
     decode_txn_commit_response, decode_txn_id_payload, decode_txn_op_payload, encode_admin_payload,
+    encode_cdc_checkpoint_request, encode_cdc_poll_request, encode_cdc_poll_response,
     encode_client_auth_payload, encode_error_payload, encode_key_payload, encode_put_payload,
     encode_scan_response, encode_txn_begin_response, encode_txn_commit_response,
-    encode_txn_id_payload, encode_txn_op_payload, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_PUT,
+    encode_txn_id_payload, encode_txn_op_payload, CDC_EVENT_DELETE, CDC_EVENT_PUT, TXN_OP_DELETE,
+    TXN_OP_GET, TXN_OP_PUT,
 };
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -39,6 +42,20 @@ struct VectorInput {
     snapshot_ts: Option<u64>,
     commit_ts: Option<u64>,
     op: Option<String>,
+    consumer: Option<String>,
+    from_seq: Option<u64>,
+    limit: Option<u32>,
+    events: Option<Vec<CdcEventInput>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CdcEventInput {
+    seq: Option<u64>,
+    op: Option<String>,
+    key: Option<String>,
+    value: Option<String>,
+    key_hex: Option<String>,
+    value_hex: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +128,8 @@ fn run_vector(vector: &ConformanceVector) {
         "txn_op_roundtrip" => run_txn_op_roundtrip(&vector.input),
         "txn_id_roundtrip" => run_txn_id_roundtrip(&vector.input),
         "txn_commit_roundtrip" => run_txn_commit_roundtrip(&vector.input),
+        "cdc_poll_roundtrip" => run_cdc_poll_roundtrip(&vector.input),
+        "cdc_checkpoint_roundtrip" => run_cdc_checkpoint_roundtrip(&vector.input),
         other => panic!("unknown fn '{other}' in vector '{}'", vector.name),
     };
 
@@ -325,6 +344,76 @@ fn run_txn_commit_roundtrip(input: &VectorInput) -> Result<(), String> {
     if decoded != commit_ts {
         return Err(format!(
             "commit_ts mismatch: got {decoded}, want {commit_ts}"
+        ));
+    }
+    Ok(())
+}
+
+fn run_cdc_poll_roundtrip(input: &VectorInput) -> Result<(), String> {
+    if let Some(raw) = &input.raw_hex {
+        // Truncated request decode should fail for expect_ok:false vectors.
+        return decode_cdc_poll_request(&decode_hex(raw)?).map(|_| ());
+    }
+    let consumer = input
+        .consumer
+        .as_deref()
+        .ok_or_else(|| "cdc_poll requires consumer".to_owned())?;
+    let from_seq = input.from_seq.unwrap_or(0);
+    let limit = input.limit.unwrap_or(10);
+    let req = encode_cdc_poll_request(consumer, from_seq, limit);
+    let (d_c, d_from, d_lim) = decode_cdc_poll_request(&req)?;
+    if d_c != consumer || d_from != from_seq || d_lim != limit {
+        return Err(format!(
+            "cdc poll req mismatch: got ({d_c},{d_from},{d_lim})"
+        ));
+    }
+
+    let mut events = Vec::new();
+    if let Some(items) = &input.events {
+        for (i, e) in items.iter().enumerate() {
+            let seq = e.seq.unwrap_or(i as u64 + 1);
+            let op_name = e.op.as_deref().unwrap_or("put");
+            let op = match op_name {
+                "put" => CDC_EVENT_PUT,
+                "delete" => CDC_EVENT_DELETE,
+                other => return Err(format!("unknown cdc op '{other}'")),
+            };
+            let key = bytes_from_fields(e.key.as_deref(), e.key_hex.as_deref(), "key")?;
+            let value = if op == CDC_EVENT_PUT {
+                Some(bytes_from_fields(
+                    e.value.as_deref(),
+                    e.value_hex.as_deref(),
+                    "value",
+                )?)
+            } else {
+                None
+            };
+            events.push((seq, op, key, value));
+        }
+    }
+    let encoded = encode_cdc_poll_response(&events);
+    let decoded = decode_cdc_poll_response(&encoded)?;
+    if decoded != events {
+        return Err(format!(
+            "cdc poll resp mismatch: got {decoded:?}, want {events:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn run_cdc_checkpoint_roundtrip(input: &VectorInput) -> Result<(), String> {
+    if let Some(raw) = &input.raw_hex {
+        return decode_cdc_checkpoint_request(&decode_hex(raw)?).map(|_| ());
+    }
+    let consumer = input
+        .consumer
+        .as_deref()
+        .ok_or_else(|| "cdc_checkpoint requires consumer".to_owned())?;
+    let encoded = encode_cdc_checkpoint_request(consumer);
+    let decoded = decode_cdc_checkpoint_request(&encoded)?;
+    if decoded != consumer {
+        return Err(format!(
+            "cdc checkpoint mismatch: got {decoded:?}, want {consumer:?}"
         ));
     }
     Ok(())

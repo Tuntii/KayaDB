@@ -47,5 +47,12 @@
   {"name": "txn_op_delete", "fn": "txn_op_roundtrip", "input": {"txn_id": 3, "op": "delete", "key": "k"}, "expect_ok": true},
   {"name": "txn_id_basic", "fn": "txn_id_roundtrip", "input": {"txn_id": 7}, "expect_ok": true},
   {"name": "txn_commit_ts", "fn": "txn_commit_roundtrip", "input": {"commit_ts": 12}, "expect_ok": true},
-  {"name": "txn_op_decode_truncated", "fn": "txn_op_roundtrip", "input": {"raw_hex": "01000000"}, "expect_ok": false}
+  {"name": "txn_op_decode_truncated", "fn": "txn_op_roundtrip", "input": {"raw_hex": "01000000"}, "expect_ok": false},
+
+  {"name": "cdc_poll_basic", "fn": "cdc_poll_roundtrip", "input": {"consumer": "backup", "from_seq": 0, "limit": 10, "events": [{"seq": 1, "op": "put", "key": "a", "value": "1"}, {"seq": 2, "op": "delete", "key": "a"}]}, "expect_ok": true},
+  {"name": "cdc_poll_empty", "fn": "cdc_poll_roundtrip", "input": {"consumer": "c1", "from_seq": 5, "limit": 1, "events": []}, "expect_ok": true},
+  {"name": "cdc_poll_binary", "fn": "cdc_poll_roundtrip", "input": {"consumer": "w", "from_seq": 0, "limit": 100, "events": [{"seq": 9, "op": "put", "key_hex": "00ff", "value_hex": "dead"}]}, "expect_ok": true},
+  {"name": "cdc_checkpoint_basic", "fn": "cdc_checkpoint_roundtrip", "input": {"consumer": "backup"}, "expect_ok": true},
+  {"name": "cdc_checkpoint_unicode", "fn": "cdc_checkpoint_roundtrip", "input": {"consumer": "worker-1"}, "expect_ok": true},
+  {"name": "cdc_poll_decode_truncated", "fn": "cdc_poll_roundtrip", "input": {"raw_hex": "0100"}, "expect_ok": false}
 ]

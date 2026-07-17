@@ -1,7 +1,7 @@
 # KayaDB Development Roadmap
 
 **Status:** Living roadmap  
-**Last updated:** 2026-07-12 (M16–M20 production path closed — atomic TxnCommit, HLC, multi-raft ClusterNode; M21+ open)
+**Last updated:** 2026-07-16 (M21 range metadata/routing/splits closed; M22+ open)
 
 > **"Geniş ve yaşayan yol haritası"** — Bu belge hem tarihi başarıları arşivler, hem şu anki odak noktalarını gösterir, hem de uzun vadeli vizyonu (birden fazla paralel track ile) detaylandırır. Tasarım-öncelikli ve correctness-öncelikli felsefe korunur.
 
@@ -76,7 +76,7 @@ Goal: close post-M14 parallel-track gaps across security, client ecosystem, obse
 
 ## Next arc: M16–M25 — Distributed Transactional KV
 
-**Status (2026-07-12):** **M16–M20 production path closed** on branch work (atomic multi-key `TxnCommit`, HLC commit timestamps, multi-raft `ClusterNode` + static ranges). M21–M25 remain open. We still do **not** claim full v0.2.0 / north-star production readiness until M24–M25 exit gates.
+**Status (2026-07-16):** **M16–M21 closed** (txn path through range split). M22–M25 remain open. We still do **not** claim full v0.2.0 / north-star production readiness until M24–M25 exit gates.
 
 **Hedef kimlik (M25):** range sharding + multi-raft + **cross-shard transaction** (Raft üzerine 2PC) — CockroachDB/TiKV çekirdeği sınıfında, adım adım kanıtlanarak. API yüzeyi programatik kalır: **KV + txn + secondary index** (SQL yok; post-M25 v2 adayı). Sıralama: **önce transaction, sonra sharding** — cross-shard txn zaten MVCC + timestamp altyapısı ister; önce tek grupta Jepsen'le kanıtla, sonra dağıt.
 
@@ -86,13 +86,13 @@ Her milestone değişmez disiplini korur: **spec → sim → gerçek implementas
 
 1. **M16 — MVCC storage foundation ✅** — Complete (2026-07-12): multi-version memtable (typed `InternalKey`), SSTable v4, engine `get_at` / `ReadTimestamp::At`, compaction GC watermark, versioned sim `RefModel` + MVCC crash properties, `kayactl inspect` v4. *Exit met:* snapshot-read + GC safety in sim; workspace tests green.
 2. **M17 — Single-group ACID transactions ✅ production path** — Complete (2026-07-12): SI write intents, TXN opcodes 9–12, Rust client txn API, TLA+ commit model (`spec/specs/txn/`), bank workload. **Production close-out:** atomic `RaftCommand::TxnCommit` (type 4) — single log entry for multi-key commit (no sequential N Put/Delete). Spec: `spec/docs/transactions-spec.md`. *Exit met:* SI + wire/client + TLA+ + bank + Raft atomic commit path green.
-3. **M18 — Secondary indexes ✅ production path** — Complete (2026-07-12): engine-local secondary indexes; maintenance on put/delete **and** Raft `apply_mutations` / `TxnCommit` apply (same paths). Spec: `spec/docs/secondary-index-spec.md`. *Remaining polish:* field extractors, online backfill pause/resume, chaos divergence gate, `kayactl index`, conformance v2.
-4. **M19 — CDC / changefeeds ✅ production path** — Complete (2026-07-12): file CDC on put/delete; fires on Raft apply (shared put/delete path). Spec: `spec/docs/cdc-spec.md`. *Remaining polish:* dedicated Raft-log CDC / TCP+Go subscribe, failover chaos gate, log compaction, `backup --incremental` CDC watermark link.
+3. **M18 — Secondary indexes ✅ production path + polish** — Complete (2026-07-12 path; polish 2026-07-16): engine-local secondary indexes; maintenance on put/delete **and** Raft apply. **Polish:** field extractors (`WholeValue` / `Prefix` / `Field`), online backfill pause/resume/step, `verify_index` chaos divergence gate, `kayactl index create|list|drop|scan|verify|backfill`, meta v2. Spec: `spec/docs/secondary-index-spec.md`.
+4. **M19 — CDC / changefeeds ✅ production path + polish** — Complete (2026-07-12 path; polish 2026-07-16): file CDC on put/delete; fires on Raft apply. **Polish:** TCP opcodes 13/14 + Rust/Go subscribe, crash/reopen failover gate, `cdc_compact`, `kayactl backup --cdc-consumer` watermark, conformance v2 CDC vectors. Spec: `spec/docs/cdc-spec.md`.
 
 ### Faz 2 — Dağıtım (multi-raft + sharding)
 
 5. **M20 — Multi-raft foundation ✅ production path** — Complete (2026-07-12): Envelope.group_id; per-group storage; MultiRaftHost + StaticRangeTable; HLC; **ClusterNode always hosts MultiRaftHost (≥ group 0)** with static range routing; HLC commit_ts via `EngineConfig.use_hlc` / multi-group auto-enable. Spec: `spec/docs/multi-raft-spec.md`. *IT:* `test_multi_raft_static_ranges_put_get`. *Follow-on (M21+):* dynamic splits / RANGE_MOVED, cross-group 2PC (M23), per-range Jepsen, full OTel trace-context, live clock-skew nemesis.
-6. **M21 — Range metadata, routing & splits ⬜** — Meta range (epoch'lu descriptor tablosu), client range cache + `RANGE_MOVED` retry, batch op bölme, boyut eşikli dinamik split (önce sim'de), `kayactl range`. *Exit:* yük altında split sırasında sıfır kayıp yazma.
+6. **M21 — Range metadata, routing & splits ✅** — Complete (2026-07-16): epoch’d meta range table (`StaticRangeTable` / `RangeTable`), `split_at` + runtime group host, wire `LIST_RANGES` (15) / `SPLIT_RANGE` (16), `STATUS_RANGE_MOVED` (11), client `list_ranges`/`split_range` cache, `kayactl range list|split`, IT `test_range_split_no_lost_writes`. Spec: `spec/docs/range-routing-spec.md`. *Shared-engine routing split* (no physical key move). *Follow-on (M22):* rebalance, learner→promote, auto size-threshold, multi-node RANGE_MOVED.
 7. **M22 — Rebalancing, merges & placement ⬜** — Learner→promote replica taşıma, lease/leadership transfer, store-bazlı balancer + locality etiketleri, cold-range merge, decommission runbook. ⬅ *Dashboard v1* (read-only cluster/range viewer). *Exit:* chaos altında node add/drain/decommission kesintisiz.
 8. **M23 — Cross-shard transactions ⬜** — Raft üzerine 2PC (txn record + intents, coordinator crash recovery), HLC commit ts + uncertainty interval, parallel-commit stretch. ⬅ *TLA+ genişletme (2/2):* 2PC + recovery modeli. *Exit:* multi-range Jepsen bank, split+merge+rebalance+kill+partition kombinasyonu altında yeşil.
 

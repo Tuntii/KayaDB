@@ -6,8 +6,10 @@ mod ebpf;
 mod ebpf_bpftrace;
 #[cfg(feature = "ebpf")]
 mod ebpf_correlate;
+mod index_cmd;
 mod inspect;
 mod local;
+mod range_cmd;
 mod server;
 mod stats_cmd;
 mod watch;
@@ -154,6 +156,11 @@ fn run() -> Result<()> {
         );
     }
 
+    // ── range (cluster meta table; requires --server) ─────────────────────────
+    if args.first().map(String::as_str) == Some("range") {
+        return range_cmd::run_range(args, server_addrs, timeout, client_token, json);
+    }
+
     // ── server mode ───────────────────────────────────────────────────────────
     if !server_addrs.is_empty() {
         return server::run_server_mode(
@@ -172,7 +179,12 @@ fn run() -> Result<()> {
         if json {
             backup_args.push("--json".to_owned());
         }
-        return backup::run_backup(backup_args, &data_dir);
+        return backup::run_backup(backup_args, &data_dir, durability);
+    }
+
+    // ── index (local secondary indexes) ───────────────────────────────────────
+    if args.first().map(String::as_str) == Some("index") {
+        return index_cmd::run_index(args, data_dir, durability, json);
     }
 
     // ── local engine mode ─────────────────────────────────────────────────────

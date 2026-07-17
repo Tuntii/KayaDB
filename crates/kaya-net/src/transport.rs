@@ -52,6 +52,8 @@ pub const STATUS_TXN_CONFLICT: u16 = 3;
 pub const STATUS_ERROR: u16 = 9;
 /// This node is not the current Raft leader; the client should retry.
 pub const STATUS_NOT_LEADER: u16 = 10;
+/// The key's owning range moved (split / reassignment). Body is a range-moved payload.
+pub const STATUS_RANGE_MOVED: u16 = 11;
 
 /// TLS configuration for encrypted connections (Raft + client protocol).
 ///

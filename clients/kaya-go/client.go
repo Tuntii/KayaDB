@@ -70,7 +70,7 @@ func (c *KayaClient) Close() error {
 
 func (c *KayaClient) wirePayload(opcode uint8, payload []byte) []byte {
 	switch opcode {
-	case OpPut, OpGet, OpDelete, OpScan, OpStats:
+	case OpPut, OpGet, OpDelete, OpScan, OpStats, OpCdcPoll, OpCdcCheckpoint:
 		return encodeClientAuthPayload(payload, c.clientToken)
 	default:
 		return payload
@@ -253,4 +253,27 @@ func (c *KayaClient) Stats(ctx context.Context) (string, error) {
 		return string(body), nil
 	}
 	return "", handleStatus(status, body)
+}
+
+// CdcPoll returns changefeed events with seq > fromSeq, up to limit (at-least-once).
+func (c *KayaClient) CdcPoll(ctx context.Context, consumerID string, fromSeq uint64, limit uint32) ([]CdcEvent, error) {
+	payload := encodeCdcPollRequest(consumerID, fromSeq, limit)
+	status, body, err := c.roundtripWithRedirect(ctx, OpCdcPoll, payload)
+	if err != nil {
+		return nil, err
+	}
+	if status == StatusOK {
+		return decodeCdcPollResponse(body)
+	}
+	return nil, handleStatus(status, body)
+}
+
+// CdcCheckpoint persists the consumer's last polled sequence on the leader.
+func (c *KayaClient) CdcCheckpoint(ctx context.Context, consumerID string) error {
+	payload := encodeCdcCheckpointRequest(consumerID)
+	status, body, err := c.roundtripWithRedirect(ctx, OpCdcCheckpoint, payload)
+	if err != nil {
+		return err
+	}
+	return handleStatus(status, body)
 }
