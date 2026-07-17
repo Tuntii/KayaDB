@@ -68,6 +68,11 @@ pub const TRANSFER_LEADER_OPCODE: u8 = 18;
 /// PROMOTE_LEARNER — flip `is_learner=false` for an existing member via ConfigChange (M22).
 /// Body: `node_id(u64 LE)`. Requires operator token when configured.
 pub const PROMOTE_LEARNER_OPCODE: u8 = 19;
+/// REBALANCE_PLAN — advisory range-count rebalance suggestions (M22 admin).
+/// Request body empty (operator token via ADMIN framing when configured).
+/// Response: `count(u32 LE) | repeated (range_id|from_node|to_node u64 LE each)`.
+/// **Advisory only** — does not migrate data or transfer leases.
+pub const REBALANCE_PLAN_OPCODE: u8 = 20;
 
 /// CDC event op: put.
 pub const CDC_EVENT_PUT: u8 = 1;
@@ -898,6 +903,39 @@ pub fn decode_merge_range_request(data: &[u8]) -> Result<Vec<u8>, String> {
     take_bytes(&mut cur, len)
 }
 
+/// Encode REBALANCE_PLAN response: `count(u32 LE) | repeated moves`.
+/// Each move: `range_id(u64 LE) | from_node(u64 LE) | to_node(u64 LE)`.
+pub fn encode_rebalance_plan_response(moves: &[(u64, u64, u64)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + moves.len() * 24);
+    push_u32(&mut out, moves.len() as u32);
+    for &(range_id, from_node, to_node) in moves {
+        push_u64(&mut out, range_id);
+        push_u64(&mut out, from_node);
+        push_u64(&mut out, to_node);
+    }
+    out
+}
+
+/// Decode REBALANCE_PLAN response → list of `(range_id, from_node, to_node)`.
+pub fn decode_rebalance_plan_response(data: &[u8]) -> Result<Vec<(u64, u64, u64)>, String> {
+    let mut cur = data;
+    let count = take_u32(&mut cur)? as usize;
+    let mut moves = Vec::with_capacity(count);
+    for _ in 0..count {
+        let range_id = take_u64(&mut cur)?;
+        let from_node = take_u64(&mut cur)?;
+        let to_node = take_u64(&mut cur)?;
+        moves.push((range_id, from_node, to_node));
+    }
+    if !cur.is_empty() {
+        return Err(format!(
+            "trailing {} bytes after REBALANCE_PLAN response",
+            cur.len()
+        ));
+    }
+    Ok(moves)
+}
+
 /// Encode TRANSFER_LEADER request: `group_id(u64 LE) | target_node_id(u64 LE)`.
 pub fn encode_transfer_leader_request(group_id: u64, target_node_id: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(16);
@@ -1640,6 +1678,17 @@ mod tests {
         assert_eq!(decode_promote_learner_payload(&payload).unwrap(), 42);
         assert_eq!(PROMOTE_LEARNER_OPCODE, 19);
         assert!(decode_promote_learner_payload(&[]).is_err());
+    }
+
+    #[test]
+    fn rebalance_plan_response_roundtrips() {
+        assert_eq!(REBALANCE_PLAN_OPCODE, 20);
+        let empty = encode_rebalance_plan_response(&[]);
+        assert!(decode_rebalance_plan_response(&empty).unwrap().is_empty());
+        let body = encode_rebalance_plan_response(&[(10, 1, 2), (11, 1, 3)]);
+        let decoded = decode_rebalance_plan_response(&body).unwrap();
+        assert_eq!(decoded, vec![(10, 1, 2), (11, 1, 3)]);
+        assert!(decode_rebalance_plan_response(&[1, 0, 0]).is_err());
     }
 
     #[test]

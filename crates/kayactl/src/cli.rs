@@ -53,6 +53,7 @@ pub(crate) fn print_usage() {
     println!();
     println!("RANGE / SHARDING (cluster)");
     println!("  kayactl --server <addr> [--json] range list");
+    println!("  kayactl --server <addr> [--operator-token <tok>] [--json] range rebalance-plan");
     println!("  kayactl --server <addr> [--json] range split <key>");
     println!("  kayactl --server <addr> [--json] range merge <left-start-hex-or-utf8>");
     println!("      (empty left: \"\" or @empty; hex: 0x… or hex:…)");

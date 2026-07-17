@@ -78,9 +78,25 @@ Lookup: linear scan; key `k` matches first range with `start ≤ k < end`
 | 15 | `LIST_RANGES` | Response: meta_epoch + descriptors |
 | 16 | `SPLIT_RANGE` | Request: split_key; response: two half descriptors |
 | 17 | `MERGE_RANGE` | Request: left_start; response: one merged descriptor |
+| 20 | `REBALANCE_PLAN` | **Advisory only.** Range-count heuristic; no live migrate |
 
 **Status `RANGE_MOVED` (11):** body is a list-ranges payload (count≥1) for the
 key’s current owner. Clients refresh cache and retry.
+
+### REBALANCE_PLAN (advisory)
+
+Opcode `20` is an admin op (operator token when configured). Request body empty.
+Response:
+
+```text
+count(u32 LE) | repeated:
+  range_id(u64 LE) | from_node(u64 LE) | to_node(u64 LE)
+```
+
+Heuristic (`plan_range_count`): while `max_count - min_count > 1`, move one range
+from a richest node (group leader ownership) to a poorest node. **The plan does
+not move data, transfer leases, or change the meta table.** Operators may use
+it as a suggestion only; live placement / MOVE_RANGE is follow-on work.
 
 ### LIST_RANGES response
 
@@ -113,10 +129,13 @@ uses the list-ranges layout with `count=1` for the merged descriptor.
 kayactl --server <addr> range list
 kayactl --server <addr> range split <key>
 kayactl --server <addr> range merge <left-start-hex-or-utf8>
+kayactl --server <addr> [--operator-token <tok>] range rebalance-plan
 ```
 
 `left-start`: empty string / `@empty` for empty start; `0x…` or `hex:…` for
 raw bytes; otherwise UTF-8.
+
+`rebalance-plan` prints suggested `(range_id, from, to)` moves; nothing is applied.
 
 ---
 
@@ -131,7 +150,8 @@ raw bytes; otherwise UTF-8.
 | Client range cache API | Yes (`list_ranges` / `split_range`) |
 | No lost writes across split (IT) | Yes (`test_range_split_no_lost_writes`) |
 | Split+merge round-trip (IT) | Yes (`test_range_merge_recombines`) |
-| Multi-node range move / learner | No (M22 remainder) |
+| Multi-node range move / learner | Partial (learner promote yes; live migrate no) |
+| Advisory REBALANCE_PLAN (20) | Yes (range-count; no live migrate) |
 | Auto size-threshold split | No (manual + API first) |
 | Orphan group reclaim after merge | No (follow-on) |
 

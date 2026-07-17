@@ -158,7 +158,14 @@ fn run() -> Result<()> {
 
     // ── range (cluster meta table; requires --server) ─────────────────────────
     if args.first().map(String::as_str) == Some("range") {
-        return range_cmd::run_range(args, server_addrs, timeout, client_token, json);
+        return range_cmd::run_range(
+            args,
+            server_addrs,
+            timeout,
+            client_token,
+            operator_token,
+            json,
+        );
     }
 
     // ── server mode ───────────────────────────────────────────────────────────

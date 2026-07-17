@@ -23,13 +23,13 @@ use kaya_net::{
     decode_scan_payload, decode_split_range_request, decode_transfer_leader_request,
     decode_txn_id_payload, decode_txn_op_payload, encode_cdc_poll_response, encode_error_payload,
     encode_hello_response, encode_list_ranges_response, encode_range_moved_payload,
-    encode_scan_response, encode_txn_begin_response, encode_txn_commit_response,
-    encode_value_payload, read_client_frame, send_envelopes, write_client_response, NodeRoster,
-    CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE, CDC_EVENT_PUT, CDC_POLL_OPCODE, LIST_RANGES_OPCODE,
-    MERGE_RANGE_OPCODE, PROTO_VERSION, SPLIT_RANGE_OPCODE, STATUS_ERROR, STATUS_INVALID_ARGUMENT,
-    STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK, STATUS_RANGE_MOVED, STATUS_TXN_CONFLICT,
-    TRANSFER_LEADER_OPCODE, TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET,
-    TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
+    encode_rebalance_plan_response, encode_scan_response, encode_txn_begin_response,
+    encode_txn_commit_response, encode_value_payload, read_client_frame, send_envelopes,
+    write_client_response, NodeRoster, CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE, CDC_EVENT_PUT,
+    CDC_POLL_OPCODE, LIST_RANGES_OPCODE, MERGE_RANGE_OPCODE, PROTO_VERSION, REBALANCE_PLAN_OPCODE,
+    SPLIT_RANGE_OPCODE, STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER,
+    STATUS_OK, STATUS_RANGE_MOVED, STATUS_TXN_CONFLICT, TRANSFER_LEADER_OPCODE, TXN_BEGIN_OPCODE,
+    TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
 };
 use kaya_raft::{
     multi_raft_group_dir, ClusterMember, GroupId, NodeId, RaftConfig, RaftNode, StaticRangeTable,
@@ -53,6 +53,8 @@ use crate::operator_auth::{
     decode_admin_payload, ADD_MEMBER_OPCODE, ADMIN_AUTH_PREFIX, PROMOTE_LEARNER_OPCODE,
     REMOVE_MEMBER_OPCODE,
 };
+
+use super::balancer::{plan_range_count, RebalancePlan};
 
 use super::stats::build_stats_response;
 
@@ -271,6 +273,46 @@ fn get_leader_hint(raft: &SharedRaftHost, roster: &NodeRoster) -> Vec<u8> {
     vec![]
 }
 
+/// Build an advisory rebalance plan from current range leaders (range-count heuristic).
+/// Nodes with no known leadership still appear with an empty range list so they can
+/// receive moves. Ranges whose group has no known leader are omitted.
+async fn build_rebalance_plan(
+    raft: &SharedRaftHost,
+    roster: &SharedRoster,
+    range_table: &SharedRangeTable,
+) -> RebalancePlan {
+    use std::collections::HashMap;
+
+    let roster_snap = roster.read().await.clone();
+    let mut by_node: HashMap<u64, Vec<u64>> = HashMap::new();
+    for id in roster_snap.all_ids() {
+        by_node.insert(id.0, Vec::new());
+    }
+
+    let table = range_table.read().await;
+    {
+        let host = raft.lock().unwrap();
+        for r in table.ranges() {
+            let owner = host
+                .status_of(r.group_id)
+                .and_then(|s| s.leader_id.map(|n| n.0))
+                .or_else(|| {
+                    if host.is_leader_of(r.group_id) {
+                        host.status_of(r.group_id).map(|s| s.id.0)
+                    } else {
+                        None
+                    }
+                });
+            if let Some(nid) = owner {
+                by_node.entry(nid).or_default().push(r.range_id);
+            }
+        }
+    }
+
+    let nodes: Vec<(u64, Vec<u64>)> = by_node.into_iter().collect();
+    plan_range_count(&nodes)
+}
+
 fn lookup_group(range_table: &StaticRangeTable, key: &[u8]) -> GroupId {
     range_table.lookup(key).unwrap_or(GroupId::ZERO)
 }
@@ -409,7 +451,7 @@ async fn dispatch(
         };
     }
 
-    // Handle admin opcodes 7/8/18/19 (ADD/REMOVE/TRANSFER_LEADER/PROMOTE_LEARNER)
+    // Handle admin opcodes 7/8/18/19/20 (ADD/REMOVE/TRANSFER/PROMOTE/REBALANCE_PLAN)
     // with optional operator token enforcement. Supports backward-compat raw payloads
     // (no token configured) and ADMIN-prefixed payloads when clients present the
     // credential. If server has token set, must match.
@@ -417,6 +459,7 @@ async fn dispatch(
         || opcode == REMOVE_MEMBER_OPCODE
         || opcode == TRANSFER_LEADER_OPCODE
         || opcode == PROMOTE_LEARNER_OPCODE
+        || opcode == REBALANCE_PLAN_OPCODE
     {
         // Peel optional ADMIN prefix + token if present; otherwise treat payload as legacy raw.
         let (clean_payload, presented) =
@@ -523,6 +566,21 @@ async fn dispatch(
                     None,
                 ),
             };
+        } else if opcode == REBALANCE_PLAN_OPCODE {
+            // Advisory only: range-count heuristic over current group leaders.
+            // Empty body; does not migrate data or transfer leases.
+            let plan = build_rebalance_plan(raft, roster, range_table).await;
+            let wire: Vec<(u64, u64, u64)> = plan
+                .moves
+                .iter()
+                .map(|m| (m.range_id, m.from_node, m.to_node))
+                .collect();
+            return outcome(
+                STATUS_OK,
+                encode_rebalance_plan_response(&wire),
+                operator_auth,
+                None,
+            );
         } else {
             // TRANSFER_LEADER (18): group_id | target_node_id — leader steps down.
             return match decode_transfer_leader_request(&clean_payload) {

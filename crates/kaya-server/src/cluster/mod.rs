@@ -12,11 +12,14 @@
 //!    connections: GET/SCAN/PUT/DELETE route via the static range table to the
 //!    owning Raft group; writes are acknowledged once committed on that group.
 
+mod balancer;
 mod client_ops;
 mod election;
 mod replication;
 mod snapshot;
 mod stats;
+
+pub use balancer::{plan_range_count, RangeMove, RebalancePlan};
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -80,8 +83,9 @@ pub struct ClusterConfig {
     /// When true, this node is joining an existing cluster via seed peers only.
     pub join_cluster: bool,
     /// Optional operator token. If set, ADD/REMOVE_MEMBER (opcodes 7/8),
-    /// TRANSFER_LEADER (18), and PROMOTE_LEARNER (19) require the presented credential
-    /// to match exactly. If None, any caller may perform those admin ops (dev default).
+    /// TRANSFER_LEADER (18), PROMOTE_LEARNER (19), and REBALANCE_PLAN (20) require the
+    /// presented credential to match exactly. If None, any caller may perform those
+    /// admin ops (dev default).
     pub operator_token: Option<String>,
     /// Optional client token. If set, PUT/GET/DELETE/SCAN/STATS (opcodes 1-4, 6) require the
     /// presented credential (via CLIENT auth prefix) to match exactly. HEALTH (5) stays open.
@@ -184,8 +188,8 @@ impl ClusterConfig {
         self
     }
 
-    /// Require the given operator token for ADD/REMOVE_MEMBER, TRANSFER_LEADER, PROMOTE_LEARNER.
-    /// Callers must present it using the ADMIN auth framing.
+    /// Require the given operator token for ADD/REMOVE_MEMBER, TRANSFER_LEADER,
+    /// PROMOTE_LEARNER, REBALANCE_PLAN. Callers must present it using the ADMIN auth framing.
     pub fn with_operator_token(mut self, token: String) -> Self {
         self.operator_token = Some(token);
         self

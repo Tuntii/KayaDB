@@ -1,13 +1,15 @@
-//! `kayactl range` — list / split / merge meta ranges (M21/M22) via cluster server.
+//! `kayactl range` — list / split / merge / rebalance-plan meta ranges (M21/M22).
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use kaya_core::{KayaError, Result};
 use kaya_net::{
-    decode_error_payload, decode_list_ranges_response, encode_client_auth_payload,
-    encode_merge_range_request, encode_split_range_request, roundtrip, LIST_RANGES_OPCODE,
-    MERGE_RANGE_OPCODE, SPLIT_RANGE_OPCODE, STATUS_INVALID_ARGUMENT, STATUS_NOT_LEADER, STATUS_OK,
+    decode_error_payload, decode_list_ranges_response, decode_rebalance_plan_response,
+    encode_admin_payload, encode_client_auth_payload, encode_merge_range_request,
+    encode_split_range_request, roundtrip, LIST_RANGES_OPCODE, MERGE_RANGE_OPCODE,
+    REBALANCE_PLAN_OPCODE, SPLIT_RANGE_OPCODE, STATUS_INVALID_ARGUMENT, STATUS_NOT_LEADER,
+    STATUS_OK,
 };
 
 use crate::cli::{block_on, json_string};
@@ -18,6 +20,7 @@ pub fn run_range(
     server_addrs: Vec<SocketAddr>,
     timeout: Option<Duration>,
     client_token: Option<String>,
+    operator_token: Option<String>,
     json: bool,
 ) -> Result<()> {
     if args.first().map(String::as_str) == Some("range") {
@@ -151,6 +154,43 @@ pub fn run_range(
                 Ok(())
             })
         }
+        "rebalance-plan" => block_on(async {
+            // Admin path: empty inner body; optional operator token framing.
+            let payload = match &operator_token {
+                Some(tok) => encode_admin_payload(REBALANCE_PLAN_OPCODE, &[], Some(tok.as_str())),
+                None => Vec::new(),
+            };
+            let (status, body) = request_admin(
+                &server_addrs,
+                REBALANCE_PLAN_OPCODE,
+                &payload,
+                timeout,
+            )
+            .await?;
+            if status != STATUS_OK {
+                return status_err(status, &body);
+            }
+            let moves =
+                decode_rebalance_plan_response(&body).map_err(KayaError::corruption)?;
+            if json {
+                print!("{{\"advisory\":true,\"moves\":[");
+                for (i, (range_id, from_node, to_node)) in moves.iter().enumerate() {
+                    if i > 0 {
+                        print!(",");
+                    }
+                    print!(
+                        "{{\"range_id\":{range_id},\"from_node\":{from_node},\"to_node\":{to_node}}}"
+                    );
+                }
+                println!("]}}");
+            } else {
+                println!("advisory rebalance plan ({} moves; not applied)", moves.len());
+                for (range_id, from_node, to_node) in &moves {
+                    println!("  range_id={range_id} from={from_node} to={to_node}");
+                }
+            }
+            Ok(())
+        }),
         _ => Err(KayaError::invalid_argument(range_usage())),
     }
 }
@@ -197,10 +237,29 @@ async fn request(
     client_token: &Option<String>,
 ) -> Result<(u16, Vec<u8>)> {
     let wire = encode_client_auth_payload(payload, client_token.as_deref());
+    roundtrip_redirect(endpoints, opcode, &wire, timeout).await
+}
+
+/// Admin opcodes: payload already includes optional ADMIN framing (no client auth).
+async fn request_admin(
+    endpoints: &[SocketAddr],
+    opcode: u8,
+    payload: &[u8],
+    timeout: Option<Duration>,
+) -> Result<(u16, Vec<u8>)> {
+    roundtrip_redirect(endpoints, opcode, payload, timeout).await
+}
+
+async fn roundtrip_redirect(
+    endpoints: &[SocketAddr],
+    opcode: u8,
+    wire: &[u8],
+    timeout: Option<Duration>,
+) -> Result<(u16, Vec<u8>)> {
     let mut current = endpoints[0];
     let mut redirects = 0u32;
     loop {
-        let fut = roundtrip(current, opcode, &wire);
+        let fut = roundtrip(current, opcode, wire);
         let (status, body) = match timeout {
             Some(dur) => match tokio::time::timeout(dur, fut).await {
                 Ok(Ok(v)) => v,
@@ -241,5 +300,5 @@ fn status_err(status: u16, body: &[u8]) -> Result<()> {
 }
 
 fn range_usage() -> &'static str {
-    "usage: kayactl --server <addr> range <list|split|merge> ..."
+    "usage: kayactl --server <addr> [--operator-token <tok>] range <list|split|merge|rebalance-plan> ..."
 }
