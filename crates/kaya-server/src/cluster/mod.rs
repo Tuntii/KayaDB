@@ -102,6 +102,9 @@ pub struct ClusterConfig {
     pub audit_syslog: Option<SocketAddr>,
     /// When `Some`, expose Prometheus metrics at this listen address (`GET /metrics`).
     pub metrics_addr: Option<SocketAddr>,
+    /// When `Some`, expose the read-only JSON dashboard (`GET /health`,
+    /// `/v1/ranges`, `/v1/raft`) at this listen address.
+    pub dashboard_addr: Option<SocketAddr>,
     /// Maximum concurrent client connections. Further connections are not
     /// accepted until an active one closes (TCP backlog backpressure).
     pub max_client_connections: usize,
@@ -164,6 +167,7 @@ impl ClusterConfig {
             audit_log: false,
             audit_syslog: None,
             metrics_addr: None,
+            dashboard_addr: None,
             max_client_connections: DEFAULT_MAX_CLIENT_CONNECTIONS,
             #[cfg(feature = "ebpf")]
             ebpf_enabled: false,
@@ -236,6 +240,18 @@ impl ClusterConfig {
     /// Disable the Prometheus `/metrics` HTTP listener.
     pub fn without_metrics(mut self) -> Self {
         self.metrics_addr = None;
+        self
+    }
+
+    /// Enable the read-only JSON dashboard HTTP listener on `addr`.
+    pub fn with_dashboard_addr(mut self, addr: SocketAddr) -> Self {
+        self.dashboard_addr = Some(addr);
+        self
+    }
+
+    /// Disable the read-only JSON dashboard HTTP listener.
+    pub fn without_dashboard(mut self) -> Self {
+        self.dashboard_addr = None;
         self
     }
 
@@ -579,6 +595,19 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     } else {
         None
     };
+
+    // Read-only dashboard: spawned so it does not explode the select! matrix.
+    // Dropped when the process shuts down via the runtime.
+    if let Some(dashboard_addr) = config.dashboard_addr {
+        let raft = shared_raft.clone();
+        let ranges = shared_range_table.clone();
+        let node_id = config.node_id.0;
+        tokio::spawn(async move {
+            if let Err(e) = crate::dashboard::serve(dashboard_addr, node_id, raft, ranges).await {
+                eprintln!("[node {node_id}] dashboard listener error: {e}");
+            }
+        });
+    }
 
     // TLS for client listener: accept Tcp, handshake with TlsAcceptor (built from tls_config),
     // pass resulting stream (which implements AsyncRead/Write) to generic handle_connection.

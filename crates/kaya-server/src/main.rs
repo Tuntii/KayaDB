@@ -150,6 +150,11 @@ fn run() -> Result<(), String> {
         )
     };
 
+    // Optional read-only JSON dashboard (M22). Example: --dashboard-addr 127.0.0.1:7380
+    let dashboard_addr: Option<SocketAddr> = take_value(&mut args, "--dashboard-addr")
+        .map(|s| s.parse().map_err(|e| format!("--dashboard-addr: {e}")))
+        .transpose()?;
+
     // --audit-syslog <host:port> / KAYA_AUDIT_SYSLOG — forward audit records to
     // a remote SIEM collector over UDP (RFC 5424). Requires --audit-log.
     let audit_syslog: Option<SocketAddr> = match take_value(&mut args, "--audit-syslog")
@@ -163,6 +168,9 @@ fn run() -> Result<(), String> {
     validate_bind_addr(raft_addr, allow_public_bind)?;
     validate_bind_addr(client_addr, allow_public_bind)?;
     if let Some(addr) = metrics_addr {
+        validate_bind_addr(addr, allow_public_bind)?;
+    }
+    if let Some(addr) = dashboard_addr {
         validate_bind_addr(addr, allow_public_bind)?;
     }
     eprintln!("{}", security_banner(allow_public_bind));
@@ -234,6 +242,9 @@ fn run() -> Result<(), String> {
         Some(addr) => config.with_metrics_addr(addr),
         None => config.without_metrics(),
     };
+    if let Some(addr) = dashboard_addr {
+        config = config.with_dashboard_addr(addr);
+    }
 
     if enable_tls {
         if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
