@@ -494,6 +494,27 @@ mod tests {
         assert!(table.split_at(b"0").is_err());
     }
 
+    /// Mirrors the server SPLIT_RANGE path: peek + (host) + split_at under
+    /// exclusive access so the hosted id matches the allocated id.
+    #[test]
+    fn peek_then_split_allocates_stable_group_ids() {
+        let mut table = StaticRangeTable::single_group(GroupId::ZERO);
+        let mut hosted = vec![GroupId::ZERO];
+
+        for key in [b"m".as_slice(), b"t".as_slice()] {
+            let peek = table.peek_next_group_id();
+            // Server hosts `peek` before split_at; table mutation is exclusive.
+            hosted.push(peek);
+            let (_, right, gid) = table.split_at(key).unwrap();
+            assert_eq!(gid, peek, "hosted peek must match split_at allocation");
+            assert_eq!(right.group_id, gid);
+        }
+        assert_eq!(hosted, vec![GroupId(0), GroupId(1), GroupId(2)]);
+        assert_eq!(table.lookup(b"a"), Some(GroupId::ZERO));
+        assert_eq!(table.lookup(b"m"), Some(GroupId(1)));
+        assert_eq!(table.lookup(b"t"), Some(GroupId(2)));
+    }
+
     #[test]
     fn two_groups_propose_and_apply_independently() {
         let mut host = MultiRaftHost::new();

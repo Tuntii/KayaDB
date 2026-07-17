@@ -276,6 +276,34 @@ fn is_leader_of(raft: &SharedRaftHost, group_id: GroupId) -> bool {
     raft.lock().unwrap().is_leader_of(group_id)
 }
 
+/// True when the range table points at a group this process does not host.
+fn group_not_hosted(raft: &SharedRaftHost, group_id: GroupId) -> bool {
+    raft.lock().unwrap().get(group_id).is_none()
+}
+
+/// Build `STATUS_RANGE_MOVED` with a list-ranges body for the key's current owner.
+fn range_moved_for_key(
+    range_table: &StaticRangeTable,
+    key: &[u8],
+    client_auth: &'static str,
+    key_len: Option<usize>,
+) -> Option<DispatchOutcome> {
+    let r = range_table.lookup_range(key)?;
+    Some(outcome(
+        STATUS_RANGE_MOVED,
+        encode_range_moved_payload(
+            range_table.meta_epoch(),
+            r.range_id,
+            r.epoch,
+            r.group_id.0,
+            &r.start_key,
+            &r.end_key,
+        ),
+        client_auth,
+        key_len,
+    ))
+}
+
 /// Ensure a Raft group exists on this host (create empty node + persist paths).
 fn ensure_group_hosted(rt: &SplitRuntime, group_id: GroupId) -> Result<(), String> {
     {
@@ -515,23 +543,11 @@ async fn dispatch(
                     let t = range_table.read().await;
                     lookup_group(&t, &key)
                 };
-                // If the group is missing (race after split), signal RANGE_MOVED.
-                if raft.lock().unwrap().get(group_id).is_none() {
+                // If the group is missing (race after split / not hosted), signal RANGE_MOVED.
+                if group_not_hosted(raft, group_id) {
                     let t = range_table.read().await;
-                    if let Some(r) = t.lookup_range(&key) {
-                        return outcome(
-                            STATUS_RANGE_MOVED,
-                            encode_range_moved_payload(
-                                t.meta_epoch(),
-                                r.range_id,
-                                r.epoch,
-                                r.group_id.0,
-                                &r.start_key,
-                                &r.end_key,
-                            ),
-                            client_auth,
-                            Some(key_len),
-                        );
+                    if let Some(out) = range_moved_for_key(&t, &key, client_auth, Some(key_len)) {
+                        return out;
                     }
                 }
                 let cmd = RaftCommand::Put { key, value }.encode();
@@ -554,6 +570,12 @@ async fn dispatch(
                     let t = range_table.read().await;
                     lookup_group(&t, &key)
                 };
+                if group_not_hosted(raft, group_id) {
+                    let t = range_table.read().await;
+                    if let Some(out) = range_moved_for_key(&t, &key, client_auth, None) {
+                        return out;
+                    }
+                }
                 let req_id = next_read_req_id.fetch_add(1, Ordering::SeqCst);
                 match propose_read_and_wait(raft, read_propose_tx, group_id, req_id).await {
                     Ok(()) => match engine.lock().await.get(&key, ReadOptions::default()).await {
@@ -591,6 +613,12 @@ async fn dispatch(
                     let t = range_table.read().await;
                     lookup_group(&t, &key)
                 };
+                if group_not_hosted(raft, group_id) {
+                    let t = range_table.read().await;
+                    if let Some(out) = range_moved_for_key(&t, &key, client_auth, Some(key_len)) {
+                        return out;
+                    }
+                }
                 let cmd = RaftCommand::Delete { key }.encode();
                 let (status, body) =
                     propose_and_wait(raft, &roster_snapshot, propose_tx, group_id, cmd).await;
@@ -611,6 +639,12 @@ async fn dispatch(
                     let t = range_table.read().await;
                     lookup_group(&t, &prefix)
                 };
+                if group_not_hosted(raft, group_id) {
+                    let t = range_table.read().await;
+                    if let Some(out) = range_moved_for_key(&t, &prefix, client_auth, None) {
+                        return out;
+                    }
+                }
                 let req_id = next_read_req_id.fetch_add(1, Ordering::SeqCst);
                 match propose_read_and_wait(raft, read_propose_tx, group_id, req_id).await {
                     Ok(()) => {
@@ -896,15 +930,14 @@ async fn dispatch(
                     let hint = get_leader_hint(raft, &roster_snapshot);
                     return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
                 }
-                // Peek new group id under write lock, host it, then commit split.
-                let new_gid = {
-                    let t = range_table.read().await;
-                    t.peek_next_group_id()
-                };
+                // Hold the table write lock across peek + host + split_at so two
+                // concurrent splits cannot host the same peek id while split_at
+                // allocates a different one.
+                let mut t = range_table.write().await;
+                let new_gid = t.peek_next_group_id();
                 if let Err(e) = ensure_group_hosted(split_rt, new_gid) {
                     return outcome(STATUS_ERROR, encode_error_payload(&e), client_auth, None);
                 }
-                let mut t = range_table.write().await;
                 match t.split_at(&split_key) {
                     Ok((left, right, gid)) => {
                         debug_assert_eq!(gid, new_gid);
