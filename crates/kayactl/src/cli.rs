@@ -49,7 +49,9 @@ pub(crate) fn print_usage() {
     println!("  kayactl [--data <dir>] [--json] index backfill <pause|resume|step|status> <name> [--batch N]");
     println!();
     println!("BACKUP");
-    println!("  kayactl backup --data <src> --out <dest> [--incremental] [--cdc-consumer <id>] [--json]");
+    println!(
+        "  kayactl backup --data <src> --out <dest> [--incremental] [--cdc-consumer <id>] [--json]"
+    );
     println!();
     println!("RANGE / SHARDING (cluster)");
     println!("  kayactl --server <addr> [--json] range list");

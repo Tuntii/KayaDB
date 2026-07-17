@@ -1108,8 +1108,8 @@ mod tests {
             .with_acl(acl.clone());
         let config2 = ClusterConfig::new(2, &data_dir2, raft_addr2, client_addr2, peers2)
             .with_acl(acl.clone());
-        let config3 = ClusterConfig::new(3, &data_dir3, raft_addr3, client_addr3, peers3)
-            .with_acl(acl);
+        let config3 =
+            ClusterConfig::new(3, &data_dir3, raft_addr3, client_addr3, peers3).with_acl(acl);
 
         let handle1 = tokio::spawn(async move {
             let _ = ClusterNode::new(config1).run().await;

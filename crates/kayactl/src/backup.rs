@@ -32,11 +32,7 @@ struct BackupReport {
 }
 
 /// Entry point for `kayactl backup --data <src> --out <dest> [--incremental] [--cdc-consumer <id>]`.
-pub fn run_backup(
-    mut args: Vec<String>,
-    data_dir: &str,
-    durability: DurabilityMode,
-) -> Result<()> {
+pub fn run_backup(mut args: Vec<String>, data_dir: &str, durability: DurabilityMode) -> Result<()> {
     // Drop the "backup" verb.
     if args.first().map(String::as_str) == Some("backup") {
         args.remove(0);

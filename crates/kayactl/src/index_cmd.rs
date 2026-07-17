@@ -110,7 +110,11 @@ pub fn run_index(
             } else {
                 println!(
                     "OK index {name} created ({})",
-                    if online { "online backfill" } else { "sync backfill" }
+                    if online {
+                        "online backfill"
+                    } else {
+                        "sync backfill"
+                    }
                 );
             }
             Ok(())
@@ -139,9 +143,10 @@ pub fn run_index(
             Ok(())
         }
         "drop" => {
-            let name = args.first().cloned().ok_or_else(|| {
-                KayaError::invalid_argument("usage: kayactl index drop <name>")
-            })?;
+            let name = args
+                .first()
+                .cloned()
+                .ok_or_else(|| KayaError::invalid_argument("usage: kayactl index drop <name>"))?;
             block_on(async {
                 let mut engine = open_engine(data_dir, durability).await?;
                 engine.drop_index(&name).await
@@ -157,7 +162,10 @@ pub fn run_index(
             let name = args.first().cloned().ok_or_else(|| {
                 KayaError::invalid_argument("usage: kayactl index scan <name> [value_prefix]")
             })?;
-            let value_prefix = args.get(1).map(|s| s.as_bytes().to_vec()).unwrap_or_default();
+            let value_prefix = args
+                .get(1)
+                .map(|s| s.as_bytes().to_vec())
+                .unwrap_or_default();
             let hits = block_on(async {
                 let mut engine = open_engine(data_dir, durability).await?;
                 engine.scan_by_index(&name, &value_prefix).await
@@ -187,9 +195,10 @@ pub fn run_index(
             Ok(())
         }
         "verify" => {
-            let name = args.first().cloned().ok_or_else(|| {
-                KayaError::invalid_argument("usage: kayactl index verify <name>")
-            })?;
+            let name = args
+                .first()
+                .cloned()
+                .ok_or_else(|| KayaError::invalid_argument("usage: kayactl index verify <name>"))?;
             let div = block_on(async {
                 let mut engine = open_engine(data_dir, durability).await?;
                 engine.verify_index(&name).await

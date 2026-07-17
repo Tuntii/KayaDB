@@ -385,14 +385,8 @@ mod tests {
             ClusterMember::learner(NodeId(3), "127.0.0.1:7483", "127.0.0.1:7381"),
         ];
         let self_entry = current[0].clone();
-        let next = members_for_remove(
-            &roster,
-            &[NodeId(1)],
-            &current,
-            NodeId(3),
-            self_entry,
-        )
-        .expect("removing a learner must succeed even with one voter left");
+        let next = members_for_remove(&roster, &[NodeId(1)], &current, NodeId(3), self_entry)
+            .expect("removing a learner must succeed even with one voter left");
         assert_eq!(next.len(), 1);
         assert_eq!(next[0].id, NodeId(1));
         assert!(!next[0].is_learner);

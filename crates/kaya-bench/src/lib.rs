@@ -43,9 +43,7 @@ pub async fn run_smoke_txn_multi_key() {
     let (txn_id, _) = engine.begin_txn();
     for i in 0u8..8 {
         let key = format!("mk{i:02}").into_bytes();
-        engine
-            .txn_put(txn_id, key, vec![0xcd; 16])
-            .unwrap();
+        engine.txn_put(txn_id, key, vec![0xcd; 16]).unwrap();
     }
     engine.txn_commit(txn_id).await.unwrap();
 

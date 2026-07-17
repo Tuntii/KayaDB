@@ -491,7 +491,12 @@ impl<D: Disk> Engine<D> {
     /// Lowest consumer checkpoint (or 0 if none). Events with `seq <=` this value
     /// are safe to drop from the durable log for all known consumers.
     pub fn cdc_min_consumer_seq(&self) -> u64 {
-        self.cdc.consumer_last_seq.values().copied().min().unwrap_or(0)
+        self.cdc
+            .consumer_last_seq
+            .values()
+            .copied()
+            .min()
+            .unwrap_or(0)
     }
 
     /// Compact the CDC log, dropping events with `seq <= retain_below` (inclusive).
@@ -838,10 +843,7 @@ mod tests {
             let mut c = engine.cdc_subscribe("backup", Some(0)).unwrap();
             let ev = engine.cdc_poll(&mut c, 1).unwrap();
             engine.cdc_checkpoint("backup").await.unwrap();
-            engine
-                .cdc_write_backup_watermark(ev[0].seq)
-                .await
-                .unwrap();
+            engine.cdc_write_backup_watermark(ev[0].seq).await.unwrap();
             assert_eq!(
                 engine.cdc_read_backup_watermark().await.unwrap(),
                 Some(ev[0].seq)

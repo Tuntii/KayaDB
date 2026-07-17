@@ -28,8 +28,8 @@ impl PrefixAcl {
 
     /// Parse ACL from a JSON object string.
     pub fn from_json(raw: &str) -> Result<Self, String> {
-        let map: HashMap<String, String> = serde_json::from_str(raw.trim())
-            .map_err(|e| format!("parse ACL JSON: {e}"))?;
+        let map: HashMap<String, String> =
+            serde_json::from_str(raw.trim()).map_err(|e| format!("parse ACL JSON: {e}"))?;
         Self::from_map(map)
     }
 
@@ -38,7 +38,9 @@ impl PrefixAcl {
         let mut rules = Vec::with_capacity(map.len());
         for (prefix_s, token) in map {
             if token.is_empty() {
-                return Err(format!("ACL token for prefix {prefix_s:?} must be non-empty"));
+                return Err(format!(
+                    "ACL token for prefix {prefix_s:?} must be non-empty"
+                ));
             }
             let prefix = parse_prefix_key(&prefix_s)?;
             rules.push((prefix, token));
@@ -94,7 +96,10 @@ impl PrefixAcl {
 /// * anything else → UTF-8 bytes of the string as-is
 fn parse_prefix_key(s: &str) -> Result<Vec<u8>, String> {
     let lower = s.to_ascii_lowercase();
-    if let Some(hex) = lower.strip_prefix("0x").or_else(|| lower.strip_prefix("hex:")) {
+    if let Some(hex) = lower
+        .strip_prefix("0x")
+        .or_else(|| lower.strip_prefix("hex:"))
+    {
         return decode_hex(hex).map_err(|e| format!("ACL prefix {s:?}: {e}"));
     }
     Ok(s.as_bytes().to_vec())

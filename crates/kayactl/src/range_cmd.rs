@@ -39,8 +39,14 @@ pub fn run_range(
 
     match sub.as_str() {
         "list" => block_on(async {
-            let (status, body) =
-                request(&server_addrs, LIST_RANGES_OPCODE, &[], timeout, &client_token).await?;
+            let (status, body) = request(
+                &server_addrs,
+                LIST_RANGES_OPCODE,
+                &[],
+                timeout,
+                &client_token,
+            )
+            .await?;
             if status != STATUS_OK {
                 return status_err(status, &body);
             }
@@ -160,18 +166,12 @@ pub fn run_range(
                 Some(tok) => encode_admin_payload(REBALANCE_PLAN_OPCODE, &[], Some(tok.as_str())),
                 None => Vec::new(),
             };
-            let (status, body) = request_admin(
-                &server_addrs,
-                REBALANCE_PLAN_OPCODE,
-                &payload,
-                timeout,
-            )
-            .await?;
+            let (status, body) =
+                request_admin(&server_addrs, REBALANCE_PLAN_OPCODE, &payload, timeout).await?;
             if status != STATUS_OK {
                 return status_err(status, &body);
             }
-            let moves =
-                decode_rebalance_plan_response(&body).map_err(KayaError::corruption)?;
+            let moves = decode_rebalance_plan_response(&body).map_err(KayaError::corruption)?;
             if json {
                 print!("{{\"advisory\":true,\"moves\":[");
                 for (i, (range_id, from_node, to_node)) in moves.iter().enumerate() {
@@ -184,7 +184,10 @@ pub fn run_range(
                 }
                 println!("]}}");
             } else {
-                println!("advisory rebalance plan ({} moves; not applied)", moves.len());
+                println!(
+                    "advisory rebalance plan ({} moves; not applied)",
+                    moves.len()
+                );
                 for (range_id, from_node, to_node) in &moves {
                     println!("  range_id={range_id} from={from_node} to={to_node}");
                 }
@@ -204,7 +207,8 @@ fn parse_range_key(raw: &str) -> Result<Vec<u8>> {
     let hex_body = if let Some(rest) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
         Some(rest)
     } else {
-        raw.strip_prefix("hex:").or_else(|| raw.strip_prefix("HEX:"))
+        raw.strip_prefix("hex:")
+            .or_else(|| raw.strip_prefix("HEX:"))
     };
     if let Some(hex) = hex_body {
         if hex.is_empty() {
@@ -270,9 +274,7 @@ async fn roundtrip_redirect(
                     )));
                 }
             },
-            None => fut
-                .await
-                .map_err(|e| KayaError::internal(e.to_string()))?,
+            None => fut.await.map_err(|e| KayaError::internal(e.to_string()))?,
         };
         if status == STATUS_NOT_LEADER && redirects < 6 {
             if !body.is_empty() {

@@ -461,9 +461,7 @@ impl RaftNode {
         let last = self.log.last_index();
         for m in members {
             if m.id != self.config.id {
-                self.next_index
-                    .entry(m.id)
-                    .or_insert(LogIndex(last.0 + 1));
+                self.next_index.entry(m.id).or_insert(LogIndex(last.0 + 1));
                 self.match_index.entry(m.id).or_insert(LogIndex(0));
             }
         }
@@ -1320,9 +1318,9 @@ mod tests {
         let membership = node.membership();
         assert_eq!(membership.len(), 2);
         assert!(membership.iter().any(|m| m.id == NodeId(3) && m.is_learner));
-        assert!(
-            membership.iter().any(|m| m.id == NodeId(1) && !m.is_learner)
-        );
+        assert!(membership
+            .iter()
+            .any(|m| m.id == NodeId(1) && !m.is_learner));
         // Learner still gets replication state (log shipping without vote).
         assert!(node.next_index.contains_key(&NodeId(3)));
     }
@@ -1349,13 +1347,18 @@ mod tests {
             out.extend(node.tick());
         }
         assert_ne!(node.role, Role::Leader, "learner must not become leader");
-        assert_ne!(node.role, Role::Candidate, "learner must not become candidate");
+        assert_ne!(
+            node.role,
+            Role::Candidate,
+            "learner must not become candidate"
+        );
         assert_eq!(
             node.current_term, term_before,
             "learner election must not start (term unchanged)"
         );
         assert!(
-            !out.iter().any(|e| matches!(e.message, Message::VoteRequest(_))),
+            !out.iter()
+                .any(|e| matches!(e.message, Message::VoteRequest(_))),
             "learner must not send VoteRequest"
         );
     }

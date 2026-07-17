@@ -1654,7 +1654,10 @@ mod tests {
     fn member_payload_roundtrip_with_learner_flag() {
         let voter = encode_member_payload(1, "127.0.0.1:1", "127.0.0.1:2");
         let (id, raft, client, is_learner) = decode_member_payload(&voter).unwrap();
-        assert_eq!((id, raft.as_str(), client.as_str(), is_learner), (1, "127.0.0.1:1", "127.0.0.1:2", false));
+        assert_eq!(
+            (id, raft.as_str(), client.as_str(), is_learner),
+            (1, "127.0.0.1:1", "127.0.0.1:2", false)
+        );
 
         let learner = encode_member_payload_with_learner(9, "r", "c", true);
         let decoded = decode_member_payload(&learner).unwrap();

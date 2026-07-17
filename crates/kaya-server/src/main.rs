@@ -206,8 +206,7 @@ fn run() -> Result<(), String> {
         take_value(&mut args, "--client-token").or_else(|| env::var("KAYA_CLIENT_TOKEN").ok());
 
     // --acl-file <path> / KAYA_ACL_FILE — JSON map prefix -> token (M24 per-prefix ACL).
-    let acl_file =
-        take_value(&mut args, "--acl-file").or_else(|| env::var("KAYA_ACL_FILE").ok());
+    let acl_file = take_value(&mut args, "--acl-file").or_else(|| env::var("KAYA_ACL_FILE").ok());
 
     // --encryption-key-file <path> / KAYA_ENCRYPTION_KEY_FILE — 32 raw bytes AES-256 key.
     let encryption_key_file = take_value(&mut args, "--encryption-key-file")

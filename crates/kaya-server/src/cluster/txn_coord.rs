@@ -18,9 +18,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 
-use kaya_engine::{
-    ScanOptions, Txn2pcState, TXN_REC_PREFIX,
-};
+use kaya_engine::{ScanOptions, Txn2pcState, TXN_REC_PREFIX};
 use kaya_io::Disk;
 use kaya_raft::{GroupId, RaftCommand};
 
@@ -72,9 +70,8 @@ where
         );
     }
 
-    let coordinator = coordinator_group(&mutations_by_group).ok_or_else(|| {
-        "commit_cross_group: no keys in mutations_by_group".to_owned()
-    })?;
+    let coordinator = coordinator_group(&mutations_by_group)
+        .ok_or_else(|| "commit_cross_group: no keys in mutations_by_group".to_owned())?;
 
     // ── Phase 1: Prepare ────────────────────────────────────────────────────
     let mut prepared: Vec<GroupId> = Vec::with_capacity(mutations_by_group.len());
@@ -187,14 +184,8 @@ mod tests {
     #[test]
     fn coordinator_picks_group_of_lex_smallest_key() {
         let mut m: HashMap<GroupId, Vec<(Vec<u8>, Option<Vec<u8>>)>> = HashMap::new();
-        m.insert(
-            GroupId(2),
-            vec![(b"m".to_vec(), Some(b"1".to_vec()))],
-        );
-        m.insert(
-            GroupId(1),
-            vec![(b"a".to_vec(), Some(b"1".to_vec()))],
-        );
+        m.insert(GroupId(2), vec![(b"m".to_vec(), Some(b"1".to_vec()))]);
+        m.insert(GroupId(1), vec![(b"a".to_vec(), Some(b"1".to_vec()))]);
         assert_eq!(coordinator_group(&m), Some(GroupId(1)));
     }
 
@@ -241,10 +232,7 @@ mod tests {
         let entries = log.lock().unwrap().clone();
         assert_eq!(entries.len(), 4, "{entries:?}");
         // Two prepares then two commits (group order follows HashMap iteration).
-        assert_eq!(
-            entries.iter().filter(|e| e.starts_with("prep")).count(),
-            2
-        );
+        assert_eq!(entries.iter().filter(|e| e.starts_with("prep")).count(), 2);
         assert_eq!(
             entries.iter().filter(|e| e.starts_with("commit")).count(),
             2

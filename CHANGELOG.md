@@ -9,16 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added (M25 — Scale proof track, partial)
+### Added (M16–M25 arc — production path complete)
+- **Arc close-out (2026-07-17):** M16–M25 documented production path closed. ROADMAP north-star re-eval: **v0.2.0 candidate** with residual risks listed honestly (no live range migrate, sequential 2PC + fail-closed recovery, no HLC uncertainty clamp, Jepsen grand matrix / minimal counterexample / scheduled profiling CI / Zig client / key rotation / Dashboard v2 still open). Not an unqualified production-SLA claim.
+
+### Added (M25 — Scale proof & ecosystem production path)
+- **Go client TXN + retries:** opcodes 9–12, `BeginTxn` / `Transaction` Get/Put/Delete/Commit/Rollback, `RetryPolicy` (exp backoff + full jitter + request timeout)
+- **TypeScript client:** `clients/kaya-ts/` zero-dep Node TCP (put/get/delete/health/hello, NOT_LEADER redirect, optional client token)
+- **Conformance v3:** MERGE_RANGE (17) + SPLIT_RANGE + txn edge vectors; Rust runner coverage
 - **Perf envelope v2:** `kaya-bench` smoke helpers `run_smoke_txn_multi_key` + `run_smoke_multi_range_2pc`; CI `perf_gate` loose budgets; `BENCHMARKS.md` + `spec/docs/benchmarking-spec.md` tables
 - **Deployment guide v2:** `docs/deployment-guide-v2.md` — M22–M24 flags (`--drain`, `--dashboard-addr`, `--encryption-key-file`, `--acl-file`), range ops, staging profile; linked from deployment/SLO/docs nav
-- SLO notes: multi-key / 2PC guidance in `docs/slo-envelope.md`; ROADMAP M25 marked in-progress for envelope + deploy guide
+- SLO notes: multi-key / 2PC guidance in `docs/slo-envelope.md`
+- ROADMAP: M25 production path closed; M16–M25 arc complete as v0.2.0 candidate. *Out of path:* scheduled profiling CI, full Jepsen grand matrix, linearizability minimal counterexample, Zig client
 
 ### Added (M24 — Production hardening path)
 - **Encryption-at-rest:** `EncryptedDisk` AES-256-GCM Disk wrapper (`KAYAENC1 | plain_len | nonce | ciphertext+tag`); server `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE` (32 raw bytes; v1 single key as KEK=DEK); contract + unit tests
 - **Per-prefix ACL:** `PrefixAcl` + `--acl-file` / `KAYA_ACL_FILE` (JSON `prefix → token`, UTF-8 or `0x`/`hex:`); longest-prefix authorize on PUT/GET/DELETE/SCAN/TXN_*; empty map denies all; IT `per_prefix_acl_two_tokens`
 - **Security docs:** `docs/security.md` enforcement table + §7 re-justified for M24 exit (encryption + ACL closed; key rotation and full multi-tenancy remain accepted risks)
-- ROADMAP: M24 production path closed; M25 open; no full v0.2.0 / north-star claim yet. *Out of path:* online KEK/DEK rotation, full kernel+userspace eBPF attribution, io_uring completion tracing, stap/perf privileged CI, Dashboard v2
+- ROADMAP: M24 production path closed. *Out of path:* online KEK/DEK rotation, full kernel+userspace eBPF attribution, io_uring completion tracing, stap/perf privileged CI, Dashboard v2
 
 ### Added (M23 — Cross-shard transactions production path)
 - **2PC engine records (shared-engine):** `\x00txn/rec/{txn_id}` + `\x00txn/intent/{txn_id}/{key}`; `Engine::apply_txn_prepare` / `apply_txn_commit_2pc` / `apply_txn_abort_2pc`; commit materializes intents via `apply_mutations` (index+CDC fire)
@@ -28,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TLA+ sketch:** `spec/specs/txn/TwoPhaseCommit.tla` + `.cfg` (prepare/decide/recover; TXN-2PC invariants)
 - **IT:** `test_cross_range_txn_commit`; multi-range bank `test_multi_range_bank_sum_invariant` (SI transfers across ranges, sum holds)
 - Spec: `spec/docs/transactions-spec.md` §17
-- ROADMAP: M23 production path closed; M24+ open; no full v0.2.0 / north-star claim yet. *Out of path:* parallel prepare/commit stretch, HLC uncertainty-interval clamp, multi-range Jepsen bank under full chaos matrix
+- ROADMAP: M23 production path closed. *Out of path:* parallel prepare/commit stretch, HLC uncertainty-interval clamp, multi-range Jepsen bank under full chaos matrix
 
 ### Added (M22 — Rebalancing, merges & placement production path)
 - **Range merge (shared-engine):** `StaticRangeTable::merge_with_next` + wire `MERGE_RANGE` (17) + `kayactl range merge`; IT `test_range_merge_recombines`. Routing-only merge (no physical key move); orphan Raft group after merge stays hosted (reclaim follow-on)
@@ -38,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Drain / decommission:** `kayadb-server --drain` / `KAYA_DRAIN=1`; STATS JSON `"drain": true|false`; draining node rejects `SPLIT_RANGE`; runbook `docs/runbooks/decommission-node.md` (transfer leaders → remove member → wipe `data_dir`)
 - **Dashboard v1:** optional `--dashboard-addr` read-only HTTP — `GET /health`, `/v1/ranges`, `/v1/raft`
 - Spec: `spec/docs/range-routing-spec.md` (merge algorithm, REBALANCE_PLAN advisory, exit table)
-- ROADMAP: M22 production path closed; M23+ open; no full v0.2.0 / north-star claim yet. *Out of path:* live range migrate, locality tags, auto size-threshold split
+- ROADMAP: M22 production path closed. *Out of path:* live range migrate, locality tags, auto size-threshold split
 
 ### Added (M21 — Range metadata, routing & splits)
 - Epoch’d range descriptors + `StaticRangeTable::split_at` / meta_epoch (shared-engine routing split)
