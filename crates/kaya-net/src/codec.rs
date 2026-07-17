@@ -65,6 +65,9 @@ pub const MERGE_RANGE_OPCODE: u8 = 17;
 /// TRANSFER_LEADER — step down so leadership can move to a target voter (M22 admin).
 /// Requires operator token when configured (same as ADD/REMOVE_MEMBER).
 pub const TRANSFER_LEADER_OPCODE: u8 = 18;
+/// PROMOTE_LEARNER — flip `is_learner=false` for an existing member via ConfigChange (M22).
+/// Body: `node_id(u64 LE)`. Requires operator token when configured.
+pub const PROMOTE_LEARNER_OPCODE: u8 = 19;
 
 /// CDC event op: put.
 pub const CDC_EVENT_PUT: u8 = 1;
@@ -428,14 +431,29 @@ pub fn decode_key_payload(data: &[u8]) -> Result<Vec<u8>, String> {
     take_bytes(&mut cur, key_len)
 }
 
-/// Encode ADD_MEMBER payload: `node_id(u64) | raft_len | raft | client_len | client`.
+/// Encode ADD_MEMBER payload: `node_id(u64) | raft_len | raft | client_len | client [| is_learner u8]`.
+///
+/// When `is_learner` is false the trailing flag is still written as `0` so new
+/// encoders are unambiguous; legacy decoders that ignore trailing bytes continue
+/// to work for the address fields.
 pub fn encode_member_payload(node_id: u64, raft_addr: &str, client_addr: &str) -> Vec<u8> {
+    encode_member_payload_with_learner(node_id, raft_addr, client_addr, false)
+}
+
+/// Encode ADD_MEMBER payload with an explicit learner flag.
+pub fn encode_member_payload_with_learner(
+    node_id: u64,
+    raft_addr: &str,
+    client_addr: &str,
+    is_learner: bool,
+) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&node_id.to_le_bytes());
     push_u32(&mut out, raft_addr.len() as u32);
     out.extend_from_slice(raft_addr.as_bytes());
     push_u32(&mut out, client_addr.len() as u32);
     out.extend_from_slice(client_addr.as_bytes());
+    out.push(if is_learner { 1u8 } else { 0u8 });
     out
 }
 
@@ -454,8 +472,10 @@ pub fn decode_remove_member_payload(data: &[u8]) -> Result<u64, String> {
     ]))
 }
 
-/// Decode ADD_MEMBER payload.
-pub fn decode_member_payload(data: &[u8]) -> Result<(u64, String, String), String> {
+/// Decode ADD_MEMBER payload → `(node_id, raft_addr, client_addr, is_learner)`.
+///
+/// Legacy payloads without the trailing learner flag decode as voters.
+pub fn decode_member_payload(data: &[u8]) -> Result<(u64, String, String, bool), String> {
     let mut cur = data;
     let node_id = take_u64(&mut cur)?;
     let raft_len = take_u32(&mut cur)? as usize;
@@ -464,7 +484,27 @@ pub fn decode_member_payload(data: &[u8]) -> Result<(u64, String, String), Strin
     let client_len = take_u32(&mut cur)? as usize;
     let client = String::from_utf8(take_bytes(&mut cur, client_len)?)
         .map_err(|e| format!("invalid client addr utf-8: {e}"))?;
-    Ok((node_id, raft, client))
+    let is_learner = if !cur.is_empty() {
+        take_u8(&mut cur)? != 0
+    } else {
+        false
+    };
+    Ok((node_id, raft, client, is_learner))
+}
+
+/// Encode PROMOTE_LEARNER payload: `node_id(u64 LE)`.
+pub fn encode_promote_learner_payload(node_id: u64) -> Vec<u8> {
+    node_id.to_le_bytes().to_vec()
+}
+
+/// Decode PROMOTE_LEARNER payload → `node_id`.
+pub fn decode_promote_learner_payload(data: &[u8]) -> Result<u64, String> {
+    if data.len() < 8 {
+        return Err("truncated PROMOTE_LEARNER payload".to_owned());
+    }
+    Ok(u64::from_le_bytes([
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+    ]))
 }
 
 // ── optional operator credential framing for admin payloads ──────────────────
@@ -1570,6 +1610,36 @@ mod tests {
         assert_eq!(TRANSFER_LEADER_OPCODE, 18);
         assert!(decode_transfer_leader_request(&[]).is_err());
         assert!(decode_transfer_leader_request(&[0u8; 15]).is_err());
+    }
+
+    #[test]
+    fn member_payload_roundtrip_with_learner_flag() {
+        let voter = encode_member_payload(1, "127.0.0.1:1", "127.0.0.1:2");
+        let (id, raft, client, is_learner) = decode_member_payload(&voter).unwrap();
+        assert_eq!((id, raft.as_str(), client.as_str(), is_learner), (1, "127.0.0.1:1", "127.0.0.1:2", false));
+
+        let learner = encode_member_payload_with_learner(9, "r", "c", true);
+        let decoded = decode_member_payload(&learner).unwrap();
+        assert_eq!(decoded, (9, "r".into(), "c".into(), true));
+
+        // Legacy wire without trailing flag → voter.
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&7u64.to_le_bytes());
+        push_u32(&mut legacy, 1);
+        legacy.push(b'r');
+        push_u32(&mut legacy, 1);
+        legacy.push(b'c');
+        let (id, _, _, is_learner) = decode_member_payload(&legacy).unwrap();
+        assert_eq!(id, 7);
+        assert!(!is_learner);
+    }
+
+    #[test]
+    fn promote_learner_payload_roundtrips() {
+        let payload = encode_promote_learner_payload(42);
+        assert_eq!(decode_promote_learner_payload(&payload).unwrap(), 42);
+        assert_eq!(PROMOTE_LEARNER_OPCODE, 19);
+        assert!(decode_promote_learner_payload(&[]).is_err());
     }
 
     #[test]

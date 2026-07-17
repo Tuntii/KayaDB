@@ -133,28 +133,67 @@ pub async fn apply_config_change_to_roster(
     }
 }
 
+/// Resolve a member entry, preferring known membership metadata then roster addrs.
+fn resolve_member(
+    id: NodeId,
+    known: Option<&ClusterMember>,
+    roster: &NodeRoster,
+    self_entry: &ClusterMember,
+) -> Option<ClusterMember> {
+    if id == self_entry.id {
+        return Some(self_entry.clone());
+    }
+    if let Some(m) = known {
+        let mut m = m.clone();
+        // Fill empty addresses from the live roster when available.
+        if m.raft_addr.is_empty() {
+            if let Some(raft) = roster.addr(id) {
+                m.raft_addr = raft.to_string();
+            }
+        }
+        if m.client_addr.is_empty() {
+            if let Some(client) = roster.client_addr(id) {
+                m.client_addr = client.to_string();
+            }
+        }
+        return Some(m);
+    }
+    if let (Some(raft), Some(client)) = (roster.addr(id), roster.client_addr(id)) {
+        return Some(ClusterMember {
+            id,
+            raft_addr: raft.to_string(),
+            client_addr: client.to_string(),
+            is_learner: false,
+        });
+    }
+    None
+}
+
 /// Build the next member set when adding `new_member` to the cluster.
+///
+/// `current_members` should be the full membership (voters + learners). When
+/// empty, falls back to treating `current_voters` as voters-only.
 pub fn members_for_add(
     roster: &NodeRoster,
     current_voters: &[NodeId],
+    current_members: &[ClusterMember],
     new_member: ClusterMember,
     self_entry: ClusterMember,
 ) -> Vec<ClusterMember> {
     let mut by_id: std::collections::BTreeMap<NodeId, ClusterMember> =
         std::collections::BTreeMap::new();
 
-    for &id in current_voters {
-        if id == self_entry.id {
-            by_id.insert(id, self_entry.clone());
-        } else if let (Some(raft), Some(client)) = (roster.addr(id), roster.client_addr(id)) {
-            by_id.insert(
-                id,
-                ClusterMember {
-                    id,
-                    raft_addr: raft.to_string(),
-                    client_addr: client.to_string(),
-                },
-            );
+    if current_members.is_empty() {
+        for &id in current_voters {
+            if let Some(m) = resolve_member(id, None, roster, &self_entry) {
+                by_id.insert(id, m);
+            }
+        }
+    } else {
+        for m in current_members {
+            if let Some(resolved) = resolve_member(m.id, Some(m), roster, &self_entry) {
+                by_id.insert(m.id, resolved);
+            }
         }
     }
     by_id.insert(new_member.id, new_member);
@@ -162,42 +201,86 @@ pub fn members_for_add(
 }
 
 /// Build the next member set when removing `remove_id` from the cluster.
+///
+/// Voters only are subject to the "must keep >= 2 voters" rule; removing a
+/// learner is always allowed when the node is present.
 pub fn members_for_remove(
     roster: &NodeRoster,
     current_voters: &[NodeId],
+    current_members: &[ClusterMember],
     remove_id: NodeId,
     self_entry: ClusterMember,
 ) -> Option<Vec<ClusterMember>> {
-    if current_voters.len() <= 2 || !current_voters.contains(&remove_id) {
-        return None;
-    }
     if remove_id == self_entry.id {
         return None;
     }
 
-    let mut by_id: std::collections::BTreeMap<NodeId, ClusterMember> =
-        std::collections::BTreeMap::new();
-    for &id in current_voters {
-        if id == remove_id {
-            continue;
+    let is_learner_removal = current_members
+        .iter()
+        .find(|m| m.id == remove_id)
+        .map(|m| m.is_learner)
+        .unwrap_or(false);
+
+    if !is_learner_removal {
+        if current_voters.len() <= 2 || !current_voters.contains(&remove_id) {
+            return None;
         }
-        if id == self_entry.id {
-            by_id.insert(id, self_entry.clone());
-        } else if let (Some(raft), Some(client)) = (roster.addr(id), roster.client_addr(id)) {
-            by_id.insert(
-                id,
-                ClusterMember {
-                    id,
-                    raft_addr: raft.to_string(),
-                    client_addr: client.to_string(),
-                },
-            );
+    } else {
+        // Learner must exist in membership.
+        if !current_members.iter().any(|m| m.id == remove_id) {
+            return None;
         }
     }
-    if by_id.len() < 2 {
+
+    let mut by_id: std::collections::BTreeMap<NodeId, ClusterMember> =
+        std::collections::BTreeMap::new();
+
+    let source: Vec<ClusterMember> = if current_members.is_empty() {
+        current_voters
+            .iter()
+            .filter_map(|&id| resolve_member(id, None, roster, &self_entry))
+            .collect()
+    } else {
+        current_members.to_vec()
+    };
+
+    for m in source {
+        if m.id == remove_id {
+            continue;
+        }
+        if let Some(resolved) = resolve_member(m.id, Some(&m), roster, &self_entry) {
+            by_id.insert(m.id, resolved);
+        }
+    }
+
+    let remaining_voters = by_id.values().filter(|m| !m.is_learner).count();
+    if remaining_voters < 2 {
         return None;
     }
     Some(by_id.into_values().collect())
+}
+
+/// Build the next member set promoting `promote_id` from learner to voter.
+pub fn members_for_promote(
+    roster: &NodeRoster,
+    current_members: &[ClusterMember],
+    promote_id: NodeId,
+    self_entry: ClusterMember,
+) -> Option<Vec<ClusterMember>> {
+    let target = current_members.iter().find(|m| m.id == promote_id)?;
+    if !target.is_learner {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(current_members.len());
+    for m in current_members {
+        let mut resolved = resolve_member(m.id, Some(m), roster, &self_entry)?;
+        if resolved.id == promote_id {
+            resolved.is_learner = false;
+        }
+        out.push(resolved);
+    }
+    Some(out)
 }
 
 /// Decode config change from a drained applied command payload.
@@ -237,5 +320,53 @@ mod tests {
         assert_eq!(roster.addr(NodeId(1)), Some(addr(7481)));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn members_for_promote_flips_learner_flag() {
+        let roster = NodeRoster::new_with_client([
+            (NodeId(1), addr(7481), addr(7379)),
+            (NodeId(2), addr(7482), addr(7380)),
+            (NodeId(3), addr(7483), addr(7381)),
+        ]);
+        let current = vec![
+            ClusterMember::voter(NodeId(1), "127.0.0.1:7481", "127.0.0.1:7379"),
+            ClusterMember::voter(NodeId(2), "127.0.0.1:7482", "127.0.0.1:7380"),
+            ClusterMember::learner(NodeId(3), "127.0.0.1:7483", "127.0.0.1:7381"),
+        ];
+        let self_entry = current[0].clone();
+        let promoted = members_for_promote(&roster, &current, NodeId(3), self_entry).unwrap();
+        assert_eq!(promoted.len(), 3);
+        let p3 = promoted.iter().find(|m| m.id == NodeId(3)).unwrap();
+        assert!(!p3.is_learner);
+        assert_eq!(
+            ClusterMember::voter_ids(&promoted),
+            vec![NodeId(1), NodeId(2), NodeId(3)]
+        );
+        // Promoting a non-learner fails.
+        assert!(members_for_promote(&roster, &promoted, NodeId(3), current[0].clone()).is_none());
+    }
+
+    #[test]
+    fn members_for_add_preserves_existing_learners() {
+        let roster = NodeRoster::new_with_client([
+            (NodeId(1), addr(7481), addr(7379)),
+            (NodeId(2), addr(7482), addr(7380)),
+            (NodeId(3), addr(7483), addr(7381)),
+        ]);
+        let current = vec![
+            ClusterMember::voter(NodeId(1), "127.0.0.1:7481", "127.0.0.1:7379"),
+            ClusterMember::learner(NodeId(3), "127.0.0.1:7483", "127.0.0.1:7381"),
+        ];
+        let self_entry = current[0].clone();
+        let next = members_for_add(
+            &roster,
+            &[NodeId(1)],
+            &current,
+            ClusterMember::voter(NodeId(2), "127.0.0.1:7482", "127.0.0.1:7380"),
+            self_entry,
+        );
+        assert!(next.iter().any(|m| m.id == NodeId(3) && m.is_learner));
+        assert!(next.iter().any(|m| m.id == NodeId(2) && !m.is_learner));
     }
 }

@@ -18,17 +18,18 @@ use std::path::PathBuf;
 use kaya_engine::CdcOp;
 use kaya_net::{
     decode_cdc_checkpoint_request, decode_cdc_poll_request, decode_hello_request,
-    decode_key_payload, decode_member_payload, decode_merge_range_request, decode_put_payload,
-    decode_remove_member_payload, decode_scan_payload, decode_split_range_request,
-    decode_transfer_leader_request, decode_txn_id_payload, decode_txn_op_payload,
-    encode_cdc_poll_response, encode_error_payload, encode_hello_response,
-    encode_list_ranges_response, encode_range_moved_payload, encode_scan_response,
-    encode_txn_begin_response, encode_txn_commit_response, encode_value_payload, read_client_frame,
-    send_envelopes, write_client_response, NodeRoster, CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE,
-    CDC_EVENT_PUT, CDC_POLL_OPCODE, LIST_RANGES_OPCODE, MERGE_RANGE_OPCODE, PROTO_VERSION,
-    SPLIT_RANGE_OPCODE, STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER,
-    STATUS_OK, STATUS_RANGE_MOVED, STATUS_TXN_CONFLICT, TRANSFER_LEADER_OPCODE, TXN_BEGIN_OPCODE,
-    TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
+    decode_key_payload, decode_member_payload, decode_merge_range_request,
+    decode_promote_learner_payload, decode_put_payload, decode_remove_member_payload,
+    decode_scan_payload, decode_split_range_request, decode_transfer_leader_request,
+    decode_txn_id_payload, decode_txn_op_payload, encode_cdc_poll_response, encode_error_payload,
+    encode_hello_response, encode_list_ranges_response, encode_range_moved_payload,
+    encode_scan_response, encode_txn_begin_response, encode_txn_commit_response,
+    encode_value_payload, read_client_frame, send_envelopes, write_client_response, NodeRoster,
+    CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE, CDC_EVENT_PUT, CDC_POLL_OPCODE, LIST_RANGES_OPCODE,
+    MERGE_RANGE_OPCODE, PROTO_VERSION, SPLIT_RANGE_OPCODE, STATUS_ERROR, STATUS_INVALID_ARGUMENT,
+    STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK, STATUS_RANGE_MOVED, STATUS_TXN_CONFLICT,
+    TRANSFER_LEADER_OPCODE, TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET,
+    TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
 };
 use kaya_raft::{
     multi_raft_group_dir, ClusterMember, GroupId, NodeId, RaftConfig, RaftNode, StaticRangeTable,
@@ -47,9 +48,10 @@ use tokio::sync::{mpsc, oneshot, Semaphore};
 use crate::audit::AuditLog;
 use crate::client_auth::{decode_client_auth_payload, CLIENT_AUTH_PREFIX};
 use crate::command::RaftCommand;
-use crate::membership::{members_for_add, members_for_remove, SharedRoster};
+use crate::membership::{members_for_add, members_for_promote, members_for_remove, SharedRoster};
 use crate::operator_auth::{
-    decode_admin_payload, ADD_MEMBER_OPCODE, ADMIN_AUTH_PREFIX, REMOVE_MEMBER_OPCODE,
+    decode_admin_payload, ADD_MEMBER_OPCODE, ADMIN_AUTH_PREFIX, PROMOTE_LEARNER_OPCODE,
+    REMOVE_MEMBER_OPCODE,
 };
 
 use super::stats::build_stats_response;
@@ -407,13 +409,14 @@ async fn dispatch(
         };
     }
 
-    // Handle admin opcodes 7/8/18 (ADD/REMOVE/TRANSFER_LEADER) with optional operator
-    // token enforcement. Supports backward-compat raw payloads (no token configured)
-    // and ADMIN-prefixed payloads when clients present the credential. If server has
-    // token set, must match.
+    // Handle admin opcodes 7/8/18/19 (ADD/REMOVE/TRANSFER_LEADER/PROMOTE_LEARNER)
+    // with optional operator token enforcement. Supports backward-compat raw payloads
+    // (no token configured) and ADMIN-prefixed payloads when clients present the
+    // credential. If server has token set, must match.
     if opcode == ADD_MEMBER_OPCODE
         || opcode == REMOVE_MEMBER_OPCODE
         || opcode == TRANSFER_LEADER_OPCODE
+        || opcode == PROMOTE_LEARNER_OPCODE
     {
         // Peel optional ADMIN prefix + token if present; otherwise treat payload as legacy raw.
         let (clean_payload, presented) =
@@ -456,7 +459,7 @@ async fn dispatch(
 
         if opcode == ADD_MEMBER_OPCODE {
             return match decode_member_payload(&clean_payload) {
-                Ok((node_id, raft_addr, client_addr)) => {
+                Ok((node_id, raft_addr, client_addr, is_learner)) => {
                     let (status, body) = propose_add_member(
                         raft,
                         roster,
@@ -466,6 +469,7 @@ async fn dispatch(
                         NodeId(node_id),
                         raft_addr,
                         client_addr,
+                        is_learner,
                     )
                     .await;
                     outcome(status, body, operator_auth, None)
@@ -481,6 +485,27 @@ async fn dispatch(
             return match decode_remove_member_payload(&clean_payload) {
                 Ok(node_id) => {
                     let (status, body) = propose_remove_member(
+                        raft,
+                        roster,
+                        self_id,
+                        self_raft,
+                        self_client,
+                        NodeId(node_id),
+                    )
+                    .await;
+                    outcome(status, body, operator_auth, None)
+                }
+                Err(e) => outcome(
+                    STATUS_INVALID_ARGUMENT,
+                    encode_error_payload(&e),
+                    operator_auth,
+                    None,
+                ),
+            };
+        } else if opcode == PROMOTE_LEARNER_OPCODE {
+            return match decode_promote_learner_payload(&clean_payload) {
+                Ok(node_id) => {
+                    let (status, body) = propose_promote_learner(
                         raft,
                         roster,
                         self_id,
@@ -1171,7 +1196,26 @@ async fn txn_commit_via_raft(
     (STATUS_OK, encode_txn_commit_response(commit_ts))
 }
 
-/// Leader proposes adding a new voting member (joint-consensus path).
+/// Snapshot of group-0 voters + full membership for config-change builders.
+fn group0_membership_view(raft: &SharedRaftHost) -> (Vec<NodeId>, Vec<ClusterMember>) {
+    raft.lock()
+        .unwrap()
+        .get(GroupId::ZERO)
+        .map(|n| {
+            let voters: Vec<NodeId> = n
+                .effective_config()
+                .stable_config()
+                .voters
+                .iter()
+                .copied()
+                .collect();
+            let members = n.membership().to_vec();
+            (voters, members)
+        })
+        .unwrap_or_default()
+}
+
+/// Leader proposes adding a new member (voter or learner) via joint consensus.
 #[allow(clippy::too_many_arguments)]
 async fn propose_add_member(
     raft: &SharedRaftHost,
@@ -1182,6 +1226,7 @@ async fn propose_add_member(
     new_id: NodeId,
     new_raft: String,
     new_client: String,
+    is_learner: bool,
 ) -> (u16, Vec<u8>) {
     if !is_leader_of(raft, GroupId::ZERO) {
         return (
@@ -1190,19 +1235,7 @@ async fn propose_add_member(
         );
     }
 
-    let current_voters: Vec<NodeId> = raft
-        .lock()
-        .unwrap()
-        .get(GroupId::ZERO)
-        .map(|n| {
-            n.effective_config()
-                .stable_config()
-                .voters
-                .iter()
-                .copied()
-                .collect()
-        })
-        .unwrap_or_default();
+    let (current_voters, current_members) = group0_membership_view(raft);
 
     // Optimistically upsert the new member into our roster so that we can
     // immediately replicate log entries (including the membership change) to it.
@@ -1215,27 +1248,30 @@ async fn propose_add_member(
 
     let roster_guard = roster.read().await;
 
+    if current_members.iter().any(|m| m.id == new_id) || current_voters.contains(&new_id) {
+        return (
+            STATUS_INVALID_ARGUMENT,
+            encode_error_payload(&format!("node {} is already a cluster member", new_id.0)),
+        );
+    }
+
     let members = members_for_add(
         &roster_guard,
         &current_voters,
+        &current_members,
         ClusterMember {
             id: new_id,
             raft_addr: new_raft,
             client_addr: new_client,
+            is_learner,
         },
         ClusterMember {
             id: self_id,
             raft_addr: self_raft.to_string(),
             client_addr: self_client.to_string(),
+            is_learner: false,
         },
     );
-
-    if current_voters.contains(&new_id) {
-        return (
-            STATUS_INVALID_ARGUMENT,
-            encode_error_payload(&format!("node {} is already a voter", new_id.0)),
-        );
-    }
 
     let (proposed, out) = {
         let mut guard = raft.lock().unwrap();
@@ -1264,7 +1300,7 @@ async fn propose_add_member(
     }
 }
 
-/// Leader proposes removing a voting member (joint-consensus path).
+/// Leader proposes removing a voting member or learner (joint-consensus path).
 #[allow(clippy::too_many_arguments)]
 async fn propose_remove_member(
     raft: &SharedRaftHost,
@@ -1281,29 +1317,19 @@ async fn propose_remove_member(
         );
     }
 
-    let current_voters: Vec<NodeId> = raft
-        .lock()
-        .unwrap()
-        .get(GroupId::ZERO)
-        .map(|n| {
-            n.effective_config()
-                .stable_config()
-                .voters
-                .iter()
-                .copied()
-                .collect()
-        })
-        .unwrap_or_default();
+    let (current_voters, current_members) = group0_membership_view(raft);
 
     let roster_guard = roster.read().await;
     let members = match members_for_remove(
         &roster_guard,
         &current_voters,
+        &current_members,
         remove_id,
         ClusterMember {
             id: self_id,
             raft_addr: self_raft.to_string(),
             client_addr: self_client.to_string(),
+            is_learner: false,
         },
     ) {
         Some(m) => m,
@@ -1311,7 +1337,7 @@ async fn propose_remove_member(
             return (
                 STATUS_INVALID_ARGUMENT,
                 encode_error_payload(&format!(
-                    "cannot remove node {} (not a voter, is self, or would shrink below quorum)",
+                    "cannot remove node {} (not a member, is self, or would shrink below quorum)",
                     remove_id.0
                 )),
             );
@@ -1341,6 +1367,75 @@ async fn propose_remove_member(
         None => (
             STATUS_ERROR,
             encode_error_payload("failed to propose membership removal"),
+        ),
+    }
+}
+
+/// Leader proposes promoting a learner to a full voter (ConfigChange flip).
+#[allow(clippy::too_many_arguments)]
+async fn propose_promote_learner(
+    raft: &SharedRaftHost,
+    roster: &SharedRoster,
+    self_id: NodeId,
+    self_raft: SocketAddr,
+    self_client: SocketAddr,
+    promote_id: NodeId,
+) -> (u16, Vec<u8>) {
+    if !is_leader_of(raft, GroupId::ZERO) {
+        return (
+            STATUS_NOT_LEADER,
+            get_leader_hint(raft, &*roster.read().await),
+        );
+    }
+
+    let (_voters, current_members) = group0_membership_view(raft);
+    let roster_guard = roster.read().await;
+    let members = match members_for_promote(
+        &roster_guard,
+        &current_members,
+        promote_id,
+        ClusterMember {
+            id: self_id,
+            raft_addr: self_raft.to_string(),
+            client_addr: self_client.to_string(),
+            is_learner: false,
+        },
+    ) {
+        Some(m) => m,
+        None => {
+            return (
+                STATUS_INVALID_ARGUMENT,
+                encode_error_payload(&format!(
+                    "cannot promote node {} (not a learner in current membership)",
+                    promote_id.0
+                )),
+            );
+        }
+    };
+
+    let (proposed, out) = {
+        let mut guard = raft.lock().unwrap();
+        let idx = guard
+            .get_mut(GroupId::ZERO)
+            .and_then(|n| n.propose_membership_change(members));
+        let out = if idx.is_some() {
+            guard.broadcast_group(GroupId::ZERO)
+        } else {
+            vec![]
+        };
+        (idx, out)
+    };
+    if !out.is_empty() {
+        send_envelopes(out, &*roster.read().await).await;
+    }
+    match proposed {
+        Some(idx) => (
+            STATUS_OK,
+            format!("learner promote proposed at index {}", idx.0).into_bytes(),
+        ),
+        None => (
+            STATUS_ERROR,
+            encode_error_payload("failed to propose learner promotion"),
         ),
     }
 }

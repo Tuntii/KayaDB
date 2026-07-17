@@ -456,6 +456,7 @@ impl ClusterSim {
                 id,
                 raft_addr: format!("sim://raft/{}", id.0),
                 client_addr: format!("sim://client/{}", id.0),
+                is_learner: false,
             })
             .collect()
     }

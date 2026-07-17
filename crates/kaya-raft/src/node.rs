@@ -50,6 +50,18 @@ struct PendingRead {
     acks: HashSet<NodeId>,
 }
 
+fn members_from_voter_ids(voters: &BTreeSet<NodeId>) -> Vec<ClusterMember> {
+    voters
+        .iter()
+        .map(|&id| ClusterMember {
+            id,
+            raft_addr: String::new(),
+            client_addr: String::new(),
+            is_learner: false,
+        })
+        .collect()
+}
+
 /// A complete Raft state-machine node.
 ///
 /// All I/O is removed from this struct. The caller drives logical time via
@@ -96,6 +108,10 @@ pub struct RaftNode {
 
     // ── Joint-consensus membership ────────────────────────────────────────────
     effective_config: EffectiveConfig,
+    /// Full membership (voters + learners) from the last applied Final config
+    /// (or the initial voter set). Learners are excluded from quorum but still
+    /// receive log replication via `next_index` seeding.
+    current_membership: Vec<ClusterMember>,
     /// Target member set while a joint→final change is in flight.
     pending_membership: Option<Vec<ClusterMember>>,
 }
@@ -104,7 +120,8 @@ impl RaftNode {
     pub fn new(config: RaftConfig) -> Self {
         let mut voters: BTreeSet<NodeId> = config.peers.iter().copied().collect();
         voters.insert(config.id);
-        let effective_config = EffectiveConfig::stable(voters);
+        let effective_config = EffectiveConfig::stable(voters.clone());
+        let current_membership = members_from_voter_ids(&voters);
         Self {
             config,
             current_term: Term(0),
@@ -126,6 +143,7 @@ impl RaftNode {
             ready_reads: Vec::new(),
             pending_snapshot: None,
             effective_config,
+            current_membership,
             pending_membership: None,
         }
     }
@@ -138,7 +156,8 @@ impl RaftNode {
     pub fn recover(config: RaftConfig, state: PersistedRaftState) -> Self {
         let mut voters: BTreeSet<NodeId> = config.peers.iter().copied().collect();
         voters.insert(config.id);
-        let effective_config = EffectiveConfig::stable(voters);
+        let effective_config = EffectiveConfig::stable(voters.clone());
+        let current_membership = members_from_voter_ids(&voters);
         Self {
             config,
             current_term: state.hard_state.current_term,
@@ -160,6 +179,7 @@ impl RaftNode {
             ready_reads: Vec::new(),
             pending_snapshot: None,
             effective_config,
+            current_membership,
             pending_membership: None,
         }
     }
@@ -401,11 +421,31 @@ impl RaftNode {
         &self.effective_config
     }
 
+    /// Full membership (voters + learners) known to this node.
+    pub fn membership(&self) -> &[ClusterMember] {
+        &self.current_membership
+    }
+
     fn sync_peers_from_effective_config(&mut self) {
+        // Voting / election peers exclude learners (voters only).
         self.config.peers = self
             .effective_config
             .stable_config()
             .peers_of(self.config.id);
+    }
+
+    /// Seed replication state for every member (including learners) so the
+    /// leader ships AppendEntries / snapshots to non-voters too.
+    fn seed_replication_for_members(&mut self, members: &[ClusterMember]) {
+        let last = self.log.last_index();
+        for m in members {
+            if m.id != self.config.id {
+                self.next_index
+                    .entry(m.id)
+                    .or_insert(LogIndex(last.0 + 1));
+                self.match_index.entry(m.id).or_insert(LogIndex(0));
+            }
+        }
     }
 
     fn apply_config_command(
@@ -414,13 +454,17 @@ impl RaftNode {
         members: Vec<ClusterMember>,
         out: &mut Vec<Envelope>,
     ) {
-        let voter_set: BTreeSet<NodeId> = members.iter().map(|m| m.id).collect();
+        // Quorum / elections use voters only; learners stay out of EffectiveConfig.
+        let voter_set: BTreeSet<NodeId> = ClusterMember::voter_ids(&members).into_iter().collect();
         match phase {
             ConfigChangePhase::Joint => {
                 let outgoing = self.effective_config.stable_config().clone();
                 let incoming = ClusterConfiguration::from_voters(voter_set);
                 self.effective_config = EffectiveConfig::Joint { outgoing, incoming };
+                // Track provisional membership so add/remove/promote see learners mid-change.
+                self.current_membership = members.clone();
                 self.sync_peers_from_effective_config();
+                self.seed_replication_for_members(&members);
                 if self.role == Role::Leader {
                     if let Some(final_members) = self.pending_membership.take() {
                         let cmd = RaftCommand::ConfigChange {
@@ -443,13 +487,10 @@ impl RaftNode {
             ConfigChangePhase::Final => {
                 self.effective_config =
                     EffectiveConfig::Stable(ClusterConfiguration::from_voters(voter_set));
+                self.current_membership = members.clone();
                 self.sync_peers_from_effective_config();
                 self.pending_membership = None;
-                let last = self.log.last_index();
-                for &peer in &self.config.peers {
-                    self.next_index.entry(peer).or_insert(LogIndex(last.0 + 1));
-                    self.match_index.entry(peer).or_insert(LogIndex(0));
-                }
+                self.seed_replication_for_members(&members);
             }
         }
     }
@@ -819,17 +860,14 @@ impl RaftNode {
     /// This ensures new/lagging nodes get the membership that was in effect
     /// at the snapshot point.
     pub fn restore_config_from_snapshot(&mut self, members: Vec<ClusterMember>) {
-        let voter_set: BTreeSet<NodeId> = members.iter().map(|m| m.id).collect();
+        let voter_set: BTreeSet<NodeId> = ClusterMember::voter_ids(&members).into_iter().collect();
         self.effective_config =
             EffectiveConfig::Stable(ClusterConfiguration::from_voters(voter_set));
+        self.current_membership = members.clone();
         self.sync_peers_from_effective_config();
         self.pending_membership = None;
-        // Re-seed peer tracking for current peers (safe on snapshot install)
-        let last = self.log.last_index();
-        for &peer in &self.config.peers {
-            self.next_index.entry(peer).or_insert(LogIndex(last.0 + 1));
-            self.match_index.entry(peer).or_insert(LogIndex(0));
-        }
+        // Re-seed peer tracking for voters + learners (safe on snapshot install).
+        self.seed_replication_for_members(&members);
     }
 
     /// Propose a joint-consensus membership change. Only valid on leader.
@@ -853,10 +891,12 @@ impl RaftNode {
         by_id.insert(self.config.id);
         let mut members: Vec<ClusterMember> = new_members;
         if !members.iter().any(|m| m.id == self.config.id) {
+            // Leader proposing the change is a voter (cannot be a pure learner).
             members.push(ClusterMember {
                 id: self.config.id,
                 raft_addr: String::new(),
                 client_addr: String::new(),
+                is_learner: false,
             });
         }
         members.sort_by_key(|m| m.id.0);
@@ -873,18 +913,9 @@ impl RaftNode {
         self.match_index.insert(self.config.id, idx);
         self.next_index.insert(self.config.id, LogIndex(idx.0 + 1));
 
-        // Seed replication state for any new members so the leader will start
-        // sending AppendEntries (including the joint entry) to them promptly.
-        // This helps the incoming configuration participate in replication early.
-        let last_log = self.log.last_index();
-        for m in &members {
-            if m.id != self.config.id {
-                self.next_index
-                    .entry(m.id)
-                    .or_insert(LogIndex(last_log.0 + 1));
-                self.match_index.entry(m.id).or_insert(LogIndex(0));
-            }
-        }
+        // Seed replication state for any new members (including learners) so the
+        // leader starts sending AppendEntries (including the joint entry) promptly.
+        self.seed_replication_for_members(&members);
 
         // Ensure commit/apply for single-node membership changes.
         self.try_advance_commit();
@@ -1209,6 +1240,47 @@ mod tests {
 
         assert_eq!(node.role, Role::Follower);
         assert_eq!(node.pending_reads.len(), 0);
+    }
+
+    #[test]
+    fn learner_excluded_from_quorum_after_config_change() {
+        // Single-node leader applies a Final config with 1 voter + 1 learner
+        // directly (avoids joint-commit needing a second live voter).
+        let mut node = make_node(1, vec![]);
+        let mut out = Vec::new();
+        for _ in 0..20 {
+            out.extend(node.tick());
+            if node.role == Role::Leader {
+                break;
+            }
+        }
+        assert_eq!(node.role, Role::Leader);
+
+        let members = vec![
+            ClusterMember::voter(NodeId(1), "r1", "c1"),
+            ClusterMember::learner(NodeId(3), "r3", "c3"),
+        ];
+        // Apply Final via the apply path used for committed config entries.
+        node.apply_config_command(ConfigChangePhase::Final, members, &mut out);
+
+        let voters = &node.effective_config().stable_config().voters;
+        assert_eq!(voters.len(), 1);
+        assert!(voters.contains(&NodeId(1)));
+        assert!(
+            !voters.contains(&NodeId(3)),
+            "learner must not be in voter set"
+        );
+        assert_eq!(node.quorum_size(), 1);
+        assert_eq!(node.cluster_size(), 1);
+
+        let membership = node.membership();
+        assert_eq!(membership.len(), 2);
+        assert!(membership.iter().any(|m| m.id == NodeId(3) && m.is_learner));
+        assert!(
+            membership.iter().any(|m| m.id == NodeId(1) && !m.is_learner)
+        );
+        // Learner still gets replication state (log shipping without vote).
+        assert!(node.next_index.contains_key(&NodeId(3)));
     }
 
     #[test]

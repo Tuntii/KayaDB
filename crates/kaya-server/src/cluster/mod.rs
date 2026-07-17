@@ -79,8 +79,8 @@ pub struct ClusterConfig {
     pub heartbeat_interval_ticks: u64,
     /// When true, this node is joining an existing cluster via seed peers only.
     pub join_cluster: bool,
-    /// Optional operator token. If set, ADD/REMOVE_MEMBER (opcodes 7/8) and
-    /// TRANSFER_LEADER (18) require the presented credential (via ADMIN auth prefix)
+    /// Optional operator token. If set, ADD/REMOVE_MEMBER (opcodes 7/8),
+    /// TRANSFER_LEADER (18), and PROMOTE_LEARNER (19) require the presented credential
     /// to match exactly. If None, any caller may perform those admin ops (dev default).
     pub operator_token: Option<String>,
     /// Optional client token. If set, PUT/GET/DELETE/SCAN/STATS (opcodes 1-4, 6) require the
@@ -184,7 +184,7 @@ impl ClusterConfig {
         self
     }
 
-    /// Require the given operator token for ADD/REMOVE_MEMBER and TRANSFER_LEADER.
+    /// Require the given operator token for ADD/REMOVE_MEMBER, TRANSFER_LEADER, PROMOTE_LEARNER.
     /// Callers must present it using the ADMIN auth framing.
     pub fn with_operator_token(mut self, token: String) -> Self {
         self.operator_token = Some(token);
