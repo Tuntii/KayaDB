@@ -18,16 +18,17 @@ use std::path::PathBuf;
 use kaya_engine::CdcOp;
 use kaya_net::{
     decode_cdc_checkpoint_request, decode_cdc_poll_request, decode_hello_request,
-    decode_key_payload, decode_member_payload, decode_put_payload, decode_remove_member_payload,
-    decode_scan_payload, decode_split_range_request, decode_txn_id_payload, decode_txn_op_payload,
-    encode_cdc_poll_response, encode_error_payload, encode_hello_response,
-    encode_list_ranges_response, encode_range_moved_payload, encode_scan_response,
-    encode_txn_begin_response, encode_txn_commit_response, encode_value_payload, read_client_frame,
-    send_envelopes, write_client_response, NodeRoster, LIST_RANGES_OPCODE, PROTO_VERSION,
-    SPLIT_RANGE_OPCODE, STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER,
-    STATUS_OK, STATUS_RANGE_MOVED, STATUS_TXN_CONFLICT, CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE,
-    CDC_EVENT_PUT, CDC_POLL_OPCODE, TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET,
-    TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
+    decode_key_payload, decode_member_payload, decode_merge_range_request, decode_put_payload,
+    decode_remove_member_payload, decode_scan_payload, decode_split_range_request,
+    decode_txn_id_payload, decode_txn_op_payload, encode_cdc_poll_response, encode_error_payload,
+    encode_hello_response, encode_list_ranges_response, encode_range_moved_payload,
+    encode_scan_response, encode_txn_begin_response, encode_txn_commit_response,
+    encode_value_payload, read_client_frame, send_envelopes, write_client_response, NodeRoster,
+    LIST_RANGES_OPCODE, MERGE_RANGE_OPCODE, PROTO_VERSION, SPLIT_RANGE_OPCODE, STATUS_ERROR,
+    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK, STATUS_RANGE_MOVED,
+    STATUS_TXN_CONFLICT, CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE, CDC_EVENT_PUT, CDC_POLL_OPCODE,
+    TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT,
+    TXN_ROLLBACK_OPCODE,
 };
 use kaya_raft::{
     multi_raft_group_dir, ClusterMember, GroupId, NodeId, RaftConfig, RaftNode, StaticRangeTable,
@@ -496,10 +497,10 @@ async fn dispatch(
         }
     }
 
-    // Data-path opcodes 1-4, 6 (STATS), 9-16 (TXN/CDC/ranges) with optional client token
+    // Data-path opcodes 1-4, 6 (STATS), 9-17 (TXN/CDC/ranges) with optional client token
     // enforcement. HEALTH (5) stays open for liveness probes.
-    // SPLIT_RANGE (16) also accepts operator token via admin path when configured.
-    let payload = if matches!(opcode, 1..=4 | 6 | 9..=16) {
+    // SPLIT_RANGE (16) / MERGE_RANGE (17) also accept operator token via admin path when configured.
+    let payload = if matches!(opcode, 1..=4 | 6 | 9..=17) {
         let (clean_payload, presented) = if payload.len() >= CLIENT_AUTH_PREFIX.len()
             && payload.starts_with(CLIENT_AUTH_PREFIX)
         {
@@ -962,6 +963,47 @@ async fn dispatch(
                             encode_list_ranges_response(t.meta_epoch(), &wire),
                             client_auth,
                             Some(split_key.len()),
+                        )
+                    }
+                    Err(e) => outcome(
+                        STATUS_INVALID_ARGUMENT,
+                        encode_error_payload(&e),
+                        client_auth,
+                        None,
+                    ),
+                }
+            }
+            Err(e) => outcome(
+                STATUS_INVALID_ARGUMENT,
+                encode_error_payload(&e),
+                client_auth,
+                None,
+            ),
+        },
+
+        // MERGE_RANGE (17) — merge range at left_start with its right neighbor.
+        // Orphan right-hand Raft group is left hosted and idle (reclaim is M22 follow-on).
+        MERGE_RANGE_OPCODE => match decode_merge_range_request(&payload) {
+            Ok(left_start) => {
+                if !is_leader_of(raft, GroupId::ZERO) {
+                    let hint = get_leader_hint(raft, &roster_snapshot);
+                    return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
+                }
+                let mut t = range_table.write().await;
+                match t.merge_with_next(&left_start) {
+                    Ok(merged) => {
+                        let wire = vec![(
+                            merged.range_id,
+                            merged.epoch,
+                            merged.group_id.0,
+                            merged.start_key,
+                            merged.end_key,
+                        )];
+                        outcome(
+                            STATUS_OK,
+                            encode_list_ranges_response(t.meta_epoch(), &wire),
+                            client_auth,
+                            Some(left_start.len()),
                         )
                     }
                     Err(e) => outcome(

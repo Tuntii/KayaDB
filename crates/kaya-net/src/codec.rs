@@ -60,6 +60,8 @@ pub const CDC_CHECKPOINT_OPCODE: u8 = 14;
 pub const LIST_RANGES_OPCODE: u8 = 15;
 /// SPLIT_RANGE — split a range at a key (M21 admin; leader of group 0).
 pub const SPLIT_RANGE_OPCODE: u8 = 16;
+/// MERGE_RANGE — merge a range with its right neighbor (M22 admin; leader of group 0).
+pub const MERGE_RANGE_OPCODE: u8 = 17;
 
 /// CDC event op: put.
 pub const CDC_EVENT_PUT: u8 = 1;
@@ -836,6 +838,22 @@ pub fn decode_split_range_request(data: &[u8]) -> Result<Vec<u8>, String> {
     take_bytes(&mut cur, len)
 }
 
+/// Encode MERGE_RANGE request: `left_start_len(u32 LE) | left_start`.
+/// Empty `left_start` is valid (whole-keyspace left half after first split).
+pub fn encode_merge_range_request(left_start: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + left_start.len());
+    out.extend_from_slice(&(left_start.len() as u32).to_le_bytes());
+    out.extend_from_slice(left_start);
+    out
+}
+
+/// Decode MERGE_RANGE request → left range start key.
+pub fn decode_merge_range_request(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut cur = data;
+    let len = take_u32(&mut cur)? as usize;
+    take_bytes(&mut cur, len)
+}
+
 /// Encode RANGE_MOVED body: single updated descriptor covering the key
 /// (`range_id, epoch, group_id, start, end`) using the list-ranges item layout
 /// with `meta_epoch` prefix and count=1.
@@ -1510,5 +1528,27 @@ mod tests {
     fn decode_txn_commit_response_truncated() {
         assert!(decode_txn_commit_response(&[]).is_err());
         assert!(decode_txn_commit_response(&[1u8; 3]).is_err());
+    }
+
+    #[test]
+    fn round_trip_merge_range_request() {
+        let empty = encode_merge_range_request(b"");
+        assert_eq!(decode_merge_range_request(&empty).unwrap(), b"");
+        let key = encode_merge_range_request(b"m");
+        assert_eq!(decode_merge_range_request(&key).unwrap(), b"m");
+        assert_eq!(MERGE_RANGE_OPCODE, 17);
+        assert_eq!(SPLIT_RANGE_OPCODE, 16);
+    }
+
+    #[test]
+    fn merge_response_uses_list_ranges_layout() {
+        let body = encode_list_ranges_response(3, &[(1, 3, 0, vec![], vec![])]);
+        let (meta, ranges) = decode_list_ranges_response(&body).unwrap();
+        assert_eq!(meta, 3);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].0, 1);
+        assert_eq!(ranges[0].2, 0);
+        assert!(ranges[0].3.is_empty());
+        assert!(ranges[0].4.is_empty());
     }
 }

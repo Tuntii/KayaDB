@@ -1762,4 +1762,102 @@ mod tests {
         handle.abort();
         let _ = std::fs::remove_dir_all(&data_dir);
     }
+
+    /// M22: split then merge recombines to one range; keys remain readable.
+    #[serial]
+    #[tokio::test]
+    async fn test_range_merge_recombines() {
+        use kaya_net::{
+            decode_list_ranges_response, encode_merge_range_request, encode_split_range_request,
+            LIST_RANGES_OPCODE, MERGE_RANGE_OPCODE, SPLIT_RANGE_OPCODE,
+        };
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_range_merge_{}", test_id));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let r = get_free_port().await;
+        let c = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{}", r).parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{}", c).parse().unwrap();
+
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![]);
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "node should elect");
+
+        for key in [b"a".as_slice(), b"m".as_slice(), b"z".as_slice()] {
+            let put = encode_put_payload(key, b"v1");
+            let (status, _) = roundtrip(client_addr, 1, &put).await.unwrap();
+            assert_eq!(status, STATUS_OK, "put {:?}", String::from_utf8_lossy(key));
+        }
+
+        let (status, body) = roundtrip(
+            client_addr,
+            SPLIT_RANGE_OPCODE,
+            &encode_split_range_request(b"m"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, STATUS_OK, "split should succeed");
+        let (split_epoch, halves) = decode_list_ranges_response(&body).unwrap();
+        assert_eq!(halves.len(), 2);
+        assert!(split_epoch >= 2);
+
+        // left_start is empty (whole-keyspace left half).
+        let (status, body) = roundtrip(
+            client_addr,
+            MERGE_RANGE_OPCODE,
+            &encode_merge_range_request(b""),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, STATUS_OK, "merge should succeed");
+        let (merge_epoch, merged) = decode_list_ranges_response(&body).unwrap();
+        assert_eq!(merged.len(), 1);
+        assert!(merge_epoch > split_epoch);
+        assert!(merged[0].4.is_empty(), "merged end should be unbounded");
+        assert_eq!(merged[0].2, 0, "merged keeps left group 0");
+
+        let (status, body) = roundtrip(client_addr, LIST_RANGES_OPCODE, &[])
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK);
+        let (_, ranges) = decode_list_ranges_response(&body).unwrap();
+        assert_eq!(ranges.len(), 1);
+
+        for key in [b"a".as_slice(), b"m".as_slice(), b"z".as_slice()] {
+            let (status, body) = roundtrip(client_addr, 2, &encode_key_payload(key))
+                .await
+                .unwrap();
+            assert_eq!(status, STATUS_OK, "get {:?}", String::from_utf8_lossy(key));
+            assert_eq!(decode_value_payload(&body).unwrap(), b"v1");
+        }
+
+        // Post-merge write still works.
+        let put = encode_put_payload(b"m", b"v2");
+        let (status, _) = roundtrip(client_addr, 1, &put).await.unwrap();
+        assert_eq!(status, STATUS_OK);
+        let (status, body) = roundtrip(client_addr, 2, &encode_key_payload(b"m"))
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(decode_value_payload(&body).unwrap(), b"v2");
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
 }

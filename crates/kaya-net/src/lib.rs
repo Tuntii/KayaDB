@@ -6,20 +6,21 @@ pub use codec::{
     decode_admin_payload, decode_cdc_checkpoint_request, decode_cdc_poll_request,
     decode_cdc_poll_response, decode_client_auth_payload, decode_envelope, decode_error_payload,
     decode_hello_request, decode_hello_response, decode_key_payload, decode_list_ranges_response,
-    decode_member_payload, decode_put_payload, decode_remove_member_payload, decode_scan_payload,
-    decode_scan_response, decode_split_range_request, decode_txn_begin_response,
-    decode_txn_commit_response, decode_txn_id_payload, decode_txn_op_payload, decode_value_payload,
-    encode_admin_payload, encode_cdc_checkpoint_request, encode_cdc_poll_request,
-    encode_cdc_poll_response, encode_client_auth_payload, encode_envelope, encode_error_payload,
-    encode_hello_request, encode_hello_response, encode_key_payload, encode_list_ranges_response,
-    encode_member_payload, encode_put_payload, encode_range_moved_payload,
+    decode_member_payload, decode_merge_range_request, decode_put_payload,
+    decode_remove_member_payload, decode_scan_payload, decode_scan_response,
+    decode_split_range_request, decode_txn_begin_response, decode_txn_commit_response,
+    decode_txn_id_payload, decode_txn_op_payload, decode_value_payload, encode_admin_payload,
+    encode_cdc_checkpoint_request, encode_cdc_poll_request, encode_cdc_poll_response,
+    encode_client_auth_payload, encode_envelope, encode_error_payload, encode_hello_request,
+    encode_hello_response, encode_key_payload, encode_list_ranges_response, encode_member_payload,
+    encode_merge_range_request, encode_put_payload, encode_range_moved_payload,
     encode_remove_member_payload, encode_scan_payload, encode_scan_response,
     encode_split_range_request, encode_txn_begin_response, encode_txn_commit_response,
     encode_txn_id_payload, encode_txn_op_payload, encode_value_payload, ADD_MEMBER_OPCODE,
     ADMIN_AUTH_PREFIX, CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE, CDC_EVENT_PUT, CDC_POLL_OPCODE,
-    CLIENT_AUTH_PREFIX, HELLO_OPCODE, LIST_RANGES_OPCODE, PROTO_VERSION, REMOVE_MEMBER_OPCODE,
-    SPLIT_RANGE_OPCODE, TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET,
-    TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE, CdcEventWire, RangeDescWire,
+    CLIENT_AUTH_PREFIX, HELLO_OPCODE, LIST_RANGES_OPCODE, MERGE_RANGE_OPCODE, PROTO_VERSION,
+    REMOVE_MEMBER_OPCODE, SPLIT_RANGE_OPCODE, TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_DELETE,
+    TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE, CdcEventWire, RangeDescWire,
 };
 pub use roster::NodeRoster;
 pub use transport::{
@@ -57,6 +58,7 @@ pub enum Opcode {
     CdcCheckpoint = 14,
     ListRanges = 15,
     SplitRange = 16,
+    MergeRange = 17,
 }
 
 impl Opcode {
@@ -79,6 +81,7 @@ impl Opcode {
             14 => Ok(Self::CdcCheckpoint),
             15 => Ok(Self::ListRanges),
             16 => Ok(Self::SplitRange),
+            17 => Ok(Self::MergeRange),
             _ => Err(KayaError::invalid_argument(format!(
                 "unknown protocol opcode: {value}"
             ))),

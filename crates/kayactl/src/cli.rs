@@ -54,6 +54,8 @@ pub(crate) fn print_usage() {
     println!("RANGE / SHARDING (cluster)");
     println!("  kayactl --server <addr> [--json] range list");
     println!("  kayactl --server <addr> [--json] range split <key>");
+    println!("  kayactl --server <addr> [--json] range merge <left-start-hex-or-utf8>");
+    println!("      (empty left: \"\" or @empty; hex: 0x… or hex:…)");
     println!();
     println!("OBSERVABILITY COMMANDS");
     println!("  kayactl ebpf status [--data <dir>] [--pid <pid>]");

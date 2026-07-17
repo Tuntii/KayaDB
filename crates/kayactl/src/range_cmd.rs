@@ -1,4 +1,4 @@
-//! `kayactl range` — list / split meta ranges (M21) via cluster server.
+//! `kayactl range` — list / split / merge meta ranges (M21/M22) via cluster server.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -6,8 +6,8 @@ use std::time::Duration;
 use kaya_core::{KayaError, Result};
 use kaya_net::{
     decode_error_payload, decode_list_ranges_response, encode_client_auth_payload,
-    encode_split_range_request, roundtrip, LIST_RANGES_OPCODE, SPLIT_RANGE_OPCODE,
-    STATUS_INVALID_ARGUMENT, STATUS_NOT_LEADER, STATUS_OK,
+    encode_merge_range_request, encode_split_range_request, roundtrip, LIST_RANGES_OPCODE,
+    MERGE_RANGE_OPCODE, SPLIT_RANGE_OPCODE, STATUS_INVALID_ARGUMENT, STATUS_NOT_LEADER, STATUS_OK,
 };
 
 use crate::cli::{block_on, json_string};
@@ -108,8 +108,85 @@ pub fn run_range(
                 Ok(())
             })
         }
+        "merge" => {
+            let raw = args.first().cloned().ok_or_else(|| {
+                KayaError::invalid_argument(
+                    "usage: kayactl --server <addr> range merge <left-start-hex-or-utf8>",
+                )
+            })?;
+            let left_start = parse_range_key(&raw)?;
+            let payload = encode_merge_range_request(&left_start);
+            block_on(async {
+                let (status, body) = request(
+                    &server_addrs,
+                    MERGE_RANGE_OPCODE,
+                    &payload,
+                    timeout,
+                    &client_token,
+                )
+                .await?;
+                if status != STATUS_OK {
+                    return status_err(status, &body);
+                }
+                let (meta_epoch, ranges) =
+                    decode_list_ranges_response(&body).map_err(KayaError::corruption)?;
+                if json {
+                    println!(
+                        "{{\"ok\":true,\"meta_epoch\":{meta_epoch},\"merged\":{}}}",
+                        ranges.len()
+                    );
+                } else {
+                    println!(
+                        "OK merge left_start={raw:?}; meta_epoch={meta_epoch} merged={}",
+                        ranges.len()
+                    );
+                    for (range_id, epoch, group_id, start, end) in &ranges {
+                        println!(
+                            "  range_id={range_id} epoch={epoch} group={group_id} [{:?}, {:?})",
+                            String::from_utf8_lossy(start),
+                            String::from_utf8_lossy(end),
+                        );
+                    }
+                }
+                Ok(())
+            })
+        }
         _ => Err(KayaError::invalid_argument(range_usage())),
     }
+}
+
+/// Parse a range key from CLI: empty / `@empty` / `""` → empty bytes;
+/// `0x…` or `hex:…` → hex-decoded; otherwise UTF-8 bytes.
+fn parse_range_key(raw: &str) -> Result<Vec<u8>> {
+    if raw.is_empty() || raw == "@empty" || raw == "\"\"" {
+        return Ok(Vec::new());
+    }
+    let hex_body = if let Some(rest) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+        Some(rest)
+    } else {
+        raw.strip_prefix("hex:").or_else(|| raw.strip_prefix("HEX:"))
+    };
+    if let Some(hex) = hex_body {
+        if hex.is_empty() {
+            return Ok(Vec::new());
+        }
+        if hex.len() % 2 != 0 {
+            return Err(KayaError::invalid_argument(
+                "hex left-start must have even length",
+            ));
+        }
+        let mut out = Vec::with_capacity(hex.len() / 2);
+        let bytes = hex.as_bytes();
+        for i in (0..bytes.len()).step_by(2) {
+            let h = std::str::from_utf8(&bytes[i..i + 2]).unwrap_or("");
+            let b = u8::from_str_radix(h, 16).map_err(|_| {
+                KayaError::invalid_argument(format!("invalid hex digit in left-start: {h}"))
+            })?;
+            out.push(b);
+        }
+        return Ok(out);
+    }
+    Ok(raw.as_bytes().to_vec())
 }
 
 async fn request(
@@ -164,5 +241,5 @@ fn status_err(status: u16, body: &[u8]) -> Result<()> {
 }
 
 fn range_usage() -> &'static str {
-    "usage: kayactl --server <addr> range <list|split> ..."
+    "usage: kayactl --server <addr> range <list|split|merge> ..."
 }

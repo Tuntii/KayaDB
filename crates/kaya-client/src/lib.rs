@@ -257,7 +257,7 @@ impl KayaClient {
 
     fn wire_payload(&self, opcode: u8, payload: &[u8]) -> Vec<u8> {
         // Data-path + TXN + CDC + range opcodes may carry an optional client token prefix.
-        if matches!(opcode, 1..=4 | 6 | 9..=16) {
+        if matches!(opcode, 1..=4 | 6 | 9..=17) {
             encode_client_auth_payload(payload, self.client_token.as_deref())
         } else {
             payload.to_vec()
