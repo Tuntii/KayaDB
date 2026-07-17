@@ -479,12 +479,11 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     let mut engine = Engine::open(engine_cfg, disk)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    // Minimal 2PC crash recovery: abort any Preparing/Prepared records left from
-    // a prior process (conservative; no durable global decision observed).
+    // 2PC crash recovery: abort Preparing/Prepared; finish Committing.
     match txn_coord::recover_incomplete_2pc(&mut engine).await {
-        Ok(0) => {}
-        Ok(n) => eprintln!(
-            "[node {}] 2PC recovery: aborted {n} incomplete participant record(s)",
+        Ok((0, 0)) => {}
+        Ok((aborted, finished)) => eprintln!(
+            "[node {}] 2PC recovery: aborted {aborted} in-doubt record(s), finished {finished} Committing",
             config.node_id.0
         ),
         Err(e) => eprintln!(

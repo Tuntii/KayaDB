@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (post-arc polish)
+- **2PC `Committing` state (byte 5):** `apply_txn_commit_2pc` durably writes `Committing` before materializing user keys; startup recovery finishes `Committing` (never aborts it); `Preparing`/`Prepared` still abort fail-closed
+- **ACL gate:** when PrefixAcl is configured, `CDC_POLL` / `CDC_CHECKPOINT` and `SPLIT_RANGE` / `MERGE_RANGE` require a client token that appears on some ACL rule (same as `TXN_BEGIN`)
+- **Docs residuals:** range meta table is process-local memory (restart loses dynamic splits); cross-group 2PC requires this node to be leader of all participant groups
+
 ### Added (M16–M25 arc — production path complete)
 - **Arc close-out (2026-07-17):** M16–M25 documented production path closed. ROADMAP north-star re-eval: **v0.2.0 candidate** with residual risks listed honestly (no live range migrate, sequential 2PC + fail-closed recovery, no HLC uncertainty clamp, Jepsen grand matrix / minimal counterexample / scheduled profiling CI / Zig client / key rotation / Dashboard v2 still open). Not an unqualified production-SLA claim.
 
@@ -31,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **2PC engine records (shared-engine):** `\x00txn/rec/{txn_id}` + `\x00txn/intent/{txn_id}/{key}`; `Engine::apply_txn_prepare` / `apply_txn_commit_2pc` / `apply_txn_abort_2pc`; commit materializes intents via `apply_mutations` (index+CDC fire)
 - **RaftCommand types 5/6/7:** `TxnPrepare` / `TxnCommit2pc` / `TxnAbort2pc` (types 1–4 layouts unchanged)
 - **Coordinator:** `txn_coord::commit_cross_group` on multi-group `TXN_COMMIT` (lex-smallest-key coordinator group); **sequential** prepare then commit/abort proposes; single-group stays type-4 `TxnCommit`; client opcodes unchanged (range-transparent)
-- **Recovery (minimal):** startup scan aborts local `Preparing`/`Prepared` records (fail-closed; no durable global decision log)
+- **Recovery:** startup scan aborts local `Preparing`/`Prepared` (fail-closed); finishes `Committing` to `Committed` (durable decision); no global decision log
 - **TLA+ sketch:** `spec/specs/txn/TwoPhaseCommit.tla` + `.cfg` (prepare/decide/recover; TXN-2PC invariants)
 - **IT:** `test_cross_range_txn_commit`; multi-range bank `test_multi_range_bank_sum_invariant` (SI transfers across ranges, sum holds)
 - Spec: `spec/docs/transactions-spec.md` §17

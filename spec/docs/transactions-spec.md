@@ -312,7 +312,7 @@ writable via public put/delete):
 
 | Key | Value |
 |---|---|
-| `\x00txn/rec/{txn_id_be8}` | 1-byte state: `1=Preparing`, `2=Prepared`, `3=Committed`, `4=Aborted` |
+| `\x00txn/rec/{txn_id_be8}` | 1-byte state: `1=Preparing`, `2=Prepared`, `3=Committed`, `4=Aborted`, `5=Committing` |
 | `\x00txn/intent/{txn_id_be8}/{user_key}` | Intent payload: `0` = delete tombstone; `1 \|\| value` = put |
 
 `txn_id` in keys is encoded as **8-byte big-endian** for ordered scans.
@@ -322,8 +322,8 @@ writable via public put/delete):
 | Type byte | Variant | Payload |
 |---:|---|---|
 | 5 | `TxnPrepare { txn_id, coordinator_group, mutations }` | Persist intents + mark `Prepared` |
-| 6 | `TxnCommit2pc { txn_id }` | Materialize intents via `apply_mutations`, clear intents, mark `Committed` |
-| 7 | `TxnAbort2pc { txn_id }` | Delete intents only, mark `Aborted` |
+| 6 | `TxnCommit2pc { txn_id }` | Mark `Committing`, materialize intents via `apply_mutations`, clear intents, mark `Committed` |
+| 7 | `TxnAbort2pc { txn_id }` | Delete intents only, mark `Aborted` (rejects `Committing`/`Committed`) |
 
 Types 1–4 retain their existing wire layouts (Put / Delete / ConfigChange /
 single-group `TxnCommit`).
@@ -343,33 +343,42 @@ impl Engine {
 ```
 
 - **Prepare:** write record `Preparing` → write each intent → write `Prepared`.
-- **Commit:** load intents for `txn_id`, `apply_mutations` to user keys (index +
-  CDC fire), delete intent keys, set record `Committed`. Idempotent if already
-  `Committed`; rejects if `Aborted`.
+- **Commit:** write durable `Committing` **before** any user-key write; load
+  intents for `txn_id`, `apply_mutations` to user keys (index + CDC fire),
+  delete intent keys, set record `Committed`. Idempotent if already
+  `Committed`; resumes from `Committing` if interrupted; rejects if `Aborted`.
 - **Abort:** delete intent keys, set record `Aborted`. Does not touch user keys.
-  Idempotent if already `Aborted`; rejects if `Committed`.
+  Idempotent if already `Aborted`; rejects if `Committed` or `Committing`.
 
 Prepared intents are **not** visible to ordinary user `get`/`scan` (they live
 only under `\x00txn/intent/…`).
 
-### 17.4 Coordinator algorithm (server — follow-on task)
+### 17.4 Coordinator algorithm (server)
 
 1. Partition mutations by range → group.
 2. `coordinator_group` = group of the lexicographically smallest key.
-3. Propose `TxnPrepare` on each participant group in parallel; wait applied.
+3. Propose `TxnPrepare` on each participant group (sequential propose; wait applied).
 4. If all prepared: propose `TxnCommit2pc` on all; else `TxnAbort2pc` on
    prepared participants.
-5. Crash recovery (minimal): on startup, records in `Preparing` → abort;
-   `Prepared` without a global decision → abort (conservative).
+5. Crash recovery on startup:
+   - `Preparing` / `Prepared` → abort (fail-closed; no durable commit decision)
+   - `Committing` → finish commit (never abort)
+   - `Committed` / `Aborted` → leave untouched
+
+**Operational note:** cross-group 2PC requires this node to be leader of **all**
+participant groups for the sequential propose path (shared-engine single-node
+and co-leader multi-group deployments). Not expanded to multi-node meta
+replication or TimeoutNow in this path.
 
 ### 17.5 Invariants (2PC)
 
 | ID | Invariant |
 |---|---|
-| TXN-2PC-1 | User keys never change until a durable `Committed` decision is applied |
+| TXN-2PC-1 | User keys never change until a durable `Committing` decision is written |
 | TXN-2PC-2 | After `Committed` ACK, all participant intents are cleared and user keys are recoverable |
 | TXN-2PC-3 | After `Aborted`, no user-key mutation from that txn remains |
 | TXN-2PC-4 | Types 1–4 decode/encode unchanged after adding types 5–7 |
+| TXN-2PC-5 | `Committing` always finishes to `Committed` on recovery; never aborted |
 
 ### 17.6 Client transparency
 

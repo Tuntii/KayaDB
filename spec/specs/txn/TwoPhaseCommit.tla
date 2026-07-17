@@ -10,8 +10,8 @@ EXTENDS Naturals, FiniteSets, TLC
 (*   - prepare phase: all participants must Prepare before CommitDecision  *)
 (*   - abort on any prepare failure                                        *)
 (*   - commit / abort decision is atomic at the abstract level             *)
-(*   - recovery: unfinished Preparing/Prepared participants abort          *)
-(*     (conservative; matches server recover_incomplete_2pc)               *)
+(*   - recovery: unfinished Preparing/Prepared participants abort;         *)
+(*     Committing finishes to committed (see engine Txn2pcState::Committing)*)
 (*                                                                         *)
 (* Intentionally omits Raft log, network reordering detail, and SI WW      *)
 (* conflicts (see TxnCommit.tla for single-group SI).                      *)
@@ -158,6 +158,7 @@ CoordFinishAbort ==
 
 \* Crash recovery while preparing/prepared and no decision yet: abort.
 \* Maps to recover_incomplete_2pc: Preparing/Prepared → Abort.
+\* (Committing with decided="commit" finishes via ParticipantCommit path.)
 RecoverAbort ==
     /\ coord \in {"preparing", "prepared"}
     /\ decided = "none"

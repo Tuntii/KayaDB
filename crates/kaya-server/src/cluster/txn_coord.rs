@@ -9,11 +9,12 @@
 //!
 //! Single-group commits stay on type-4 [`RaftCommand::TxnCommit`].
 //!
-//! # Crash recovery (minimal, conservative)
+//! # Crash recovery
 //!
-//! On startup, [`recover_incomplete_2pc`] scans `\x00txn/rec/*` and aborts any
-//! record still in `Preparing` or `Prepared`. This is local to the engine and
-//! intentionally fail-closed when no durable global decision exists.
+//! On startup, [`recover_incomplete_2pc`] scans `\x00txn/rec/*`:
+//! - `Preparing` / `Prepared` → abort (fail-closed; no durable global decision)
+//! - `Committing` → finish commit (decision was durable; never abort)
+//! - `Committed` / `Aborted` → leave untouched
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -138,22 +139,26 @@ pub fn parse_rec_txn_id(key: &[u8]) -> Option<u64> {
     Some(u64::from_be_bytes(buf))
 }
 
-/// Conservative crash recovery: abort any 2PC record still `Preparing` or
-/// `Prepared` (no durable global decision observed on this engine).
+/// Crash recovery for incomplete 2PC participant records.
 ///
-/// Returns the number of transactions aborted.
+/// - `Preparing` / `Prepared` → abort (no durable commit decision)
+/// - `Committing` → finish commit (load remaining intents, materialize, clear,
+///   mark `Committed`)
+/// - `Committed` / `Aborted` → no-op
 ///
-/// Called once at node startup before the Raft event loop runs. Records that
-/// already reached `Committed` / `Aborted` are left untouched.
+/// Returns `(aborted, finished_commits)`.
+///
+/// Called once at node startup before the Raft event loop runs.
 pub async fn recover_incomplete_2pc<D: Disk>(
     engine: &mut kaya_engine::Engine<D>,
-) -> Result<u32, String> {
+) -> Result<(u32, u32), String> {
     let rows = engine
         .scan_prefix(TXN_REC_PREFIX, ScanOptions::default())
         .await
         .map_err(|e| e.to_string())?;
 
     let mut aborted = 0u32;
+    let mut finished = 0u32;
     for kv in rows {
         let Some(txn_id) = parse_rec_txn_id(&kv.key) else {
             continue;
@@ -170,10 +175,18 @@ pub async fn recover_incomplete_2pc<D: Disk>(
                     .map_err(|e| e.to_string())?;
                 aborted = aborted.saturating_add(1);
             }
+            Txn2pcState::Committing => {
+                // Decision was durable: finish materialization, never abort.
+                engine
+                    .apply_txn_commit_2pc(txn_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                finished = finished.saturating_add(1);
+            }
             Txn2pcState::Committed | Txn2pcState::Aborted => {}
         }
     }
-    Ok(aborted)
+    Ok((aborted, finished))
 }
 
 #[cfg(test)]
@@ -240,6 +253,50 @@ mod tests {
         assert!(entries.iter().all(|e| !e.starts_with("abort")));
         // Coordinator is group of key "a" → group 1.
         assert!(entries.iter().any(|e| e.contains("coord1")));
+    }
+
+    #[tokio::test]
+    async fn recover_aborts_prepared_leaves_committed() {
+        use std::sync::Arc;
+
+        use kaya_core::EngineConfig;
+        use kaya_engine::{Engine, ReadOptions};
+        use kaya_io::SimDisk;
+
+        let disk = Arc::new(SimDisk::new());
+        let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+
+        // Prepared → abort on recovery.
+        engine
+            .apply_txn_prepare(1, &[(b"prep".to_vec(), Some(b"1".to_vec()))])
+            .await
+            .unwrap();
+        // Fully committed → untouched.
+        engine
+            .apply_txn_prepare(2, &[(b"fin".to_vec(), Some(b"2".to_vec()))])
+            .await
+            .unwrap();
+        engine.apply_txn_commit_2pc(2).await.unwrap();
+
+        let (aborted, finished) = recover_incomplete_2pc(&mut engine).await.unwrap();
+        assert_eq!(aborted, 1, "txn 1 Prepared must abort");
+        assert_eq!(finished, 0);
+        assert_eq!(
+            engine.read_txn2pc_state(1).unwrap(),
+            Some(Txn2pcState::Aborted)
+        );
+        assert_eq!(
+            engine.get(b"prep", ReadOptions::default()).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            engine.read_txn2pc_state(2).unwrap(),
+            Some(Txn2pcState::Committed)
+        );
+        assert_eq!(
+            engine.get(b"fin", ReadOptions::default()).await.unwrap(),
+            Some(b"2".to_vec())
+        );
     }
 
     #[tokio::test]

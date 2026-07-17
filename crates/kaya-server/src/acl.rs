@@ -3,8 +3,10 @@
 //! Config is a JSON object `prefix -> token`. Prefix keys may be UTF-8 text or
 //! hex-encoded bytes (`0x…` / `hex:…`). When an ACL file is configured, data-path
 //! ops (PUT/GET/DELETE/SCAN/TXN_*) authorize the presented client token against
-//! the **longest** prefix that is a prefix of the request key. An empty ACL map
-//! denies every such op.
+//! the **longest** prefix that is a prefix of the request key. Keyless ops
+//! (TXN_BEGIN/COMMIT/ROLLBACK, CDC_POLL/CHECKPOINT, SPLIT/MERGE) accept any
+//! token that appears on at least one rule via [`PrefixAcl::authorize_token`].
+//! An empty ACL map denies every such op.
 
 use std::collections::HashMap;
 use std::fs;
@@ -77,8 +79,9 @@ impl PrefixAcl {
         false
     }
 
-    /// Authorize when there is no key (TXN_BEGIN / TXN_COMMIT / TXN_ROLLBACK):
-    /// any token that appears on at least one rule is accepted. Empty ACL denies.
+    /// Authorize when there is no key (TXN_BEGIN / TXN_COMMIT / TXN_ROLLBACK /
+    /// CDC_POLL / CDC_CHECKPOINT / SPLIT_RANGE / MERGE_RANGE): any token that
+    /// appears on at least one rule is accepted. Empty ACL denies.
     pub fn authorize_token(&self, token: Option<&str>) -> bool {
         let Some(token) = token else {
             return false;

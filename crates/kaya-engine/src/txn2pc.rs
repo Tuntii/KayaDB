@@ -36,6 +36,9 @@ pub enum Txn2pcState {
     Prepared = 2,
     Committed = 3,
     Aborted = 4,
+    /// Durable commit decision accepted; materialization may be incomplete.
+    /// Crash recovery must finish commit, never abort.
+    Committing = 5,
 }
 
 impl Txn2pcState {
@@ -49,6 +52,7 @@ impl Txn2pcState {
             2 => Ok(Self::Prepared),
             3 => Ok(Self::Committed),
             4 => Ok(Self::Aborted),
+            5 => Ok(Self::Committing),
             other => Err(KayaError::corruption(format!(
                 "unknown 2PC txn state byte {other}"
             ))),
@@ -61,6 +65,7 @@ impl Txn2pcState {
             Self::Prepared => "Prepared",
             Self::Committed => "Committed",
             Self::Aborted => "Aborted",
+            Self::Committing => "Committing",
         }
     }
 }
@@ -181,8 +186,14 @@ impl<D: Disk> Engine<D> {
     /// Materialize durable intents for `txn_id` then clear them and mark
     /// `Committed`.
     ///
-    /// User-key materialization goes through [`Self::apply_mutations`] so index
-    /// maintenance and CDC fire for the committed keys.
+    /// Crash-safe order:
+    /// 1. Durably write `Committing` (commit decision) before any user-key write
+    /// 2. `apply_mutations` + clear intents
+    /// 3. Write `Committed`
+    ///
+    /// Recovery of `Committing` resumes this path (intents may already be partly
+    /// applied or cleared). User-key materialization goes through
+    /// [`Self::apply_mutations`] so index maintenance and CDC fire.
     pub async fn apply_txn_commit_2pc(&mut self, txn_id: u64) -> Result<()> {
         let opts = WriteOptions::default();
         let rec_key = encode_rec_key(txn_id);
@@ -196,6 +207,24 @@ impl<D: Disk> Engine<D> {
                     "cannot commit aborted 2PC txn {txn_id}"
                 )));
             }
+            // Preparing / Prepared / Committing: ensure Committing is durable
+            // before materializing (idempotent if already Committing).
+            if state != Txn2pcState::Committing {
+                self.write_put(
+                    rec_key.clone(),
+                    vec![Txn2pcState::Committing.as_byte()],
+                    opts.clone(),
+                )
+                .await?;
+            }
+        } else {
+            // No rec key (rare): still mark Committing so recovery finishes.
+            self.write_put(
+                rec_key.clone(),
+                vec![Txn2pcState::Committing.as_byte()],
+                opts.clone(),
+            )
+            .await?;
         }
 
         let mutations = self.load_durable_intents(txn_id)?;
@@ -210,7 +239,8 @@ impl<D: Disk> Engine<D> {
 
     /// Drop durable intents for `txn_id` and mark the record `Aborted`.
     ///
-    /// Does not touch user keys.
+    /// Does not touch user keys. Rejects `Committing` / `Committed` (decision
+    /// already made).
     pub async fn apply_txn_abort_2pc(&mut self, txn_id: u64) -> Result<()> {
         let opts = WriteOptions::default();
         let rec_key = encode_rec_key(txn_id);
@@ -219,9 +249,10 @@ impl<D: Disk> Engine<D> {
             if state == Txn2pcState::Aborted {
                 return Ok(());
             }
-            if state == Txn2pcState::Committed {
+            if state == Txn2pcState::Committed || state == Txn2pcState::Committing {
                 return Err(KayaError::invalid_argument(format!(
-                    "cannot abort committed 2PC txn {txn_id}"
+                    "cannot abort {} 2PC txn {txn_id}",
+                    state.name()
                 )));
             }
         }
@@ -337,6 +368,7 @@ mod tests {
             Txn2pcState::Prepared,
             Txn2pcState::Committed,
             Txn2pcState::Aborted,
+            Txn2pcState::Committing,
         ] {
             assert_eq!(Txn2pcState::from_byte(s.as_byte()).unwrap(), s);
         }
@@ -511,6 +543,100 @@ mod tests {
             assert_eq!(
                 engine.get(b"x", ReadOptions::default()).await.unwrap(),
                 Some(b"durable".to_vec())
+            );
+        });
+    }
+
+    /// Crash mid-commit: durable `Committing` + remaining intents must finish
+    /// to user-visible keys and `Committed` (never abort).
+    #[test]
+    fn committing_with_intents_finishes_on_recover() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+
+            let mutations = vec![
+                (b"user/a".to_vec(), Some(b"alpha".to_vec())),
+                (b"user/b".to_vec(), Some(b"beta".to_vec())),
+            ];
+            engine.apply_txn_prepare(42, &mutations).await.unwrap();
+            assert_eq!(
+                engine.read_txn2pc_state(42).unwrap(),
+                Some(Txn2pcState::Prepared)
+            );
+
+            // Simulate crash after decision, before materialization.
+            engine
+                .write_put(
+                    encode_rec_key(42),
+                    vec![Txn2pcState::Committing.as_byte()],
+                    WriteOptions::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                engine.read_txn2pc_state(42).unwrap(),
+                Some(Txn2pcState::Committing)
+            );
+            // Intents still present; user keys not yet visible.
+            assert!(engine
+                .get(&encode_intent_key(42, b"user/a"), ReadOptions::default())
+                .await
+                .unwrap()
+                .is_some());
+            assert_eq!(
+                engine.get(b"user/a", ReadOptions::default()).await.unwrap(),
+                None
+            );
+
+            // Recovery / finish path.
+            engine.apply_txn_commit_2pc(42).await.unwrap();
+
+            assert_eq!(
+                engine.get(b"user/a", ReadOptions::default()).await.unwrap(),
+                Some(b"alpha".to_vec())
+            );
+            assert_eq!(
+                engine.get(b"user/b", ReadOptions::default()).await.unwrap(),
+                Some(b"beta".to_vec())
+            );
+            assert_eq!(
+                engine.read_txn2pc_state(42).unwrap(),
+                Some(Txn2pcState::Committed)
+            );
+            assert_eq!(
+                engine
+                    .get(&encode_intent_key(42, b"user/a"), ReadOptions::default())
+                    .await
+                    .unwrap(),
+                None
+            );
+            // Abort must not undo a Committing decision that finished.
+            assert!(engine.apply_txn_abort_2pc(42).await.is_err());
+        });
+    }
+
+    #[test]
+    fn abort_rejects_committing_state() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine
+                .apply_txn_prepare(5, &[(b"k".to_vec(), Some(b"v".to_vec()))])
+                .await
+                .unwrap();
+            engine
+                .write_put(
+                    encode_rec_key(5),
+                    vec![Txn2pcState::Committing.as_byte()],
+                    WriteOptions::default(),
+                )
+                .await
+                .unwrap();
+            let err = engine.apply_txn_abort_2pc(5).await.unwrap_err();
+            assert!(
+                err.to_string().contains("cannot abort"),
+                "unexpected err: {err}"
             );
         });
     }

@@ -1002,6 +1002,12 @@ async fn dispatch(
         // CDC_POLL (13) — leader-local changefeed poll (events from Raft apply path).
         CDC_POLL_OPCODE => match decode_cdc_poll_request(&payload) {
             Ok((consumer_id, from_seq, limit)) => {
+                if let Some(acl) = &acl {
+                    // Same as TXN_BEGIN: any configured rule token is accepted.
+                    if !acl.authorize_token(presented_token.as_deref()) {
+                        return acl_denied(client_auth, None);
+                    }
+                }
                 if !is_leader_of(raft, GroupId::ZERO) {
                     let hint = get_leader_hint(raft, &roster_snapshot);
                     return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
@@ -1059,6 +1065,11 @@ async fn dispatch(
         // CDC_CHECKPOINT (14)
         CDC_CHECKPOINT_OPCODE => match decode_cdc_checkpoint_request(&payload) {
             Ok(consumer_id) => {
+                if let Some(acl) = &acl {
+                    if !acl.authorize_token(presented_token.as_deref()) {
+                        return acl_denied(client_auth, None);
+                    }
+                }
                 if !is_leader_of(raft, GroupId::ZERO) {
                     let hint = get_leader_hint(raft, &roster_snapshot);
                     return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
@@ -1114,6 +1125,14 @@ async fn dispatch(
         // SPLIT_RANGE (16) — split range at key; host new group; bump meta epoch.
         SPLIT_RANGE_OPCODE => match decode_split_range_request(&payload) {
             Ok(split_key) => {
+                // When PrefixAcl is configured, require a known client token so
+                // ACL-only deployments cannot reconfigure ranges anonymously.
+                // (Operator-token admin path still covers TRANSFER_LEADER etc.)
+                if let Some(acl) = &acl {
+                    if !acl.authorize_token(presented_token.as_deref()) {
+                        return acl_denied(client_auth, Some(split_key.len()));
+                    }
+                }
                 if drain {
                     return outcome(
                         STATUS_ERROR,
@@ -1180,6 +1199,11 @@ async fn dispatch(
         // Orphan right-hand Raft group is left hosted and idle (reclaim is M22 follow-on).
         MERGE_RANGE_OPCODE => match decode_merge_range_request(&payload) {
             Ok(left_start) => {
+                if let Some(acl) = &acl {
+                    if !acl.authorize_token(presented_token.as_deref()) {
+                        return acl_denied(client_auth, Some(left_start.len()));
+                    }
+                }
                 if !is_leader_of(raft, GroupId::ZERO) {
                     let hint = get_leader_hint(raft, &roster_snapshot);
                     return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
