@@ -83,6 +83,7 @@ For local demos, bind to `127.0.0.1`. For multi-host experiments, bind to a priv
 | Scan result / byte caps | 100 000 entries / 64 MiB | `EngineConfig.limits.max_scan_results` / `max_scan_bytes` | Unbounded SCAN cannot exhaust memory; merge window bounded; oversized prefixes → `STATUS_INVALID_ARGUMENT` | ✅ `crates/kaya-engine/src/memtable.rs` |
 | Data-dir exclusive lock | on | `EngineConfig.disable_locking` | `KAYA_LOCK` file (share-mode 0 on Windows, `flock` on Unix) prevents two processes corrupting one data dir | ✅ `crates/kaya-engine/src/lib.rs` |
 | Encryption at rest (engine Disk) | off | `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE` (32 raw bytes) | Engine files sealed with AES-256-GCM via `EncryptedDisk` | ✅ (M24) `kaya-io` + server open path |
+| Per-prefix ACL | off | `--acl-file` / `KAYA_ACL_FILE` (JSON `prefix → token`) | Longest-prefix authorize on PUT/GET/DELETE/SCAN/TXN_*; empty map denies all; HEALTH stays open | ✅ (M24) `crates/kaya-server/src/acl.rs` + `client_ops` |
 
 `kayadb-server` calls security checks before binding listeners. See `crates/kaya-server/src/security.rs` and `cluster.rs` (snapshot load + compaction, TLS listener setup).
 
@@ -297,6 +298,10 @@ ufw allow from 10.0.0.2 to any port 8379
 3. **Data At Rest Encryption:**
    * **M24 engine-level AES-256-GCM:** pass `--encryption-key-file <path>` (or `KAYA_ENCRYPTION_KEY_FILE`) where the file is exactly **32 raw bytes**. The server wraps the engine `Disk` with `EncryptedDisk` so WAL/SST/manifest bytes are sealed as `KAYAENC1 | plain_len | nonce | ciphertext+tag`. v1 uses the same key as KEK and DEK; key rotation is a follow-on.
    * Still recommended for full-volume protection (Raft peer state and non-engine files): filesystem-level encryption (DM-Crypt/LUKS, BitLocker, or encrypted block volumes).
+4. **Per-prefix ACL (M24):**
+   * Optional JSON file via `--acl-file` / `KAYA_ACL_FILE`: object mapping key prefix → client token. Prefix keys may be UTF-8 text or hex (`0x…` / `hex:…`).
+   * When configured, data-path ops authorize with **longest-prefix** match against the presented client token; an empty ACL map denies every data op. TXN_BEGIN/COMMIT/ROLLBACK accept any token that appears on at least one rule. HEALTH stays open.
+   * This is key-space isolation only — not full multi-tenancy (no tenant IDs, quotas, or resource accounting).
 
 ---
 
@@ -346,20 +351,22 @@ Never paste inspection output from real datasets into public issue trackers unle
 
 ---
 
-## 7. Accepted risks and future hardening (M15 exit)
+## 7. Accepted risks and future hardening (M24 exit)
 
-M15 closes the data-path authZ and structured audit gaps from M13. M13 delivered operator-token auth for membership ops, native TLS (feature-gated), durable Raft snapshots, and documented day-2 runbooks. The items below are **explicitly accepted risks** after M15 — not correctness bugs. Mitigate them with infrastructure controls documented in sections 2–5.
+M15 closed data-path authZ and structured audit; M24 closes engine encryption-at-rest and optional per-prefix ACL. Items still marked **accepted risk** below are deployment / isolation hardening — not correctness bugs. Mitigate them with infrastructure controls in sections 2–5.
 
 | Gap | Status | Mitigation (operator responsibility) | Code / docs reference |
 |---|---|---|---|
 | Full authZ for all client ops (GET/PUT/DELETE/SCAN/STATS) | ✅ Implemented when `--client-token` set | Configure `--client-token` / `KAYA_CLIENT_TOKEN`; combine with firewall + mTLS; HEALTH (op 5) remains open for probes | `CLIENT\x00` framing in `crates/kaya-net/src/codec.rs`; enforcement in `crates/kaya-server/src/cluster/client_ops.rs` (opcodes 1–4, 6) |
 | Structured audit logging (local JSONL) | ✅ Implemented | Enable `--audit-log` (default on when any token configured); rotate/archive `{data_dir}/audit.jsonl` | `crates/kaya-server/src/audit.rs` |
-| Data at rest encryption | ✅ Optional engine-level AES-GCM | Set `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE` (32-byte key); combine with volume encryption for Raft/non-Disk files; key rotation deferred | `EncryptedDisk` in `crates/kaya-io/src/encrypted.rs`; server open path in `cluster/mod.rs` |
-| Multi-tenant isolation | Accepted risk | One cluster per tenant; network segmentation; separate credentials per deployment | No tenant IDs in engine or protocol |
+| Data at rest encryption | ✅ Optional engine-level AES-GCM (M24) | Set `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE` (32-byte key); combine with volume encryption for Raft/non-Disk files; **key rotation deferred** (v1 single KEK=DEK) | `EncryptedDisk` in `crates/kaya-io/src/encrypted.rs`; server open path in `cluster/mod.rs` |
+| Per-prefix ACL | ✅ Optional when `--acl-file` set (M24) | JSON `prefix → token`; longest-prefix match on PUT/GET/DELETE/SCAN/TXN_*; empty map denies all data ops | `PrefixAcl` in `crates/kaya-server/src/acl.rs`; enforcement in `client_ops` |
+| Multi-tenant isolation | Partial via per-prefix ACL; full tenancy still accepted risk | Use `--acl-file` for key-space isolation, or one cluster per tenant + network segmentation; no tenant IDs, quotas, or resource accounting in engine/protocol | `acl.rs`; ROADMAP: full multi-tenancy out of M16–M25 scope |
+| Encryption key rotation (KEK/DEK) | Accepted risk (v1 deferred) | Rotate by re-encrypt offline or provision a new cluster; protect the 32-byte key file (`0600`, secrets manager) | Single-key `EncryptedDisk` path; rotation API not shipped |
 | Client cert enforcement on every connection | Accepted risk (partial impl.) | Enable native TLS with CA (`require_client_cert: true` when `--tls-ca` set); or ghostunnel `--allow-cn` | `crates/kaya-server/src/main.rs`, `crates/kaya-net/src/transport.rs` |
 | Compliance-grade audit export to SIEM | ✅ Optional built-in UDP syslog sink | Set `--audit-syslog <host:port>` / `KAYA_AUDIT_SYSLOG` (RFC 5424 over UDP, requires `--audit-log`); for TCP/TLS transport or delivery guarantees, front with a local syslog agent (rsyslog/vector) | `SyslogSink` in `crates/kaya-server/src/audit.rs`; UDP best-effort, no on-wire encryption |
-| Hardened remote admin API | Accepted risk | Restrict `kayactl` to bastion/VPN; require `--operator-token` for membership and `--client-token` for data ops | `kayactl` over client protocol only |
+| Hardened remote admin API | Accepted risk | Restrict `kayactl` to bastion/VPN; require `--operator-token` for membership and `--client-token` / ACL for data ops | `kayactl` over client protocol only |
 
 **No known correctness gaps** are listed as accepted risk. Remaining items are deployment hardening, not storage or consensus defects.
 
-Native TLS + operator token + client token provide transport encryption, admin auth, and optional data-path auth. Firewall rules, mTLS (native or sidecar), and configured tokens remain mandatory for any production-like deployment.
+Native TLS + operator token + client token / per-prefix ACL provide transport encryption, admin auth, and optional data-path auth. Engine AES-GCM seals WAL/SST/manifest when configured. Firewall rules, mTLS (native or sidecar), volume encryption for Raft peer files, and configured tokens remain mandatory for any production-like deployment.

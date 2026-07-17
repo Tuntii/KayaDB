@@ -1,7 +1,7 @@
 # KayaDB Development Roadmap
 
 **Status:** Living roadmap  
-**Last updated:** 2026-07-17 (M23 cross-shard 2PC production path closed; M24+ open)
+**Last updated:** 2026-07-17 (M24 production hardening path closed; M25 open)
 
 > **"Geniş ve yaşayan yol haritası"** — Bu belge hem tarihi başarıları arşivler, hem şu anki odak noktalarını gösterir, hem de uzun vadeli vizyonu (birden fazla paralel track ile) detaylandırır. Tasarım-öncelikli ve correctness-öncelikli felsefe korunur.
 
@@ -76,7 +76,7 @@ Goal: close post-M14 parallel-track gaps across security, client ecosystem, obse
 
 ## Next arc: M16–M25 — Distributed Transactional KV
 
-**Status (2026-07-17):** **M16–M23 closed** (txn path through cross-shard 2PC). M24–M25 remain open. We still do **not** claim full v0.2.0 / north-star production readiness until M24–M25 exit gates.
+**Status (2026-07-17):** **M16–M24 closed** (txn path through cross-shard 2PC + encryption/ACL hardening). M25 remains open. We still do **not** claim full v0.2.0 / north-star production readiness until M25 exit gates.
 
 **Hedef kimlik (M25):** range sharding + multi-raft + **cross-shard transaction** (Raft üzerine 2PC) — CockroachDB/TiKV çekirdeği sınıfında, adım adım kanıtlanarak. API yüzeyi programatik kalır: **KV + txn + secondary index** (SQL yok; post-M25 v2 adayı). Sıralama: **önce transaction, sonra sharding** — cross-shard txn zaten MVCC + timestamp altyapısı ister; önce tek grupta Jepsen'le kanıtla, sonra dağıt.
 
@@ -98,7 +98,7 @@ Her milestone değişmez disiplini korur: **spec → sim → gerçek implementas
 
 ### Faz 3 — Hardening + kanıt
 
-9. **M24 — Production hardening ⬜** — Encryption-at-rest (pluggable Disk wrapper, AES-GCM, KEK/DEK + rotation; §7 riski kapanır), per-prefix ACL. ⬅ *Kernel+userspace birleşik attribution*, ⬅ *io_uring completion tracing*, ⬅ *stap/perf privileged CI*, ⬅ *Dashboard v2* (trace timeline + eBPF + range health). *Exit:* security.md §7 tablosu boşalır/yeniden gerekçelenir; dashboard day-2 ops'ta kullanılır.
+9. **M24 — Production hardening ✅ production path** — Complete (2026-07-17): **EncryptedDisk** AES-256-GCM Disk wrapper (`KAYAENC1`|plain_len|nonce|ct+tag; single 32-byte key as KEK=DEK via `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE`); **per-prefix ACL** (`--acl-file` / `KAYA_ACL_FILE` JSON prefix→token, longest-prefix authorize on PUT/GET/DELETE/SCAN/TXN_*). `docs/security.md` §7 re-justified (encryption + ACL closed; key rotation + full multi-tenancy still accepted risk). *Not in this path (deferred):* full kernel+userspace fsync attribution, io_uring completion tracing, stap/perf privileged CI, Dashboard v2 (trace timeline + eBPF + range health — v1 remains day-2 ops), online KEK/DEK rotation.
 10. **M25 — Scale proof & ecosystem close-out ⬜** — Performance envelope v2 (txn+sharded regression gate'ler; ⬅ *scheduled profiling CI*), Jepsen grand matrix, ⬅ *linearizability minimal counterexample*, ⬅ *TS/JS + Zig client'lar* + Go txn/retry paritesi + conformance v3, deployment guide v2 + SLO v2. *Exit:* north-star yeniden değerlendirilir → **v0.2.0**.
 
 **Kapsam dışı (bilinçli):** SQL katmanı (post-M25 v2 adayı), tam multi-tenancy (yalnızca per-prefix ACL), geo-replication/follower reads, kanıtsız production SLA iddiası.
@@ -671,13 +671,13 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 - ✅ `scripts/ebpf/Makefile` (Phase 2A)
 - ✅ Flamegraph + stack collapse entegrasyonu (Phase 2C): `durability-flamegraph.bt`, `kayactl ebpf flamegraph`, `make flamegraph`
 - ✅ OpenTelemetry spans (Phase 2C; `kayadb-server --features otel --otel`; Prometheus `/metrics` ✅ M15)
-- 🟡 External stap/perf USDT attachment (in-process markers + operator guide in `scripts/ebpf/README.md`; ⬜ stap-in-CI **deferred → M24** — needs a privileged Linux CI runner)
+- 🟡 External stap/perf USDT attachment (in-process markers + operator guide in `scripts/ebpf/README.md`; ⬜ stap-in-CI **deferred past M24** — needs a privileged Linux CI runner; not required for M24 security production path)
 
-**Uzun vadeli / İleri seviye** — ⬜ **deferred, artık M16–M25 arc'ında planlı** (building blocks — histograms, USDT markers, flamegraphs, correlate, per-file trace — hazır):
-- Kernel + userspace birleşik attribution (hangi fsync'in ne kadarını kernel'da geçirdiğini net raporla) → **M24**
-- Production-grade tracing (trace correlation across cluster nodes + client) → **M20 (v1) / M24 (full)**
-- GUI / web dashboard — ✅ M22 v1 (read-only cluster/range/raft JSON via `--dashboard-addr`); full trace timeline + eBPF histogram → **M24 (v2)**
-- io_uring completion tracing (Track B ile birleşik) → **M24**
+**Uzun vadeli / İleri seviye** — ⬜ **deferred past M24 production path** (building blocks — histograms, USDT markers, flamegraphs, correlate, per-file trace — hazır; M24 closed on encryption + ACL only):
+- Kernel + userspace birleşik attribution (hangi fsync'in ne kadarını kernel'da geçirdiğini net raporla) → **post-M24 / open**
+- Production-grade tracing (trace correlation across cluster nodes + client) → **M20 (v1) ✅ / full still open**
+- GUI / web dashboard — ✅ M22 v1 (read-only cluster/range/raft JSON via `--dashboard-addr`); full trace timeline + eBPF histogram → **Dashboard v2 deferred past M24**
+- io_uring completion tracing (Track B ile birleşik) → **post-M24 / open**
 
 **Non-goals (değişmez):**
 - Root gerektiren testler default olarak

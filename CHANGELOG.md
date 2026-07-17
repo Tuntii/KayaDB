@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (M24 — Production hardening path)
+- **Encryption-at-rest:** `EncryptedDisk` AES-256-GCM Disk wrapper (`KAYAENC1 | plain_len | nonce | ciphertext+tag`); server `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE` (32 raw bytes; v1 single key as KEK=DEK); contract + unit tests
+- **Per-prefix ACL:** `PrefixAcl` + `--acl-file` / `KAYA_ACL_FILE` (JSON `prefix → token`, UTF-8 or `0x`/`hex:`); longest-prefix authorize on PUT/GET/DELETE/SCAN/TXN_*; empty map denies all; IT `per_prefix_acl_two_tokens`
+- **Security docs:** `docs/security.md` enforcement table + §7 re-justified for M24 exit (encryption + ACL closed; key rotation and full multi-tenancy remain accepted risks)
+- ROADMAP: M24 production path closed; M25 open; no full v0.2.0 / north-star claim yet. *Out of path:* online KEK/DEK rotation, full kernel+userspace eBPF attribution, io_uring completion tracing, stap/perf privileged CI, Dashboard v2
+
 ### Added (M23 — Cross-shard transactions production path)
 - **2PC engine records (shared-engine):** `\x00txn/rec/{txn_id}` + `\x00txn/intent/{txn_id}/{key}`; `Engine::apply_txn_prepare` / `apply_txn_commit_2pc` / `apply_txn_abort_2pc`; commit materializes intents via `apply_mutations` (index+CDC fire)
 - **RaftCommand types 5/6/7:** `TxnPrepare` / `TxnCommit2pc` / `TxnAbort2pc` (types 1–4 layouts unchanged)
