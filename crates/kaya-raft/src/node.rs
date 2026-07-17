@@ -202,7 +202,9 @@ impl RaftNode {
     ///
     /// Only valid while this node is leader:
     /// - `target == self` → no-op success
-    /// - otherwise step down to follower so a free election can proceed
+    /// - otherwise become follower so a free election can proceed, keeping
+    ///   `voted_for` (and the current term) so this node cannot double-vote
+    ///   in term T
     ///
     /// Minimal transfer: does **not** send TimeoutNow / force the target's
     /// election. The preferred candidate is not guaranteed; the next election
@@ -221,9 +223,10 @@ impl RaftNode {
         if target == self.config.id {
             return Ok(());
         }
-        // Voluntary step-down: keep current term so peers do not treat this as a
-        // higher-term discovery; clear leader identity and pending reads.
-        self.step_down(self.current_term);
+        // Voluntary same-term step-down: become follower and clear leader identity
+        // / pending reads, but keep `voted_for` so this node cannot double-vote
+        // in term T (it already voted for itself when it became leader).
+        self.step_down_keeping_vote();
         Ok(())
     }
 
@@ -455,6 +458,19 @@ impl RaftNode {
     fn step_down(&mut self, new_term: Term) {
         self.current_term = new_term;
         self.voted_for = None;
+        self.role = Role::Follower;
+        self.leader_id = None;
+        self.election_ticks = 0;
+        self.votes_received.clear();
+        self.pending_reads.clear();
+    }
+
+    /// Voluntary leadership transfer within the current term.
+    ///
+    /// Becomes follower and clears leader-only state, but **keeps** `voted_for`
+    /// and `current_term`. Clearing the vote would allow a second RequestVote
+    /// grant in the same term (double-voting).
+    fn step_down_keeping_vote(&mut self) {
         self.role = Role::Follower;
         self.leader_id = None;
         self.election_ticks = 0;
@@ -1310,12 +1326,48 @@ mod tests {
             }),
         ));
         assert!(node.is_leader());
+        let term_before = node.current_term;
+        assert_eq!(
+            node.voted_for,
+            Some(NodeId(1)),
+            "leader must have voted for self"
+        );
 
         node.transfer_leadership(NodeId(2))
             .expect("transfer to peer");
         assert!(!node.is_leader());
         assert_eq!(node.status().role, Role::Follower);
         assert_eq!(node.status().leader_id, None);
+        assert_eq!(node.current_term, term_before, "transfer keeps term");
+        assert_eq!(
+            node.voted_for,
+            Some(NodeId(1)),
+            "same-term transfer must keep voted_for to prevent double-voting"
+        );
+    }
+
+    #[test]
+    fn transfer_leadership_keeps_voted_for() {
+        let mut node = make_node(1, vec![2, 3]);
+        let mut out = Vec::new();
+        node.start_election(&mut out);
+        node.handle(Envelope::new(
+            NodeId(2),
+            NodeId(1),
+            Message::VoteResponse(VoteResponse {
+                term: Term(1),
+                vote_granted: true,
+            }),
+        ));
+        assert!(node.is_leader());
+        assert_eq!(node.voted_for, Some(node.config.id));
+
+        node.transfer_leadership(NodeId(2))
+            .expect("transfer to peer");
+
+        // Former leader remains bound to its self-vote in term T.
+        assert_eq!(node.role, Role::Follower);
+        assert_eq!(node.voted_for, Some(NodeId(1)));
     }
 
     #[test]
