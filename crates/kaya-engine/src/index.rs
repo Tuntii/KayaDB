@@ -220,6 +220,11 @@ pub(crate) fn reject_if_system_key(key: &[u8]) -> Result<()> {
             "keys under reserved system prefix \\x00idx/ are not writable via public API",
         ));
     }
+    if crate::txn2pc::is_txn_system_key(key) {
+        return Err(KayaError::invalid_argument(
+            "keys under reserved system prefix \\x00txn/ are not writable via public API",
+        ));
+    }
     Ok(())
 }
 
@@ -305,7 +310,9 @@ pub(crate) fn decode_meta_value(name: &str, value: &[u8]) -> Result<IndexDef> {
             let rest = &value[5 + params_len..];
             let prefix_len = u32::from_be_bytes(rest[0..4].try_into().unwrap()) as usize;
             if rest.len() != 4 + prefix_len {
-                return Err(KayaError::corruption("index meta v2 prefix length mismatch"));
+                return Err(KayaError::corruption(
+                    "index meta v2 prefix length mismatch",
+                ));
             }
             Ok(IndexDef {
                 name: name.to_string(),
@@ -411,7 +418,8 @@ impl<D: Disk> Engine<D> {
         let meta_key = encode_meta_key(name);
         let meta_val = encode_meta_value(&def);
         let write_opts = WriteOptions::default();
-        self.write_put(meta_key, meta_val, write_opts.clone()).await?;
+        self.write_put(meta_key, meta_val, write_opts.clone())
+            .await?;
         self.indexes.insert(name.to_string(), def);
         self.index_backfill.insert(
             name.to_string(),
@@ -538,11 +546,7 @@ impl<D: Disk> Engine<D> {
                 "unknown index {name:?}"
             )));
         }
-        Ok(self
-            .index_backfill
-            .get(name)
-            .cloned()
-            .unwrap_or_default())
+        Ok(self.index_backfill.get(name).cloned().unwrap_or_default())
     }
 
     /// Pause an online backfill (no-op if already paused/complete/idle).
@@ -552,10 +556,7 @@ impl<D: Disk> Engine<D> {
                 "unknown index {name:?}"
             )));
         }
-        let prog = self
-            .index_backfill
-            .entry(name.to_string())
-            .or_default();
+        let prog = self.index_backfill.entry(name.to_string()).or_default();
         if prog.status == BackfillStatus::Running {
             prog.status = BackfillStatus::Paused;
         }
@@ -569,14 +570,13 @@ impl<D: Disk> Engine<D> {
                 "unknown index {name:?}"
             )));
         }
-        let prog = self
-            .index_backfill
-            .entry(name.to_string())
-            .or_default();
+        let prog = self.index_backfill.entry(name.to_string()).or_default();
         match prog.status {
             BackfillStatus::Paused | BackfillStatus::Idle => {
                 // Idle → treat as starting online backfill from scratch/cursor.
-                if prog.status == BackfillStatus::Idle && prog.last_key.is_none() && prog.scanned == 0
+                if prog.status == BackfillStatus::Idle
+                    && prog.last_key.is_none()
+                    && prog.scanned == 0
                 {
                     // Allow resume of a sync-created index as a re-scan (operator-driven).
                 }
@@ -609,11 +609,7 @@ impl<D: Disk> Engine<D> {
             .cloned()
             .ok_or_else(|| KayaError::invalid_argument(format!("unknown index {name:?}")))?;
 
-        let mut prog = self
-            .index_backfill
-            .get(name)
-            .cloned()
-            .unwrap_or_default();
+        let mut prog = self.index_backfill.get(name).cloned().unwrap_or_default();
         if prog.status == BackfillStatus::Paused {
             return Err(KayaError::invalid_argument(format!(
                 "index {name:?} backfill is paused; resume first"
@@ -682,8 +678,8 @@ impl<D: Disk> Engine<D> {
             }
         }
 
-        let idx_entries = self
-            .scan_prefix_inner(&encode_data_scan_prefix(name, b""), ScanOptions::default())?;
+        let idx_entries =
+            self.scan_prefix_inner(&encode_data_scan_prefix(name, b""), ScanOptions::default())?;
         let mut seen_primary: BTreeMap<Bytes, Bytes> = BTreeMap::new();
         for kv in idx_entries {
             let Some((sec, pk)) = decode_data_key(name, &kv.key) else {

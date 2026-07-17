@@ -19,10 +19,9 @@ mod recovery;
 mod snapshot;
 mod stats;
 mod txn;
+mod txn2pc;
 
-pub use cdc::{
-    CdcCursor, CdcEvent, CdcOp, CDC_BACKUP_WATERMARK, CDC_CURSORS_DIR, CDC_LOG_PATH,
-};
+pub use cdc::{CdcCursor, CdcEvent, CdcOp, CDC_BACKUP_WATERMARK, CDC_CURSORS_DIR, CDC_LOG_PATH};
 pub use index::{
     BackfillMode, BackfillProgress, BackfillStatus, CreateIndexOptions, IndexDef, IndexDivergence,
     IndexDivergenceKind, IndexExtractor, INDEX_DATA_PREFIX, INDEX_META_PREFIX, INDEX_SYS_PREFIX,
@@ -31,6 +30,11 @@ pub use recovery::recover;
 pub use snapshot::SnapshotView;
 pub use stats::{CompactionResult, EngineStats, FlushResult, WriteResult};
 pub use txn::{Intent, TxnId};
+pub use txn2pc::{
+    decode_intent_value, encode_intent_key, encode_intent_scan_prefix, encode_intent_value,
+    encode_rec_key, is_txn_system_key, user_key_from_intent_key, Txn2pcState, TXN_INTENT_PREFIX,
+    TXN_REC_PREFIX, TXN_SYS_PREFIX,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WriteOptions {

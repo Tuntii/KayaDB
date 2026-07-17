@@ -111,6 +111,12 @@ impl RefModel {
                 }
                 Ok(())
             }
+            // 2PC prepare/abort only touch system keys; the ref model tracks
+            // user keys. Commit materializes like TxnCommit once coordinator
+            // work is fully modelled (M23 task 10+).
+            RaftCommand::TxnPrepare { .. }
+            | RaftCommand::TxnCommit2pc { .. }
+            | RaftCommand::TxnAbort2pc { .. } => Ok(()),
         }
     }
 

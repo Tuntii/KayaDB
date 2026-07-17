@@ -57,7 +57,7 @@ Serializable isolation is a **stretch / non-goal** for M17.
 |---|---|
 | Serializable / SSI (anti-write-skew) | Stretch / non-goal |
 | Predicate locks / range locks | Non-goal |
-| Cross-shard / multi-group 2PC | Deferred to M23 |
+| Cross-shard / multi-group 2PC | M23 (see §17) |
 | HLC commit timestamps | Deferred to M20 (seq remains `commit_ts` for M17) |
 
 ---
@@ -296,3 +296,77 @@ Notes:
 - Client `Transaction` type and conformance vectors
 - TLA+ `TxnCommit` model
 - Jepsen bank workload exit gate
+
+---
+
+## 17. Cross-shard 2PC (M23)
+
+When a multi-key transaction spans more than one Raft group (range shard), the
+server uses a coordinator-driven two-phase commit over per-group Raft logs.
+Single-group commits continue to use `RaftCommand::TxnCommit` (type 4).
+
+### 17.1 System keys
+
+Durable participant state lives under the reserved prefix `\x00txn/` (not
+writable via public put/delete):
+
+| Key | Value |
+|---|---|
+| `\x00txn/rec/{txn_id_be8}` | 1-byte state: `1=Preparing`, `2=Prepared`, `3=Committed`, `4=Aborted` |
+| `\x00txn/intent/{txn_id_be8}/{user_key}` | Intent payload: `0` = delete tombstone; `1 \|\| value` = put |
+
+`txn_id` in keys is encoded as **8-byte big-endian** for ordered scans.
+
+### 17.2 RaftCommand variants
+
+| Type byte | Variant | Payload |
+|---:|---|---|
+| 5 | `TxnPrepare { txn_id, coordinator_group, mutations }` | Persist intents + mark `Prepared` |
+| 6 | `TxnCommit2pc { txn_id }` | Materialize intents via `apply_mutations`, clear intents, mark `Committed` |
+| 7 | `TxnAbort2pc { txn_id }` | Delete intents only, mark `Aborted` |
+
+Types 1–4 retain their existing wire layouts (Put / Delete / ConfigChange /
+single-group `TxnCommit`).
+
+### 17.3 Engine apply API
+
+```rust
+impl Engine {
+    pub async fn apply_txn_prepare(
+        &mut self,
+        txn_id: u64,
+        mutations: &[(Bytes, Option<Bytes>)],
+    ) -> Result<()>;
+    pub async fn apply_txn_commit_2pc(&mut self, txn_id: u64) -> Result<()>;
+    pub async fn apply_txn_abort_2pc(&mut self, txn_id: u64) -> Result<()>;
+}
+```
+
+- **Prepare:** write record `Preparing` → write each intent → write `Prepared`.
+- **Commit:** load intents for `txn_id`, `apply_mutations` to user keys (index +
+  CDC fire), delete intent keys, set record `Committed`. Idempotent if already
+  `Committed`; rejects if `Aborted`.
+- **Abort:** delete intent keys, set record `Aborted`. Does not touch user keys.
+  Idempotent if already `Aborted`; rejects if `Committed`.
+
+Prepared intents are **not** visible to ordinary user `get`/`scan` (they live
+only under `\x00txn/intent/…`).
+
+### 17.4 Coordinator algorithm (server — follow-on task)
+
+1. Partition mutations by range → group.
+2. `coordinator_group` = group of the lexicographically smallest key.
+3. Propose `TxnPrepare` on each participant group in parallel; wait applied.
+4. If all prepared: propose `TxnCommit2pc` on all; else `TxnAbort2pc` on
+   prepared participants.
+5. Crash recovery (minimal): on startup, records in `Preparing` → abort;
+   `Prepared` without a global decision → abort (conservative).
+
+### 17.5 Invariants (2PC)
+
+| ID | Invariant |
+|---|---|
+| TXN-2PC-1 | User keys never change until a durable `Committed` decision is applied |
+| TXN-2PC-2 | After `Committed` ACK, all participant intents are cleared and user keys are recoverable |
+| TXN-2PC-3 | After `Aborted`, no user-key mutation from that txn remains |
+| TXN-2PC-4 | Types 1–4 decode/encode unchanged after adding types 5–7 |
