@@ -48,6 +48,7 @@ use crate::raft_persister::RaftPersister;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
+use crate::acl::PrefixAcl;
 use crate::audit::AuditLog;
 use crate::client_auth::{decode_client_auth_payload, CLIENT_AUTH_PREFIX};
 use crate::command::RaftCommand;
@@ -99,6 +100,15 @@ fn outcome(
     }
 }
 
+fn acl_denied(auth_kind: &'static str, key_len: Option<usize>) -> DispatchOutcome {
+    outcome(
+        STATUS_ERROR,
+        encode_error_payload("acl denied"),
+        auth_kind,
+        key_len,
+    )
+}
+
 /// Message sent from a client handler to the Raft loop to propose a write.
 pub struct ProposeReq {
     /// Target Raft group (0 for single-group / membership).
@@ -131,6 +141,7 @@ pub(crate) async fn client_accept_loop(
     self_client: SocketAddr,
     operator_token: Option<String>,
     client_token: Option<String>,
+    acl: Option<PrefixAcl>,
     audit_log: SharedAuditLog,
     network_partitioned: Option<Arc<AtomicBool>>,
     max_connections: usize,
@@ -166,6 +177,7 @@ pub(crate) async fn client_accept_loop(
         let split = split_rt.clone();
         let op_tok = operator_token.clone();
         let cli_tok = client_token.clone();
+        let acl_rules = acl.clone();
         let audit = audit_log.clone();
         tokio::spawn(async move {
             let _permit = permit;
@@ -187,6 +199,7 @@ pub(crate) async fn client_accept_loop(
                 self_client,
                 op_tok,
                 cli_tok,
+                acl_rules,
                 audit,
                 drain,
             )
@@ -214,6 +227,7 @@ async fn handle_connection<S>(
     self_client: SocketAddr,
     operator_token: Option<String>,
     client_token: Option<String>,
+    acl: Option<PrefixAcl>,
     audit_log: SharedAuditLog,
     drain: bool,
 ) where
@@ -240,6 +254,7 @@ async fn handle_connection<S>(
             self_client,
             operator_token.clone(),
             client_token.clone(),
+            acl.clone(),
             drain,
         )
         .await;
@@ -420,6 +435,7 @@ async fn dispatch(
     self_client: SocketAddr,
     operator_token: Option<String>,
     client_token: Option<String>,
+    acl: Option<PrefixAcl>,
     drain: bool,
 ) -> DispatchOutcome {
     let operator_auth = if operator_token.is_some() {
@@ -427,7 +443,7 @@ async fn dispatch(
     } else {
         "none"
     };
-    let client_auth = if client_token.is_some() {
+    let client_auth = if client_token.is_some() || acl.is_some() {
         "client"
     } else {
         "none"
@@ -625,7 +641,8 @@ async fn dispatch(
     // Data-path opcodes 1-4, 6 (STATS), 9-17 (TXN/CDC/ranges) with optional client token
     // enforcement. HEALTH (5) stays open for liveness probes.
     // SPLIT_RANGE (16) / MERGE_RANGE (17) also accept operator token via admin path when configured.
-    let payload = if matches!(opcode, 1..=4 | 6 | 9..=17) {
+    // Per-prefix ACL (M24) is applied later per-op once the key is known (PUT/GET/DELETE/SCAN/TXN_*).
+    let (payload, presented_token) = if matches!(opcode, 1..=4 | 6 | 9..=17) {
         let (clean_payload, presented) = if payload.len() >= CLIENT_AUTH_PREFIX.len()
             && payload.starts_with(CLIENT_AUTH_PREFIX)
         {
@@ -654,9 +671,9 @@ async fn dispatch(
                 );
             }
         }
-        clean_payload
+        (clean_payload, presented)
     } else {
-        payload
+        (payload, None)
     };
 
     let roster_snapshot = roster.read().await.clone();
@@ -665,6 +682,11 @@ async fn dispatch(
         1 => match decode_put_payload(&payload) {
             Ok((key, value)) => {
                 let key_len = key.len();
+                if let Some(acl) = &acl {
+                    if !acl.authorize(&key, presented_token.as_deref()) {
+                        return acl_denied(client_auth, Some(key_len));
+                    }
+                }
                 let group_id = {
                     let t = range_table.read().await;
                     lookup_group(&t, &key)
@@ -692,6 +714,11 @@ async fn dispatch(
         // GET
         2 => match decode_key_payload(&payload) {
             Ok(key) => {
+                if let Some(acl) = &acl {
+                    if !acl.authorize(&key, presented_token.as_deref()) {
+                        return acl_denied(client_auth, Some(key.len()));
+                    }
+                }
                 let group_id = {
                     let t = range_table.read().await;
                     lookup_group(&t, &key)
@@ -735,6 +762,11 @@ async fn dispatch(
         3 => match decode_key_payload(&payload) {
             Ok(key) => {
                 let key_len = key.len();
+                if let Some(acl) = &acl {
+                    if !acl.authorize(&key, presented_token.as_deref()) {
+                        return acl_denied(client_auth, Some(key_len));
+                    }
+                }
                 let group_id = {
                     let t = range_table.read().await;
                     lookup_group(&t, &key)
@@ -761,6 +793,11 @@ async fn dispatch(
         // SCAN
         4 => match decode_scan_payload(&payload) {
             Ok(prefix) => {
+                if let Some(acl) = &acl {
+                    if !acl.authorize(&prefix, presented_token.as_deref()) {
+                        return acl_denied(client_auth, Some(prefix.len()));
+                    }
+                }
                 let group_id = {
                     let t = range_table.read().await;
                     lookup_group(&t, &prefix)
@@ -833,6 +870,11 @@ async fn dispatch(
 
         // TXN_BEGIN
         TXN_BEGIN_OPCODE => {
+            if let Some(acl) = &acl {
+                if !acl.authorize_token(presented_token.as_deref()) {
+                    return acl_denied(client_auth, None);
+                }
+            }
             if !is_leader_of(raft, GroupId::ZERO) {
                 let hint = get_leader_hint(raft, &roster_snapshot);
                 return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
@@ -849,11 +891,16 @@ async fn dispatch(
         // TXN_OP
         TXN_OP_OPCODE => match decode_txn_op_payload(&payload) {
             Ok((txn_id, op, key, value)) => {
+                let key_len = key.len();
+                if let Some(acl) = &acl {
+                    if !acl.authorize(&key, presented_token.as_deref()) {
+                        return acl_denied(client_auth, Some(key_len));
+                    }
+                }
                 if !is_leader_of(raft, GroupId::ZERO) {
                     let hint = get_leader_hint(raft, &roster_snapshot);
                     return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
                 }
-                let key_len = key.len();
                 let mut eng = engine.lock().await;
                 match op {
                     TXN_OP_GET => match eng.txn_get(txn_id, &key) {
@@ -903,6 +950,11 @@ async fn dispatch(
         // TXN_COMMIT
         TXN_COMMIT_OPCODE => match decode_txn_id_payload(&payload) {
             Ok(txn_id) => {
+                if let Some(acl) = &acl {
+                    if !acl.authorize_token(presented_token.as_deref()) {
+                        return acl_denied(client_auth, None);
+                    }
+                }
                 let (status, body) = txn_commit_via_raft(
                     raft,
                     engine,
@@ -925,6 +977,11 @@ async fn dispatch(
         // TXN_ROLLBACK
         TXN_ROLLBACK_OPCODE => match decode_txn_id_payload(&payload) {
             Ok(txn_id) => {
+                if let Some(acl) = &acl {
+                    if !acl.authorize_token(presented_token.as_deref()) {
+                        return acl_denied(client_auth, None);
+                    }
+                }
                 if !is_leader_of(raft, GroupId::ZERO) {
                     let hint = get_leader_hint(raft, &roster_snapshot);
                     return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
@@ -1267,11 +1324,7 @@ async fn txn_commit_via_raft(
         };
     }
 
-    let group_id = by_group
-        .keys()
-        .next()
-        .copied()
-        .unwrap_or(GroupId::ZERO);
+    let group_id = by_group.keys().next().copied().unwrap_or(GroupId::ZERO);
     let mutations = by_group.into_values().next().unwrap_or_default();
 
     let cmd = RaftCommand::TxnCommit { txn_id, mutations }.encode();

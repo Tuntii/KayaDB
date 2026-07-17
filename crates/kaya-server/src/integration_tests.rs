@@ -1066,6 +1066,139 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir3);
     }
 
+    /// M24 per-prefix ACL: two tokens / two prefixes; longest-prefix authorize.
+    #[serial]
+    #[tokio::test]
+    async fn per_prefix_acl_two_tokens() {
+        use crate::acl::PrefixAcl;
+        use std::collections::HashMap;
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir1 = std::env::temp_dir().join(format!("kayadb_acl_n1_{}", test_id));
+        let data_dir2 = std::env::temp_dir().join(format!("kayadb_acl_n2_{}", test_id));
+        let data_dir3 = std::env::temp_dir().join(format!("kayadb_acl_n3_{}", test_id));
+
+        let r1 = get_free_port().await;
+        let c1 = get_free_port().await;
+        let r2 = get_free_port().await;
+        let c2 = get_free_port().await;
+        let r3 = get_free_port().await;
+        let c3 = get_free_port().await;
+
+        let raft_addr1: SocketAddr = format!("127.0.0.1:{}", r1).parse().unwrap();
+        let client_addr1: SocketAddr = format!("127.0.0.1:{}", c1).parse().unwrap();
+        let raft_addr2: SocketAddr = format!("127.0.0.1:{}", r2).parse().unwrap();
+        let client_addr2: SocketAddr = format!("127.0.0.1:{}", c2).parse().unwrap();
+        let raft_addr3: SocketAddr = format!("127.0.0.1:{}", r3).parse().unwrap();
+        let client_addr3: SocketAddr = format!("127.0.0.1:{}", c3).parse().unwrap();
+
+        let peers1 = vec![(2, raft_addr2, client_addr2), (3, raft_addr3, client_addr3)];
+        let peers2 = vec![(1, raft_addr1, client_addr1), (3, raft_addr3, client_addr3)];
+        let peers3 = vec![(1, raft_addr1, client_addr1), (2, raft_addr2, client_addr2)];
+
+        let mut map = HashMap::new();
+        map.insert("team-a/".into(), "tok-a".into());
+        map.insert("team-b/".into(), "tok-b".into());
+        let acl = PrefixAcl::from_map(map).unwrap();
+
+        let config1 = ClusterConfig::new(1, &data_dir1, raft_addr1, client_addr1, peers1)
+            .with_acl(acl.clone());
+        let config2 = ClusterConfig::new(2, &data_dir2, raft_addr2, client_addr2, peers2)
+            .with_acl(acl.clone());
+        let config3 = ClusterConfig::new(3, &data_dir3, raft_addr3, client_addr3, peers3)
+            .with_acl(acl);
+
+        let handle1 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config1).run().await;
+        });
+        let handle2 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config2).run().await;
+        });
+        let handle3 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config3).run().await;
+        });
+
+        let mut leader_addr = None;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr1).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr1);
+                break;
+            }
+            if check_health(client_addr2).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr2);
+                break;
+            }
+            if check_health(client_addr3).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr3);
+                break;
+            }
+        }
+        let leader_addr = leader_addr.expect("no leader elected in ACL-protected cluster");
+
+        let put_a = encode_put_payload(b"team-a/k1", b"va");
+        let put_b = encode_put_payload(b"team-b/k1", b"vb");
+        let put_other = encode_put_payload(b"other/k1", b"vo");
+
+        // No token -> denied
+        let (status, _) = roundtrip(leader_addr, 1, &put_a).await.unwrap();
+        assert_ne!(status, 0, "put without token must be ACL-denied");
+
+        // tok-a can write team-a, not team-b
+        let framed = encode_client_auth_payload(&put_a, Some("tok-a"));
+        let (status, body) = roundtrip(leader_addr, 1, &framed).await.unwrap();
+        assert_eq!(
+            status,
+            0,
+            "tok-a put team-a should succeed: {:?}",
+            String::from_utf8_lossy(&body)
+        );
+
+        let framed = encode_client_auth_payload(&put_b, Some("tok-a"));
+        let (status, _) = roundtrip(leader_addr, 1, &framed).await.unwrap();
+        assert_ne!(status, 0, "tok-a put team-b must be denied");
+
+        // tok-b can write team-b
+        let framed = encode_client_auth_payload(&put_b, Some("tok-b"));
+        let (status, body) = roundtrip(leader_addr, 1, &framed).await.unwrap();
+        assert_eq!(
+            status,
+            0,
+            "tok-b put team-b should succeed: {:?}",
+            String::from_utf8_lossy(&body)
+        );
+
+        // No rule matches other/ -> denied for both tokens
+        let framed = encode_client_auth_payload(&put_other, Some("tok-a"));
+        let (status, _) = roundtrip(leader_addr, 1, &framed).await.unwrap();
+        assert_ne!(status, 0, "unmapped prefix must be denied");
+
+        // GET: tok-a can read its key; tok-b cannot
+        let get_a = encode_key_payload(b"team-a/k1");
+        let framed = encode_client_auth_payload(&get_a, Some("tok-a"));
+        let (status, body) = roundtrip(leader_addr, 2, &framed).await.unwrap();
+        assert_eq!(status, 0, "tok-a get team-a should succeed");
+        assert_eq!(decode_value_payload(&body).unwrap(), b"va".to_vec());
+
+        let framed = encode_client_auth_payload(&get_a, Some("tok-b"));
+        let (status, _) = roundtrip(leader_addr, 2, &framed).await.unwrap();
+        assert_ne!(status, 0, "tok-b get team-a must be denied");
+
+        // HEALTH stays open
+        let (status, _) = roundtrip(leader_addr, 5, &[]).await.unwrap();
+        assert_eq!(status, 0, "health stays open under ACL");
+
+        handle1.abort();
+        handle2.abort();
+        handle3.abort();
+        let _ = std::fs::remove_dir_all(&data_dir1);
+        let _ = std::fs::remove_dir_all(&data_dir2);
+        let _ = std::fs::remove_dir_all(&data_dir3);
+    }
+
     #[cfg(feature = "tls")]
     #[serial]
     #[tokio::test]
@@ -1614,7 +1747,10 @@ mod tests {
                 break;
             }
         }
-        assert!(ready, "single-node multi-raft leader not ready for cross-range txn");
+        assert!(
+            ready,
+            "single-node multi-raft leader not ready for cross-range txn"
+        );
 
         // BEGIN
         let (status, body) = roundtrip(client_addr, TXN_BEGIN_OPCODE, &[]).await.unwrap();
@@ -1622,16 +1758,14 @@ mod tests {
         let (txn_id, _) = decode_txn_begin_response(&body).unwrap();
 
         // Put key on left range (group 1)
-        let put_left =
-            encode_txn_op_payload(txn_id, TXN_OP_PUT, b"apple", Some(b"red"));
+        let put_left = encode_txn_op_payload(txn_id, TXN_OP_PUT, b"apple", Some(b"red"));
         let (status, _) = roundtrip(client_addr, TXN_OP_OPCODE, &put_left)
             .await
             .unwrap();
         assert_eq!(status, STATUS_OK, "TXN_OP put apple");
 
         // Put key on right range (group 2)
-        let put_right =
-            encode_txn_op_payload(txn_id, TXN_OP_PUT, b"mango", Some(b"yellow"));
+        let put_right = encode_txn_op_payload(txn_id, TXN_OP_PUT, b"mango", Some(b"yellow"));
         let (status, _) = roundtrip(client_addr, TXN_OP_OPCODE, &put_right)
             .await
             .unwrap();
@@ -1653,7 +1787,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            status, STATUS_OK,
+            status,
+            STATUS_OK,
             "TXN_COMMIT cross-range 2PC should succeed, body={}",
             String::from_utf8_lossy(&body)
         );

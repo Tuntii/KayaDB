@@ -205,6 +205,10 @@ fn run() -> Result<(), String> {
     let client_token =
         take_value(&mut args, "--client-token").or_else(|| env::var("KAYA_CLIENT_TOKEN").ok());
 
+    // --acl-file <path> / KAYA_ACL_FILE — JSON map prefix -> token (M24 per-prefix ACL).
+    let acl_file =
+        take_value(&mut args, "--acl-file").or_else(|| env::var("KAYA_ACL_FILE").ok());
+
     // --encryption-key-file <path> / KAYA_ENCRYPTION_KEY_FILE — 32 raw bytes AES-256 key.
     let encryption_key_file = take_value(&mut args, "--encryption-key-file")
         .or_else(|| env::var("KAYA_ENCRYPTION_KEY_FILE").ok());
@@ -236,14 +240,20 @@ fn run() -> Result<(), String> {
             config = config.with_client_token(tok);
         }
     }
+    if let Some(path) = acl_file {
+        let acl = kaya_server::acl::PrefixAcl::load_file(&path)
+            .map_err(|e| format!("--acl-file {path}: {e}"))?;
+        config = config.with_acl(acl);
+    }
     if let Some(path) = encryption_key_file {
         let key = kaya_io::load_key_file(&path)
             .map_err(|e| format!("--encryption-key-file {path}: {e}"))?;
         config = config.with_encryption_key(key);
     }
 
-    let audit_log = audit_log_flag
-        .unwrap_or_else(|| config.operator_token.is_some() || config.client_token.is_some());
+    let audit_log = audit_log_flag.unwrap_or_else(|| {
+        config.operator_token.is_some() || config.client_token.is_some() || config.acl.is_some()
+    });
     config = config.with_audit_log(audit_log);
     config = config.with_audit_syslog(audit_syslog);
 

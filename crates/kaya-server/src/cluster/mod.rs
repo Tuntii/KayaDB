@@ -91,6 +91,9 @@ pub struct ClusterConfig {
     /// Optional client token. If set, PUT/GET/DELETE/SCAN/STATS (opcodes 1-4, 6) require the
     /// presented credential (via CLIENT auth prefix) to match exactly. HEALTH (5) stays open.
     pub client_token: Option<String>,
+    /// Optional per-prefix ACL. When set, PUT/GET/DELETE/SCAN/TXN_* authorize the
+    /// presented client token via longest-prefix match. Empty ACL denies all data ops.
+    pub acl: Option<crate::acl::PrefixAcl>,
     /// TLS configuration. If Some, both Raft and client listeners (and outbound peer connections)
     /// will use TLS. See kaya_net::TlsConfig.
     pub tls: Option<kaya_net::TlsConfig>,
@@ -166,6 +169,7 @@ impl ClusterConfig {
             join_cluster: false,
             operator_token: None,
             client_token: None,
+            acl: None,
             tls: None,
             network_partitioned: None,
             audit_log: false,
@@ -222,6 +226,13 @@ impl ClusterConfig {
     /// Callers must present it using the CLIENT auth framing.
     pub fn with_client_token(mut self, token: String) -> Self {
         self.client_token = Some(token);
+        self
+    }
+
+    /// Install a per-prefix ACL (M24). When set, PUT/GET/DELETE/SCAN/TXN_* require
+    /// a CLIENT-framed token that matches the longest prefix rule for the key.
+    pub fn with_acl(mut self, acl: crate::acl::PrefixAcl) -> Self {
+        self.acl = Some(acl);
         self
     }
 
@@ -739,6 +750,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     let self_client = config.client_addr;
     let operator_token = config.operator_token.clone();
     let client_token = config.client_token.clone();
+    let acl = config.acl.clone();
     let drain = config.drain;
     if drain {
         eprintln!(
@@ -796,6 +808,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         self_client,
         operator_token,
         client_token,
+        acl,
         shared_audit,
         config.network_partitioned.clone(),
         config.max_client_connections,

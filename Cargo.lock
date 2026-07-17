@@ -987,6 +987,7 @@ dependencies = [
  "opentelemetry-stdout",
  "opentelemetry_sdk",
  "parking_lot",
+ "serde_json",
  "serial_test",
  "tokio",
 ]

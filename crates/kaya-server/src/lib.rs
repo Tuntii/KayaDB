@@ -1,3 +1,4 @@
+pub mod acl;
 pub mod apply_index;
 pub mod audit;
 pub mod client_auth;
