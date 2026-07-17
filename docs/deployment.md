@@ -2,6 +2,8 @@
 
 KayaDB **v0.1.46 (M15)** ships example deployment layouts under `deploy/` in the repository. These are **reference configurations** for local/staging — not a managed cloud product.
 
+**M22–M24 operators:** see **[Deployment guide v2](deployment-guide-v2.md)** for drain, dashboard, encryption, ACL, and range ops flags layered on these layouts.
+
 ---
 
 ## Docker Compose (3-node cluster)
@@ -81,6 +83,8 @@ Read [Security & deployment](security.md) — firewall client/Raft ports, config
 
 ## Related
 
+- [Deployment guide v2](deployment-guide-v2.md) — M22–M24 flags, ranges, staging profile
+- [SLO envelope](slo-envelope.md) — hard limits and design SLOs
 - [Getting started](getting-started.md) — manual 3-node cluster
 - [Runbooks](runbooks/rolling-restart.md) — day-2 operations
 - [Go client](clients/go-client.md) — application connectivity

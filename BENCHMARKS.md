@@ -88,13 +88,33 @@ Each report row should include:
 CI runs a smoke benchmark step (see `.github/workflows/ci.yml`) to ensure the
 bench crate and report helpers compile and execute.
 
-**Regression gate:** After the smoke bench, CI runs
+**Regression gate (M13 + M25 v2):** After the smoke bench, CI runs
 `cargo test -p kaya-bench --test perf_gate --release`.
-This executes the same `smoke_put_get` workload under release profile and asserts
-elapsed time stays under a documented budget (tight in release, loose in debug).
+This executes SimDisk smoke workloads under release profile and asserts elapsed
+time stays under documented budgets (tighter in release, looser in debug).
 It acts as the coarse performance regression gate for the "performance envelope".
 Severe regressions (order-of-magnitude) will fail the CI rust job. See
 `crates/kaya-bench/tests/perf_gate.rs` and `spec/docs/benchmarking-spec.md`.
+
+### Performance envelope v2 (M25)
+
+In addition to the original put/get smoke, the gate covers multi-key SI and
+multi-range 2PC participant paths (loose thresholds — CI variance tolerant):
+
+| Workload | Helper | Release budget | Debug budget | What it guards |
+|---|---|---|---|---|
+| Put + get (×10) | `run_smoke_put_get` | 500 µs | 10 ms | Engine hot path |
+| Multi-key SI txn (8 puts + commit + verify) | `run_smoke_txn_multi_key` | 5 ms | 50 ms | Intent tables + `txn_commit` / `apply_mutations` |
+| Multi-range 2PC (4 keys across split point `m`) | `run_smoke_multi_range_2pc` | 10 ms | 100 ms | `apply_txn_prepare` + `apply_txn_commit_2pc` |
+
+Notes:
+
+- Budgets are **not** SLAs. They catch catastrophic regressions only.
+- Full cross-group coordinator / Raft 2PC latency stays in server ITs
+  (`test_cross_range_txn_commit`, multi-range bank); the gate times the shared-engine
+  participant path that 2PC apply uses.
+- Nightly/manual: full criterion matrix (`cargo bench -p kaya-bench`) and hardware
+  profiling remain out of PR CI.
 
 ---
 

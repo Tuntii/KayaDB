@@ -26,6 +26,8 @@
   - [Raft & Jepsen testing](jepsen-design.md)
 
 - [Deployment](deployment.md)
+  - [Deployment guide v2 (M22–M24)](deployment-guide-v2.md)
+  - [SLO envelope](slo-envelope.md)
   - [Docker Compose](deploy/docker/README.md)
   - [Kubernetes](deploy/k8s/README.md)
 - [Runbooks](runbooks/rolling-restart.md)

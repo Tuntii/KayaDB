@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (M25 — Scale proof track, partial)
+- **Perf envelope v2:** `kaya-bench` smoke helpers `run_smoke_txn_multi_key` + `run_smoke_multi_range_2pc`; CI `perf_gate` loose budgets; `BENCHMARKS.md` + `spec/docs/benchmarking-spec.md` tables
+- **Deployment guide v2:** `docs/deployment-guide-v2.md` — M22–M24 flags (`--drain`, `--dashboard-addr`, `--encryption-key-file`, `--acl-file`), range ops, staging profile; linked from deployment/SLO/docs nav
+- SLO notes: multi-key / 2PC guidance in `docs/slo-envelope.md`; ROADMAP M25 marked in-progress for envelope + deploy guide
+
 ### Added (M24 — Production hardening path)
 - **Encryption-at-rest:** `EncryptedDisk` AES-256-GCM Disk wrapper (`KAYAENC1 | plain_len | nonce | ciphertext+tag`); server `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE` (32 raw bytes; v1 single key as KEK=DEK); contract + unit tests
 - **Per-prefix ACL:** `PrefixAcl` + `--acl-file` / `KAYA_ACL_FILE` (JSON `prefix → token`, UTF-8 or `0x`/`hex:`); longest-prefix authorize on PUT/GET/DELETE/SCAN/TXN_*; empty map denies all; IT `per_prefix_acl_two_tokens`
