@@ -1315,10 +1315,11 @@ async fn txn_commit_via_raft(
         }
     };
 
-    let mutations: Vec<(Vec<u8>, Option<Vec<u8>>)> = staged.into_iter().collect();
+    type Mutation = (Vec<u8>, Option<Vec<u8>>);
+    let mutations: Vec<Mutation> = staged.into_iter().collect();
 
     // Partition mutations by range → Raft group.
-    let mut by_group: std::collections::HashMap<GroupId, Vec<(Vec<u8>, Option<Vec<u8>>)>> =
+    let mut by_group: std::collections::HashMap<GroupId, Vec<Mutation>> =
         std::collections::HashMap::new();
     {
         let t = range_table.read().await;

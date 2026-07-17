@@ -150,12 +150,7 @@ impl StaticRangeTable {
 
     /// Look up the full descriptor for `key`.
     pub fn lookup_range(&self, key: &[u8]) -> Option<&StaticRange> {
-        for r in &self.ranges {
-            if r.contains(key) {
-                return Some(r);
-            }
-        }
-        None
+        self.ranges.iter().find(|r| r.contains(key))
     }
 
     /// Split the range that contains `split_key` into

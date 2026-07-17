@@ -23,13 +23,16 @@ use kaya_engine::{ScanOptions, Txn2pcState, TXN_REC_PREFIX};
 use kaya_io::Disk;
 use kaya_raft::{GroupId, RaftCommand};
 
+/// Put when `Some`, delete when `None`.
+type Mutation = (Vec<u8>, Option<Vec<u8>>);
+/// Mutations partitioned by Raft group for multi-range 2PC.
+type MutationsByGroup = HashMap<GroupId, Vec<Mutation>>;
+
 /// Group owning the lexicographically smallest key among all mutations.
 ///
 /// Used as `coordinator_group` in each `TxnPrepare` record for diagnostics /
 /// recovery hints.
-pub fn coordinator_group(
-    mutations_by_group: &HashMap<GroupId, Vec<(Vec<u8>, Option<Vec<u8>>)>>,
-) -> Option<GroupId> {
+pub fn coordinator_group(mutations_by_group: &MutationsByGroup) -> Option<GroupId> {
     let mut best: Option<(&[u8], GroupId)> = None;
     for (gid, muts) in mutations_by_group {
         for (k, _) in muts {
@@ -55,7 +58,7 @@ pub fn coordinator_group(
 /// on that group (or return an error).
 pub async fn commit_cross_group<F, Fut>(
     txn_id: u64,
-    mutations_by_group: HashMap<GroupId, Vec<(Vec<u8>, Option<Vec<u8>>)>>,
+    mutations_by_group: MutationsByGroup,
     propose: F,
 ) -> Result<(), String>
 where
@@ -196,7 +199,7 @@ mod tests {
 
     #[test]
     fn coordinator_picks_group_of_lex_smallest_key() {
-        let mut m: HashMap<GroupId, Vec<(Vec<u8>, Option<Vec<u8>>)>> = HashMap::new();
+        let mut m: MutationsByGroup = HashMap::new();
         m.insert(GroupId(2), vec![(b"m".to_vec(), Some(b"1".to_vec()))]);
         m.insert(GroupId(1), vec![(b"a".to_vec(), Some(b"1".to_vec()))]);
         assert_eq!(coordinator_group(&m), Some(GroupId(1)));
@@ -214,7 +217,7 @@ mod tests {
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let log2 = log.clone();
 
-        let mut m: HashMap<GroupId, Vec<(Vec<u8>, Option<Vec<u8>>)>> = HashMap::new();
+        let mut m: MutationsByGroup = HashMap::new();
         m.insert(GroupId(1), vec![(b"a".to_vec(), Some(b"1".to_vec()))]);
         m.insert(GroupId(2), vec![(b"m".to_vec(), Some(b"2".to_vec()))]);
 
@@ -306,7 +309,7 @@ mod tests {
         let call = Arc::new(Mutex::new(0u32));
         let call2 = call.clone();
 
-        let mut m: HashMap<GroupId, Vec<(Vec<u8>, Option<Vec<u8>>)>> = HashMap::new();
+        let mut m: MutationsByGroup = HashMap::new();
         // Deterministic iteration: use BTreeMap-like insert order is not guaranteed
         // for HashMap — fail the second prepare by counting prepare calls.
         m.insert(GroupId(1), vec![(b"a".to_vec(), Some(b"1".to_vec()))]);

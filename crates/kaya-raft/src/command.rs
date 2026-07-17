@@ -281,7 +281,10 @@ fn push_mutations(out: &mut Vec<u8>, mutations: &[(Vec<u8>, Option<Vec<u8>>)]) {
     }
 }
 
-fn next_mutations(cur: &mut &[u8], label: &str) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>, String> {
+/// One mutation in TxnCommit / TxnPrepare: put when `Some`, delete when `None`.
+type Mutation = (Vec<u8>, Option<Vec<u8>>);
+
+fn next_mutations(cur: &mut &[u8], label: &str) -> Result<Vec<Mutation>, String> {
     let count = next_u32(cur)? as usize;
     let mut mutations = Vec::with_capacity(count);
     for _ in 0..count {

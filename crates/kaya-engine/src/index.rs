@@ -26,21 +26,16 @@ const META_VERSION_V1: u8 = 1;
 const META_VERSION_V2: u8 = 2;
 
 /// How the secondary key is derived from a primary value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum IndexExtractor {
     /// Secondary key = full primary value (default / foundation).
+    #[default]
     WholeValue,
     /// First `len` bytes of the value (or the whole value if shorter).
     Prefix { len: u16 },
     /// Split value by `delimiter`, take 0-based field `index`.
     /// Missing field → no secondary (entry skipped / removed).
     Field { delimiter: u8, index: u16 },
-}
-
-impl Default for IndexExtractor {
-    fn default() -> Self {
-        Self::WholeValue
-    }
 }
 
 impl IndexExtractor {
