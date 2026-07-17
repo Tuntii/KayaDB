@@ -1,6 +1,7 @@
 #![allow(async_fn_in_trait)]
 
 mod contract;
+mod encrypted;
 mod file;
 mod path;
 mod sim;
@@ -12,6 +13,7 @@ pub use contract::{
     test_append_fsync_read, test_concurrent_appends, test_list_dir,
     test_write_truncate_rename_remove,
 };
+pub use encrypted::{load_key_file, EncryptedDisk, ENC_MAGIC};
 pub use file::FileDisk;
 #[cfg(all(target_os = "linux", feature = "io_uring"))]
 pub use io_uring::IoUringDisk;

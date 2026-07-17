@@ -1,10 +1,10 @@
-//! Shared Disk trait contract tests for FileDisk, SimDisk, and IoUringDisk.
+//! Shared Disk trait contract tests for FileDisk, SimDisk, IoUringDisk, and EncryptedDisk.
 
 use std::sync::Arc;
 
 use kaya_io::{
     test_append_fsync_read, test_concurrent_appends, test_list_dir,
-    test_write_truncate_rename_remove, Disk, FileDisk, SimDisk,
+    test_write_truncate_rename_remove, Disk, EncryptedDisk, FileDisk, SimDisk,
 };
 
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
@@ -51,4 +51,19 @@ fn io_uring_disk_is_linux_feature_gated() {
         // Structural gate: IoUringDisk is only built on linux + io_uring feature.
         assert!(std::any::type_name::<FileDisk>().contains("FileDisk"));
     }
+}
+
+#[test]
+fn encrypted_sim_disk_contract() {
+    let key = *b"contract-test-key-32-bytes-long!"; // 32
+    let disk = Arc::new(EncryptedDisk::new(SimDisk::new(), key));
+    block_on(run_contract_suite(disk));
+}
+
+#[test]
+fn encrypted_file_disk_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = *b"contract-test-key-32-bytes-long!"; // 32
+    let disk = Arc::new(EncryptedDisk::new(FileDisk::new(dir.path()), key));
+    block_on(run_contract_suite(disk));
 }

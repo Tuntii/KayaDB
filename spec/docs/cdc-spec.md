@@ -1,8 +1,8 @@
-# CDC / Changefeed Spec (M19 foundation)
+# CDC / Changefeed Spec (M19 + polish)
 
-**Status:** Draft v0.1  
-**Scope:** Engine-local change data capture for user put/delete  
-**Milestone:** M19 (foundation; not full production changefeed suite)
+**Status:** Draft v0.2  
+**Scope:** Change data capture for user put/delete (engine file sink + TCP subscribe)  
+**Milestone:** M19 (production path + polish)
 
 ---
 
@@ -13,17 +13,15 @@ consumers can:
 
 - replicate or project data to external systems
 - resume after restarts via durable per-consumer cursors
-- (later) drive incremental backup watermarks
+- drive incremental backup watermarks
 
-This foundation is **engine-local** and file-backed. It is **not** yet
-Raft-log based, has no TCP subscribe path, and does not prove leader-failover
-contracts under chaos.
+Events fire on the shared put/delete path — including **Raft apply** of
+`Put` / `Delete` / `TxnCommit` materialization. The durable sink is still
+engine-local JSONL; TCP opcodes expose poll/checkpoint on the leader.
 
 ---
 
 ## 2. Event model
-
-Each successful **user** `put` / `delete` (after WAL append) emits:
 
 | Field | Type | Notes |
 |---|---|---|
@@ -47,80 +45,108 @@ Each successful **user** `put` / `delete` (after WAL append) emits:
 ## 3. On-disk layout
 
 ```text
-{data_dir}/cdc/log.jsonl           # append-only event log
+{data_dir}/cdc/log.jsonl           # append-only event log (rewritten on compact)
 {data_dir}/cdc/cursors/{consumer}  # last delivered seq (decimal text)
+{data_dir}/cdc/backup_watermark    # optional; set by kayactl backup --cdc-consumer
 ```
 
-### 3.1 Log line format (JSONL, no nested objects)
+### 3.1 Log line format (JSONL)
 
 ```text
 {"v":1,"seq":7,"op":"put","key":"<hex>","value":"<hex>"}
 {"v":1,"seq":8,"op":"delete","key":"<hex>"}
 ```
 
-- `v` — log format version (`1`)
-- `key` / `value` — lowercase hex of raw bytes
-- One JSON object per line; blank lines ignored on load
-
 ### 3.2 Cursor file
 
-Plain decimal `u64` (optionally trailing newline). Meaning: highest `seq`
-already delivered to this consumer.
+Plain decimal `u64`. Meaning: highest `seq` already delivered to this consumer.
 
 ---
 
 ## 4. Engine API
 
 ```rust
-pub fn cdc_subscribe(&self, consumer_id: &str, from_seq: Option<u64>) -> Result<CdcCursor>
-pub fn cdc_poll(&mut self, cursor: &mut CdcCursor, limit: usize) -> Result<Vec<CdcEvent>>
-pub async fn cdc_checkpoint(&mut self, consumer_id: &str) -> Result<()>
+cdc_subscribe(consumer_id, from_seq: Option<u64>) -> CdcCursor
+cdc_poll(cursor, limit) -> Vec<CdcEvent>
+cdc_checkpoint(consumer_id)
+cdc_compact(retain_below: Option<u64>) -> removed_count
+cdc_consumer_seq(consumer_id) -> u64
+cdc_write_backup_watermark(seq) / cdc_read_backup_watermark()
 ```
 
 | Call | Behavior |
 |---|---|
-| `cdc_subscribe` | Build a cursor. `from_seq: Some(s)` starts after `s`. `None` uses last polled/checkpointed seq for that consumer (or `0`). |
-| `cdc_poll` | Return events with `seq > cursor.last_seq`, up to `limit`. Advances cursor + in-memory consumer position. |
-| `cdc_checkpoint` | Persist in-memory consumer position to `cdc/cursors/{id}`. |
+| `cdc_subscribe` | Build a cursor. `from_seq: Some(s)` starts after `s`. `None` uses checkpoint. |
+| `cdc_poll` | Events with `seq > cursor.last_seq`, up to `limit`. Advances cursor. |
+| `cdc_checkpoint` | Persist consumer position to `cdc/cursors/{id}`. |
+| `cdc_compact` | Drop events with `seq <= cutoff` (default: min consumer checkpoint); rewrite log. |
 
-Config: `EngineConfig.enable_cdc` (default `true`). When `false`, no log is
-written and API calls return invalid-argument.
-
----
-
-## 5. Backup interaction
-
-`kayactl backup --incremental` remains a **filesystem tree** copy of immutable
-files (SSTables, sealed WAL segments) plus changed mutable files.
-
-**Later:** incremental backup can treat a CDC consumer checkpoint as a watermark
-for logical incremental export. This foundation only implements
-`cdc_checkpoint(consumer_id)`; it does **not** re-base `backup --incremental`
-on CDC yet.
+Config: `EngineConfig.enable_cdc` (default `true`).
 
 ---
 
-## 6. Guarantees (foundation)
+## 5. Wire protocol (TCP)
+
+| Opcode | Name | Role |
+|---|---|---|
+| 13 | `CDC_POLL` | Leader-local poll (client-token path) |
+| 14 | `CDC_CHECKPOINT` | Persist consumer cursor |
+
+### 5.1 CDC_POLL request
+
+```text
+consumer_len(u16 LE) | consumer_utf8 | from_seq(u64 LE) | limit(u32 LE)
+```
+
+### 5.2 CDC_POLL response
+
+```text
+count(u32 LE) | repeated:
+  seq(u64 LE) | op(u8: 1=put, 2=delete)
+  | key_len(u32 LE) | key
+  | [value_len(u32 LE) | value  if put]
+```
+
+### 5.3 CDC_CHECKPOINT request
+
+```text
+consumer_len(u16 LE) | consumer_utf8
+```
+
+Clients: Rust `KayaClient::cdc_poll` / `cdc_checkpoint`; Go `CdcPoll` / `CdcCheckpoint`.
+
+---
+
+## 6. Backup interaction
+
+```text
+kayactl backup --data <src> --out <dest> [--incremental] [--cdc-consumer <id>]
+```
+
+After the filesystem tree copy, if `--cdc-consumer` is set, the tool reads that
+consumer's durable cursor from the source engine and writes
+`dest/cdc/backup_watermark` with that sequence. JSON output includes
+`cdc_watermark`.
+
+---
+
+## 7. Guarantees
 
 | Guarantee | Status |
 |---|---|
-| Events after successful user put/delete | Yes |
+| Events after successful user put/delete (incl. Raft apply) | Yes |
 | Resume via cursor without loss (at-least-once) | Yes |
 | Reopen engine continues from log file | Yes |
-| Per-key order by seq | Yes |
+| Crash/reopen: no loss of post-checkpoint events | Yes (sim failover gate) |
+| Log compaction below min consumer seq | Yes |
 | Exactly-once | No |
-| Raft-log source / multi-node | No |
-| TCP / Go subscribe API | No |
-| Chaos: no lost events across leader failover | No |
+| Multi-node shared CDC log | No (per-node apply + file) |
+| TCP + Go subscribe | Yes (opcodes 13/14) |
 
 ---
 
-## 7. Out of scope → later M19
+## 8. Limitations
 
-- Raft-log-based changefeed (true cluster CDC)
-- TCP + file multi-sink fanout
-- Rust + Go network subscribe API
-- `backup --incremental` driven by CDC checkpoints
-- Leader failover chaos / Jepsen gate
-- Compaction / truncation of old CDC log segments
-- Filtering (prefix / table) and projection
+- CDC log is per engine data dir (each Raft apply path writes locally).
+- Compaction cannot resurrect dropped prefixes.
+- Filtering / projection and multi-sink fanout remain future work.

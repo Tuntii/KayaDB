@@ -3,6 +3,15 @@
 //! Packing for use as `commit_ts`: `(physical_ms << 16) | logical`.
 //! Physical time is milliseconds; logical is a 16-bit counter that advances
 //! when the wall clock stalls or when receiving a remote timestamp.
+//!
+//! # Uncertainty interval (v1 / M23)
+//!
+//! There is **no** `max_offset_ms` wait or clamp on tick/update. The merge rule
+//! (`max(local, wall, remote)`) is trusted; operators should keep NTP skew well
+//! under the intended SI freshness window. A future Cockroach-style uncertainty
+//! interval (wait out max clock offset, or retry reads when `commit_ts` falls
+//! inside the uncertainty window) would clamp here and on the engine write
+//! path (`prepare_hlc_write_sequence`).
 
 /// Hybrid logical clock: physical milliseconds + logical counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]

@@ -5,14 +5,22 @@
 //! incremental backup only needs to copy files that are absent from the
 //! destination or whose size changed (the active WAL segment and manifest).
 //!
+//! With `--cdc-consumer <id>`, after the tree copy the command opens the source
+//! engine, reads that consumer's CDC checkpoint, and writes it to
+//! `dest/cdc/backup_watermark` so logical incremental export can resume from
+//! the same watermark.
+//!
 //! Consistency note: for a point-in-time-consistent snapshot, stop the node
 //! first (see `docs/runbooks/backup-restore.md`). A live backup is safe for the
 //! immutable SSTables but the WAL/manifest may be mid-write.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use kaya_core::{KayaError, Result};
+use kaya_core::{DurabilityConfig, DurabilityMode, EngineConfig, KayaError, Result};
+use kaya_engine::{Engine, CDC_BACKUP_WATERMARK};
+use kaya_io::FileDisk;
 
 use crate::cli::{remove_flag, remove_value_flag};
 
@@ -20,19 +28,21 @@ struct BackupReport {
     copied: usize,
     skipped: usize,
     bytes_copied: u64,
+    cdc_watermark: Option<u64>,
 }
 
-/// Entry point for `kayactl backup --data <src> --out <dest> [--incremental]`.
-pub fn run_backup(mut args: Vec<String>, data_dir: &str) -> Result<()> {
+/// Entry point for `kayactl backup --data <src> --out <dest> [--incremental] [--cdc-consumer <id>]`.
+pub fn run_backup(mut args: Vec<String>, data_dir: &str, durability: DurabilityMode) -> Result<()> {
     // Drop the "backup" verb.
     if args.first().map(String::as_str) == Some("backup") {
         args.remove(0);
     }
     let json = remove_flag(&mut args, "--json");
     let incremental = remove_flag(&mut args, "--incremental");
+    let cdc_consumer = remove_value_flag(&mut args, "--cdc-consumer");
     let out = remove_value_flag(&mut args, "--out").ok_or_else(|| {
         KayaError::invalid_argument(
-            "usage: kayactl backup --data <src> --out <dest> [--incremental]",
+            "usage: kayactl backup --data <src> --out <dest> [--incremental] [--cdc-consumer <id>]",
         )
     })?;
 
@@ -49,24 +59,57 @@ pub fn run_backup(mut args: Vec<String>, data_dir: &str) -> Result<()> {
         copied: 0,
         skipped: 0,
         bytes_copied: 0,
+        cdc_watermark: None,
     };
     copy_tree(src, dest, incremental, &mut report)?;
 
+    if let Some(consumer) = cdc_consumer {
+        let wm = crate::cli::block_on(async {
+            let config = EngineConfig {
+                data_dir: PathBuf::from(data_dir),
+                durability: DurabilityConfig {
+                    mode: durability,
+                    ..DurabilityConfig::default()
+                },
+                ..EngineConfig::default()
+            };
+            let disk = Arc::new(FileDisk::new(config.data_dir.clone()));
+            let engine = Engine::open(config, disk).await?;
+            let seq = engine.cdc_consumer_seq(&consumer)?;
+            Ok::<_, KayaError>(seq)
+        })?;
+        // Write watermark into the backup destination (filesystem, not live engine).
+        let cdc_dir = dest.join("cdc");
+        fs::create_dir_all(&cdc_dir)?;
+        let wm_path = dest.join(CDC_BACKUP_WATERMARK);
+        fs::write(&wm_path, format!("{wm}\n"))?;
+        report.cdc_watermark = Some(wm);
+    }
+
     if json {
+        let wm = report
+            .cdc_watermark
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "null".to_owned());
         println!(
-            r#"{{"copied":{},"skipped":{},"bytes_copied":{},"incremental":{},"out":"{}"}}"#,
+            r#"{{"copied":{},"skipped":{},"bytes_copied":{},"incremental":{},"cdc_watermark":{},"out":"{}"}}"#,
             report.copied,
             report.skipped,
             report.bytes_copied,
             incremental,
+            wm,
             out.replace('\\', "\\\\").replace('"', "\\\"")
         );
     } else {
         let mode = if incremental { "incremental" } else { "full" };
-        println!(
+        print!(
             "Backup ({mode}) complete: {} file(s) copied ({} bytes), {} unchanged file(s) skipped -> {out}",
             report.copied, report.bytes_copied, report.skipped
         );
+        if let Some(wm) = report.cdc_watermark {
+            print!("; cdc_watermark={wm}");
+        }
+        println!();
     }
     Ok(())
 }
@@ -146,6 +189,7 @@ mod tests {
                 "--json".into(),
             ],
             &data,
+            DurabilityMode::Strict,
         )
         .unwrap();
         assert_eq!(
@@ -160,6 +204,7 @@ mod tests {
             copied: 0,
             skipped: 0,
             bytes_copied: 0,
+            cdc_watermark: None,
         };
         copy_tree(&src, &dest, true, &mut report).unwrap();
         assert_eq!(report.copied, 1, "only the new SSTable is copied");
@@ -175,7 +220,7 @@ mod tests {
 
     #[test]
     fn missing_out_flag_is_an_error() {
-        let err = run_backup(vec!["backup".into()], ".").unwrap_err();
+        let err = run_backup(vec!["backup".into()], ".", DurabilityMode::Strict).unwrap_err();
         assert_eq!(err.exit_code(), 4); // InvalidArgument
     }
 }

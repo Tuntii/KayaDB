@@ -52,6 +52,32 @@ pub const TXN_OP_OPCODE: u8 = 10;
 pub const TXN_COMMIT_OPCODE: u8 = 11;
 /// TXN_ROLLBACK — discard staged intents.
 pub const TXN_ROLLBACK_OPCODE: u8 = 12;
+/// CDC_POLL — subscribe-or-resume + poll change events from the leader engine.
+pub const CDC_POLL_OPCODE: u8 = 13;
+/// CDC_CHECKPOINT — persist consumer cursor on the leader engine.
+pub const CDC_CHECKPOINT_OPCODE: u8 = 14;
+/// LIST_RANGES — return meta range table (M21).
+pub const LIST_RANGES_OPCODE: u8 = 15;
+/// SPLIT_RANGE — split a range at a key (M21 admin; leader of group 0).
+pub const SPLIT_RANGE_OPCODE: u8 = 16;
+/// MERGE_RANGE — merge a range with its right neighbor (M22 admin; leader of group 0).
+pub const MERGE_RANGE_OPCODE: u8 = 17;
+/// TRANSFER_LEADER — step down so leadership can move to a target voter (M22 admin).
+/// Requires operator token when configured (same as ADD/REMOVE_MEMBER).
+pub const TRANSFER_LEADER_OPCODE: u8 = 18;
+/// PROMOTE_LEARNER — flip `is_learner=false` for an existing member via ConfigChange (M22).
+/// Body: `node_id(u64 LE)`. Requires operator token when configured.
+pub const PROMOTE_LEARNER_OPCODE: u8 = 19;
+/// REBALANCE_PLAN — advisory range-count rebalance suggestions (M22 admin).
+/// Request body empty (operator token via ADMIN framing when configured).
+/// Response: `count(u32 LE) | repeated (range_id|from_node|to_node u64 LE each)`.
+/// **Advisory only** — does not migrate data or transfer leases.
+pub const REBALANCE_PLAN_OPCODE: u8 = 20;
+
+/// CDC event op: put.
+pub const CDC_EVENT_PUT: u8 = 1;
+/// CDC event op: delete.
+pub const CDC_EVENT_DELETE: u8 = 2;
 
 /// TXN_OP kind: point get under the txn snapshot (with RYW).
 pub const TXN_OP_GET: u8 = 1;
@@ -93,6 +119,18 @@ fn take_u8(cur: &mut &[u8]) -> Result<u8, String> {
     }
     let v = cur[0];
     *cur = &cur[1..];
+    Ok(v)
+}
+
+fn take_u16(cur: &mut &[u8]) -> Result<u16, String> {
+    if cur.len() < 2 {
+        return Err(format!(
+            "unexpected EOF reading u16 (have {} bytes)",
+            cur.len()
+        ));
+    }
+    let v = u16::from_le_bytes([cur[0], cur[1]]);
+    *cur = &cur[2..];
     Ok(v)
 }
 
@@ -398,14 +436,29 @@ pub fn decode_key_payload(data: &[u8]) -> Result<Vec<u8>, String> {
     take_bytes(&mut cur, key_len)
 }
 
-/// Encode ADD_MEMBER payload: `node_id(u64) | raft_len | raft | client_len | client`.
+/// Encode ADD_MEMBER payload: `node_id(u64) | raft_len | raft | client_len | client [| is_learner u8]`.
+///
+/// When `is_learner` is false the trailing flag is still written as `0` so new
+/// encoders are unambiguous; legacy decoders that ignore trailing bytes continue
+/// to work for the address fields.
 pub fn encode_member_payload(node_id: u64, raft_addr: &str, client_addr: &str) -> Vec<u8> {
+    encode_member_payload_with_learner(node_id, raft_addr, client_addr, false)
+}
+
+/// Encode ADD_MEMBER payload with an explicit learner flag.
+pub fn encode_member_payload_with_learner(
+    node_id: u64,
+    raft_addr: &str,
+    client_addr: &str,
+    is_learner: bool,
+) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&node_id.to_le_bytes());
     push_u32(&mut out, raft_addr.len() as u32);
     out.extend_from_slice(raft_addr.as_bytes());
     push_u32(&mut out, client_addr.len() as u32);
     out.extend_from_slice(client_addr.as_bytes());
+    out.push(if is_learner { 1u8 } else { 0u8 });
     out
 }
 
@@ -424,8 +477,10 @@ pub fn decode_remove_member_payload(data: &[u8]) -> Result<u64, String> {
     ]))
 }
 
-/// Decode ADD_MEMBER payload.
-pub fn decode_member_payload(data: &[u8]) -> Result<(u64, String, String), String> {
+/// Decode ADD_MEMBER payload → `(node_id, raft_addr, client_addr, is_learner)`.
+///
+/// Legacy payloads without the trailing learner flag decode as voters.
+pub fn decode_member_payload(data: &[u8]) -> Result<(u64, String, String, bool), String> {
     let mut cur = data;
     let node_id = take_u64(&mut cur)?;
     let raft_len = take_u32(&mut cur)? as usize;
@@ -434,7 +489,27 @@ pub fn decode_member_payload(data: &[u8]) -> Result<(u64, String, String), Strin
     let client_len = take_u32(&mut cur)? as usize;
     let client = String::from_utf8(take_bytes(&mut cur, client_len)?)
         .map_err(|e| format!("invalid client addr utf-8: {e}"))?;
-    Ok((node_id, raft, client))
+    let is_learner = if !cur.is_empty() {
+        take_u8(&mut cur)? != 0
+    } else {
+        false
+    };
+    Ok((node_id, raft, client, is_learner))
+}
+
+/// Encode PROMOTE_LEARNER payload: `node_id(u64 LE)`.
+pub fn encode_promote_learner_payload(node_id: u64) -> Vec<u8> {
+    node_id.to_le_bytes().to_vec()
+}
+
+/// Decode PROMOTE_LEARNER payload → `node_id`.
+pub fn decode_promote_learner_payload(data: &[u8]) -> Result<u64, String> {
+    if data.len() < 8 {
+        return Err("truncated PROMOTE_LEARNER payload".to_owned());
+    }
+    Ok(u64::from_le_bytes([
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+    ]))
 }
 
 // ── optional operator credential framing for admin payloads ──────────────────
@@ -666,6 +741,235 @@ pub fn encode_txn_commit_response(commit_ts: u64) -> Vec<u8> {
 pub fn decode_txn_commit_response(data: &[u8]) -> Result<u64, String> {
     let mut cur = data;
     take_u64(&mut cur)
+}
+
+/// Encode CDC_POLL request:
+/// `consumer_len(u16 LE) | consumer | from_seq(u64 LE) | limit(u32 LE)`.
+pub fn encode_cdc_poll_request(consumer_id: &str, from_seq: u64, limit: u32) -> Vec<u8> {
+    let id = consumer_id.as_bytes();
+    let mut out = Vec::with_capacity(2 + id.len() + 8 + 4);
+    out.extend_from_slice(&(id.len() as u16).to_le_bytes());
+    out.extend_from_slice(id);
+    out.extend_from_slice(&from_seq.to_le_bytes());
+    out.extend_from_slice(&limit.to_le_bytes());
+    out
+}
+
+/// Decode CDC_POLL request → `(consumer_id, from_seq, limit)`.
+pub fn decode_cdc_poll_request(data: &[u8]) -> Result<(String, u64, u32), String> {
+    let mut cur = data;
+    let id_len = take_u16(&mut cur)? as usize;
+    let id_bytes = take_bytes(&mut cur, id_len)?;
+    let consumer_id =
+        String::from_utf8(id_bytes).map_err(|_| "cdc consumer_id not utf-8".to_owned())?;
+    let from_seq = take_u64(&mut cur)?;
+    let limit = take_u32(&mut cur)?;
+    Ok((consumer_id, from_seq, limit))
+}
+
+/// One CDC event on the wire: `(seq, op, key, value)` — value is `Some` for put.
+pub type CdcEventWire = (u64, u8, Vec<u8>, Option<Vec<u8>>);
+
+/// Encode CDC_POLL OK response: `count(u32 LE)` then events
+/// `seq(u64) | op(u8) | key_len(u32) | key | [value_len(u32) | value if put]`.
+pub fn encode_cdc_poll_response(events: &[CdcEventWire]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(events.len() as u32).to_le_bytes());
+    for (seq, op, key, value) in events {
+        out.extend_from_slice(&seq.to_le_bytes());
+        out.push(*op);
+        out.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        out.extend_from_slice(key);
+        if *op == CDC_EVENT_PUT {
+            let v = value.as_deref().unwrap_or(&[]);
+            out.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            out.extend_from_slice(v);
+        }
+    }
+    out
+}
+
+/// Decode CDC_POLL OK response.
+pub fn decode_cdc_poll_response(data: &[u8]) -> Result<Vec<CdcEventWire>, String> {
+    let mut cur = data;
+    let count = take_u32(&mut cur)? as usize;
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let seq = take_u64(&mut cur)?;
+        let op = take_u8(&mut cur)?;
+        let key_len = take_u32(&mut cur)? as usize;
+        let key = take_bytes(&mut cur, key_len)?;
+        let value = if op == CDC_EVENT_PUT {
+            let value_len = take_u32(&mut cur)? as usize;
+            Some(take_bytes(&mut cur, value_len)?)
+        } else if op == CDC_EVENT_DELETE {
+            None
+        } else {
+            return Err(format!("unknown cdc event op {op}"));
+        };
+        out.push((seq, op, key, value));
+    }
+    Ok(out)
+}
+
+/// Encode CDC_CHECKPOINT request: `consumer_len(u16 LE) | consumer`.
+pub fn encode_cdc_checkpoint_request(consumer_id: &str) -> Vec<u8> {
+    let id = consumer_id.as_bytes();
+    let mut out = Vec::with_capacity(2 + id.len());
+    out.extend_from_slice(&(id.len() as u16).to_le_bytes());
+    out.extend_from_slice(id);
+    out
+}
+
+/// Decode CDC_CHECKPOINT request.
+pub fn decode_cdc_checkpoint_request(data: &[u8]) -> Result<String, String> {
+    let mut cur = data;
+    let id_len = take_u16(&mut cur)? as usize;
+    let id_bytes = take_bytes(&mut cur, id_len)?;
+    String::from_utf8(id_bytes).map_err(|_| "cdc consumer_id not utf-8".to_owned())
+}
+
+/// Wire form of one range descriptor for LIST_RANGES / RANGE_MOVED.
+/// `(range_id, epoch, group_id, start_key, end_key)`.
+pub type RangeDescWire = (u64, u64, u64, Vec<u8>, Vec<u8>);
+
+/// Encode LIST_RANGES response:
+/// `meta_epoch(u64 LE) | count(u32 LE) | repeated
+///  range_id(u64) | epoch(u64) | group_id(u64)
+///  | start_len(u32) | start | end_len(u32) | end`.
+pub fn encode_list_ranges_response(meta_epoch: u64, ranges: &[RangeDescWire]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&meta_epoch.to_le_bytes());
+    out.extend_from_slice(&(ranges.len() as u32).to_le_bytes());
+    for (range_id, epoch, group_id, start, end) in ranges {
+        out.extend_from_slice(&range_id.to_le_bytes());
+        out.extend_from_slice(&epoch.to_le_bytes());
+        out.extend_from_slice(&group_id.to_le_bytes());
+        out.extend_from_slice(&(start.len() as u32).to_le_bytes());
+        out.extend_from_slice(start);
+        out.extend_from_slice(&(end.len() as u32).to_le_bytes());
+        out.extend_from_slice(end);
+    }
+    out
+}
+
+/// Decode LIST_RANGES response → `(meta_epoch, ranges)`.
+pub fn decode_list_ranges_response(data: &[u8]) -> Result<(u64, Vec<RangeDescWire>), String> {
+    let mut cur = data;
+    let meta_epoch = take_u64(&mut cur)?;
+    let count = take_u32(&mut cur)? as usize;
+    let mut ranges = Vec::with_capacity(count);
+    for _ in 0..count {
+        let range_id = take_u64(&mut cur)?;
+        let epoch = take_u64(&mut cur)?;
+        let group_id = take_u64(&mut cur)?;
+        let start_len = take_u32(&mut cur)? as usize;
+        let start = take_bytes(&mut cur, start_len)?;
+        let end_len = take_u32(&mut cur)? as usize;
+        let end = take_bytes(&mut cur, end_len)?;
+        ranges.push((range_id, epoch, group_id, start, end));
+    }
+    Ok((meta_epoch, ranges))
+}
+
+/// Encode SPLIT_RANGE request: `split_key_len(u32 LE) | split_key`.
+pub fn encode_split_range_request(split_key: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + split_key.len());
+    out.extend_from_slice(&(split_key.len() as u32).to_le_bytes());
+    out.extend_from_slice(split_key);
+    out
+}
+
+/// Decode SPLIT_RANGE request.
+pub fn decode_split_range_request(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut cur = data;
+    let len = take_u32(&mut cur)? as usize;
+    take_bytes(&mut cur, len)
+}
+
+/// Encode MERGE_RANGE request: `left_start_len(u32 LE) | left_start`.
+/// Empty `left_start` is valid (whole-keyspace left half after first split).
+pub fn encode_merge_range_request(left_start: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + left_start.len());
+    out.extend_from_slice(&(left_start.len() as u32).to_le_bytes());
+    out.extend_from_slice(left_start);
+    out
+}
+
+/// Decode MERGE_RANGE request → left range start key.
+pub fn decode_merge_range_request(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut cur = data;
+    let len = take_u32(&mut cur)? as usize;
+    take_bytes(&mut cur, len)
+}
+
+/// Encode REBALANCE_PLAN response: `count(u32 LE) | repeated moves`.
+/// Each move: `range_id(u64 LE) | from_node(u64 LE) | to_node(u64 LE)`.
+pub fn encode_rebalance_plan_response(moves: &[(u64, u64, u64)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + moves.len() * 24);
+    push_u32(&mut out, moves.len() as u32);
+    for &(range_id, from_node, to_node) in moves {
+        push_u64(&mut out, range_id);
+        push_u64(&mut out, from_node);
+        push_u64(&mut out, to_node);
+    }
+    out
+}
+
+/// Decode REBALANCE_PLAN response → list of `(range_id, from_node, to_node)`.
+pub fn decode_rebalance_plan_response(data: &[u8]) -> Result<Vec<(u64, u64, u64)>, String> {
+    let mut cur = data;
+    let count = take_u32(&mut cur)? as usize;
+    let mut moves = Vec::with_capacity(count);
+    for _ in 0..count {
+        let range_id = take_u64(&mut cur)?;
+        let from_node = take_u64(&mut cur)?;
+        let to_node = take_u64(&mut cur)?;
+        moves.push((range_id, from_node, to_node));
+    }
+    if !cur.is_empty() {
+        return Err(format!(
+            "trailing {} bytes after REBALANCE_PLAN response",
+            cur.len()
+        ));
+    }
+    Ok(moves)
+}
+
+/// Encode TRANSFER_LEADER request: `group_id(u64 LE) | target_node_id(u64 LE)`.
+pub fn encode_transfer_leader_request(group_id: u64, target_node_id: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16);
+    out.extend_from_slice(&group_id.to_le_bytes());
+    out.extend_from_slice(&target_node_id.to_le_bytes());
+    out
+}
+
+/// Decode TRANSFER_LEADER request → `(group_id, target_node_id)`.
+pub fn decode_transfer_leader_request(data: &[u8]) -> Result<(u64, u64), String> {
+    if data.len() < 16 {
+        return Err("truncated TRANSFER_LEADER payload".to_owned());
+    }
+    let mut cur = data;
+    let group_id = take_u64(&mut cur)?;
+    let target_node_id = take_u64(&mut cur)?;
+    Ok((group_id, target_node_id))
+}
+
+/// Encode RANGE_MOVED body: single updated descriptor covering the key
+/// (`range_id, epoch, group_id, start, end`) using the list-ranges item layout
+/// with `meta_epoch` prefix and count=1.
+pub fn encode_range_moved_payload(
+    meta_epoch: u64,
+    range_id: u64,
+    epoch: u64,
+    group_id: u64,
+    start: &[u8],
+    end: &[u8],
+) -> Vec<u8> {
+    encode_list_ranges_response(
+        meta_epoch,
+        &[(range_id, epoch, group_id, start.to_vec(), end.to_vec())],
+    )
 }
 
 /// Encode an error string as a response payload: `msg_len(u32) | msg_bytes`.
@@ -1325,5 +1629,80 @@ mod tests {
     fn decode_txn_commit_response_truncated() {
         assert!(decode_txn_commit_response(&[]).is_err());
         assert!(decode_txn_commit_response(&[1u8; 3]).is_err());
+    }
+
+    #[test]
+    fn round_trip_merge_range_request() {
+        let empty = encode_merge_range_request(b"");
+        assert_eq!(decode_merge_range_request(&empty).unwrap(), b"");
+        let key = encode_merge_range_request(b"m");
+        assert_eq!(decode_merge_range_request(&key).unwrap(), b"m");
+        assert_eq!(MERGE_RANGE_OPCODE, 17);
+        assert_eq!(SPLIT_RANGE_OPCODE, 16);
+    }
+
+    #[test]
+    fn transfer_leader_request_roundtrips() {
+        let payload = encode_transfer_leader_request(3, 7);
+        assert_eq!(decode_transfer_leader_request(&payload).unwrap(), (3, 7));
+        assert_eq!(TRANSFER_LEADER_OPCODE, 18);
+        assert!(decode_transfer_leader_request(&[]).is_err());
+        assert!(decode_transfer_leader_request(&[0u8; 15]).is_err());
+    }
+
+    #[test]
+    fn member_payload_roundtrip_with_learner_flag() {
+        let voter = encode_member_payload(1, "127.0.0.1:1", "127.0.0.1:2");
+        let (id, raft, client, is_learner) = decode_member_payload(&voter).unwrap();
+        assert_eq!(
+            (id, raft.as_str(), client.as_str(), is_learner),
+            (1, "127.0.0.1:1", "127.0.0.1:2", false)
+        );
+
+        let learner = encode_member_payload_with_learner(9, "r", "c", true);
+        let decoded = decode_member_payload(&learner).unwrap();
+        assert_eq!(decoded, (9, "r".into(), "c".into(), true));
+
+        // Legacy wire without trailing flag → voter.
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&7u64.to_le_bytes());
+        push_u32(&mut legacy, 1);
+        legacy.push(b'r');
+        push_u32(&mut legacy, 1);
+        legacy.push(b'c');
+        let (id, _, _, is_learner) = decode_member_payload(&legacy).unwrap();
+        assert_eq!(id, 7);
+        assert!(!is_learner);
+    }
+
+    #[test]
+    fn promote_learner_payload_roundtrips() {
+        let payload = encode_promote_learner_payload(42);
+        assert_eq!(decode_promote_learner_payload(&payload).unwrap(), 42);
+        assert_eq!(PROMOTE_LEARNER_OPCODE, 19);
+        assert!(decode_promote_learner_payload(&[]).is_err());
+    }
+
+    #[test]
+    fn rebalance_plan_response_roundtrips() {
+        assert_eq!(REBALANCE_PLAN_OPCODE, 20);
+        let empty = encode_rebalance_plan_response(&[]);
+        assert!(decode_rebalance_plan_response(&empty).unwrap().is_empty());
+        let body = encode_rebalance_plan_response(&[(10, 1, 2), (11, 1, 3)]);
+        let decoded = decode_rebalance_plan_response(&body).unwrap();
+        assert_eq!(decoded, vec![(10, 1, 2), (11, 1, 3)]);
+        assert!(decode_rebalance_plan_response(&[1, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn merge_response_uses_list_ranges_layout() {
+        let body = encode_list_ranges_response(3, &[(1, 3, 0, vec![], vec![])]);
+        let (meta, ranges) = decode_list_ranges_response(&body).unwrap();
+        assert_eq!(meta, 3);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].0, 1);
+        assert_eq!(ranges[0].2, 0);
+        assert!(ranges[0].3.is_empty());
+        assert!(ranges[0].4.is_empty());
     }
 }

@@ -126,6 +126,19 @@ fn run() -> Result<(), String> {
         args.retain(|a| a != "--no-metrics");
     }
 
+    // --drain / KAYA_DRAIN=1: decommission drain mode (status JSON reports "drain": true).
+    let drain_flag = args.iter().any(|a| a == "--drain");
+    if drain_flag {
+        args.retain(|a| a != "--drain");
+    }
+    let drain_env = env::var("KAYA_DRAIN")
+        .map(|v| {
+            let t = v.trim();
+            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false);
+    let drain = drain_flag || drain_env;
+
     let metrics_addr: Option<SocketAddr> = if no_metrics {
         None
     } else {
@@ -136,6 +149,11 @@ fn run() -> Result<(), String> {
                 .map_err(|e| format!("--metrics-addr: {e}"))?,
         )
     };
+
+    // Optional read-only JSON dashboard (M22). Example: --dashboard-addr 127.0.0.1:7380
+    let dashboard_addr: Option<SocketAddr> = take_value(&mut args, "--dashboard-addr")
+        .map(|s| s.parse().map_err(|e| format!("--dashboard-addr: {e}")))
+        .transpose()?;
 
     // --audit-syslog <host:port> / KAYA_AUDIT_SYSLOG — forward audit records to
     // a remote SIEM collector over UDP (RFC 5424). Requires --audit-log.
@@ -150,6 +168,9 @@ fn run() -> Result<(), String> {
     validate_bind_addr(raft_addr, allow_public_bind)?;
     validate_bind_addr(client_addr, allow_public_bind)?;
     if let Some(addr) = metrics_addr {
+        validate_bind_addr(addr, allow_public_bind)?;
+    }
+    if let Some(addr) = dashboard_addr {
         validate_bind_addr(addr, allow_public_bind)?;
     }
     eprintln!("{}", security_banner(allow_public_bind));
@@ -184,6 +205,13 @@ fn run() -> Result<(), String> {
     let client_token =
         take_value(&mut args, "--client-token").or_else(|| env::var("KAYA_CLIENT_TOKEN").ok());
 
+    // --acl-file <path> / KAYA_ACL_FILE — JSON map prefix -> token (M24 per-prefix ACL).
+    let acl_file = take_value(&mut args, "--acl-file").or_else(|| env::var("KAYA_ACL_FILE").ok());
+
+    // --encryption-key-file <path> / KAYA_ENCRYPTION_KEY_FILE — 32 raw bytes AES-256 key.
+    let encryption_key_file = take_value(&mut args, "--encryption-key-file")
+        .or_else(|| env::var("KAYA_ENCRYPTION_KEY_FILE").ok());
+
     let tls_cert = take_value(&mut args, "--tls-cert").or_else(|| env::var("KAYA_TLS_CERT").ok());
     let tls_key = take_value(&mut args, "--tls-key").or_else(|| env::var("KAYA_TLS_KEY").ok());
     let tls_ca = take_value(&mut args, "--tls-ca").or_else(|| env::var("KAYA_TLS_CA").ok());
@@ -211,9 +239,20 @@ fn run() -> Result<(), String> {
             config = config.with_client_token(tok);
         }
     }
+    if let Some(path) = acl_file {
+        let acl = kaya_server::acl::PrefixAcl::load_file(&path)
+            .map_err(|e| format!("--acl-file {path}: {e}"))?;
+        config = config.with_acl(acl);
+    }
+    if let Some(path) = encryption_key_file {
+        let key = kaya_io::load_key_file(&path)
+            .map_err(|e| format!("--encryption-key-file {path}: {e}"))?;
+        config = config.with_encryption_key(key);
+    }
 
-    let audit_log = audit_log_flag
-        .unwrap_or_else(|| config.operator_token.is_some() || config.client_token.is_some());
+    let audit_log = audit_log_flag.unwrap_or_else(|| {
+        config.operator_token.is_some() || config.client_token.is_some() || config.acl.is_some()
+    });
     config = config.with_audit_log(audit_log);
     config = config.with_audit_syslog(audit_syslog);
 
@@ -221,6 +260,9 @@ fn run() -> Result<(), String> {
         Some(addr) => config.with_metrics_addr(addr),
         None => config.without_metrics(),
     };
+    if let Some(addr) = dashboard_addr {
+        config = config.with_dashboard_addr(addr);
+    }
 
     if enable_tls {
         if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
@@ -235,6 +277,9 @@ fn run() -> Result<(), String> {
     }
     if join_cluster {
         config = config.with_join_cluster();
+    }
+    if drain {
+        config = config.with_drain();
     }
     if let Some(max) = max_client_connections {
         config = config.with_max_client_connections(max);

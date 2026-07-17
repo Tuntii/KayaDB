@@ -12,11 +12,15 @@
 //!    connections: GET/SCAN/PUT/DELETE route via the static range table to the
 //!    owning Raft group; writes are acknowledged once committed on that group.
 
+mod balancer;
 mod client_ops;
 mod election;
 mod replication;
 mod snapshot;
 mod stats;
+mod txn_coord;
+
+pub use balancer::{plan_range_count, RangeMove, RebalancePlan};
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -28,9 +32,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
-use kaya_core::{DurabilityConfig, DurabilityMode, EngineConfig};
+use kaya_core::{DurabilityConfig, DurabilityMode, EngineConfig, Result as KayaResult};
 use kaya_engine::Engine;
-use kaya_io::FileDisk;
+use kaya_io::{DirEntry, Disk, EncryptedDisk, FileDisk, RelativePath};
 use kaya_net::{start_raft_listener, NodeRoster};
 use kaya_raft::{
     multi_raft_group_dir, GroupId, LogIndex, MultiRaftHost, NodeId, RaftConfig, RaftNode,
@@ -79,13 +83,17 @@ pub struct ClusterConfig {
     pub heartbeat_interval_ticks: u64,
     /// When true, this node is joining an existing cluster via seed peers only.
     pub join_cluster: bool,
-    /// Optional operator token. If set, ADD/REMOVE_MEMBER (opcodes 7/8) require the
-    /// presented credential (via ADMIN auth prefix) to match exactly. If None, any
-    /// caller may perform membership changes (backward compat for dev).
+    /// Optional operator token. If set, ADD/REMOVE_MEMBER (opcodes 7/8),
+    /// TRANSFER_LEADER (18), PROMOTE_LEARNER (19), and REBALANCE_PLAN (20) require the
+    /// presented credential to match exactly. If None, any caller may perform those
+    /// admin ops (dev default).
     pub operator_token: Option<String>,
     /// Optional client token. If set, PUT/GET/DELETE/SCAN/STATS (opcodes 1-4, 6) require the
     /// presented credential (via CLIENT auth prefix) to match exactly. HEALTH (5) stays open.
     pub client_token: Option<String>,
+    /// Optional per-prefix ACL. When set, PUT/GET/DELETE/SCAN/TXN_* authorize the
+    /// presented client token via longest-prefix match. Empty ACL denies all data ops.
+    pub acl: Option<crate::acl::PrefixAcl>,
     /// TLS configuration. If Some, both Raft and client listeners (and outbound peer connections)
     /// will use TLS. See kaya_net::TlsConfig.
     pub tls: Option<kaya_net::TlsConfig>,
@@ -98,6 +106,9 @@ pub struct ClusterConfig {
     pub audit_syslog: Option<SocketAddr>,
     /// When `Some`, expose Prometheus metrics at this listen address (`GET /metrics`).
     pub metrics_addr: Option<SocketAddr>,
+    /// When `Some`, expose the read-only JSON dashboard (`GET /health`,
+    /// `/v1/ranges`, `/v1/raft`) at this listen address.
+    pub dashboard_addr: Option<SocketAddr>,
     /// Maximum concurrent client connections. Further connections are not
     /// accepted until an active one closes (TCP backlog backpressure).
     pub max_client_connections: usize,
@@ -115,6 +126,15 @@ pub struct ClusterConfig {
     pub use_hlc: bool,
     /// Static key-range -> Raft group routing. Default is single group 0 (whole keyspace).
     pub range_table: StaticRangeTable,
+    /// When true, this node is draining for decommission: status JSON reports
+    /// `"drain": true`. Existing leadership still works until the operator
+    /// transfers it away; operators must transfer leaders before removal
+    /// (see `docs/runbooks/decommission-node.md`). New range hosting via
+    /// SPLIT_RANGE is rejected on a draining node.
+    pub drain: bool,
+    /// Optional AES-256-GCM encryption-at-rest key (32 bytes). When set, the
+    /// engine opens over [`EncryptedDisk`] wrapping [`FileDisk`].
+    pub encryption_key: Option<[u8; 32]>,
 }
 
 impl ClusterConfig {
@@ -149,11 +169,13 @@ impl ClusterConfig {
             join_cluster: false,
             operator_token: None,
             client_token: None,
+            acl: None,
             tls: None,
             network_partitioned: None,
             audit_log: false,
             audit_syslog: None,
             metrics_addr: None,
+            dashboard_addr: None,
             max_client_connections: DEFAULT_MAX_CLIENT_CONNECTIONS,
             #[cfg(feature = "ebpf")]
             ebpf_enabled: false,
@@ -163,7 +185,16 @@ impl ClusterConfig {
             otel_enabled: false,
             use_hlc: false,
             range_table: StaticRangeTable::single_group(GroupId::ZERO),
+            drain: false,
+            encryption_key: None,
         }
+    }
+
+    /// Enable AES-256-GCM encryption-at-rest for engine files (WAL/SST/manifest
+    /// via the Disk layer). Key must be exactly 32 bytes.
+    pub fn with_encryption_key(mut self, key: [u8; 32]) -> Self {
+        self.encryption_key = Some(key);
+        self
     }
 
     /// Drop inbound client/raft TCP when the flag is true (in-process partition nemesis).
@@ -184,8 +215,8 @@ impl ClusterConfig {
         self
     }
 
-    /// Require the given operator token for ADD_MEMBER / REMOVE_MEMBER operations.
-    /// Callers must present it using the ADMIN auth framing.
+    /// Require the given operator token for ADD/REMOVE_MEMBER, TRANSFER_LEADER,
+    /// PROMOTE_LEARNER, REBALANCE_PLAN. Callers must present it using the ADMIN auth framing.
     pub fn with_operator_token(mut self, token: String) -> Self {
         self.operator_token = Some(token);
         self
@@ -195,6 +226,13 @@ impl ClusterConfig {
     /// Callers must present it using the CLIENT auth framing.
     pub fn with_client_token(mut self, token: String) -> Self {
         self.client_token = Some(token);
+        self
+    }
+
+    /// Install a per-prefix ACL (M24). When set, PUT/GET/DELETE/SCAN/TXN_* require
+    /// a CLIENT-framed token that matches the longest prefix rule for the key.
+    pub fn with_acl(mut self, acl: crate::acl::PrefixAcl) -> Self {
+        self.acl = Some(acl);
         self
     }
 
@@ -228,6 +266,18 @@ impl ClusterConfig {
         self
     }
 
+    /// Enable the read-only JSON dashboard HTTP listener on `addr`.
+    pub fn with_dashboard_addr(mut self, addr: SocketAddr) -> Self {
+        self.dashboard_addr = Some(addr);
+        self
+    }
+
+    /// Disable the read-only JSON dashboard HTTP listener.
+    pub fn without_dashboard(mut self) -> Self {
+        self.dashboard_addr = None;
+        self
+    }
+
     /// Enable in-process eBPF observability with a deterministic trace seed.
     #[cfg(feature = "ebpf")]
     pub fn with_ebpf(mut self, seed: u64) -> Self {
@@ -252,6 +302,12 @@ impl ClusterConfig {
     /// Configure static key-range -> Raft group routing (multi-raft production path).
     pub fn with_static_ranges(mut self, ranges: Vec<StaticRange>) -> Self {
         self.range_table = StaticRangeTable::from_ranges(ranges);
+        self
+    }
+
+    /// Mark this node as draining for decommission (status reports `"drain": true`).
+    pub fn with_drain(mut self) -> Self {
+        self.drain = true;
         self
     }
 }
@@ -279,7 +335,85 @@ impl ClusterNode {
 /// Always a MultiRaftHost (at least group 0).
 pub(crate) type SharedRaftHost = Arc<Mutex<MultiRaftHost>>;
 pub(crate) type SharedPersisters = Arc<Mutex<HashMap<u64, RaftPersister>>>;
-pub(crate) type SharedEngine = Arc<tokio::sync::Mutex<Engine<FileDisk>>>;
+/// Engine disk backend: plain [`FileDisk`] or AES-GCM [`EncryptedDisk`].
+pub(crate) enum EngineDisk {
+    Plain(FileDisk),
+    Encrypted(EncryptedDisk<FileDisk>),
+}
+
+impl Disk for EngineDisk {
+    async fn read_at(&self, path: &RelativePath, offset: u64, buf: &mut [u8]) -> KayaResult<usize> {
+        match self {
+            Self::Plain(d) => d.read_at(path, offset, buf).await,
+            Self::Encrypted(d) => d.read_at(path, offset, buf).await,
+        }
+    }
+
+    async fn write_at(&self, path: &RelativePath, offset: u64, buf: &[u8]) -> KayaResult<usize> {
+        match self {
+            Self::Plain(d) => d.write_at(path, offset, buf).await,
+            Self::Encrypted(d) => d.write_at(path, offset, buf).await,
+        }
+    }
+
+    async fn append(&self, path: &RelativePath, buf: &[u8]) -> KayaResult<u64> {
+        match self {
+            Self::Plain(d) => d.append(path, buf).await,
+            Self::Encrypted(d) => d.append(path, buf).await,
+        }
+    }
+
+    async fn fsync_file(&self, path: &RelativePath) -> KayaResult<()> {
+        match self {
+            Self::Plain(d) => d.fsync_file(path).await,
+            Self::Encrypted(d) => d.fsync_file(path).await,
+        }
+    }
+
+    async fn fsync_dir(&self, path: &RelativePath) -> KayaResult<()> {
+        match self {
+            Self::Plain(d) => d.fsync_dir(path).await,
+            Self::Encrypted(d) => d.fsync_dir(path).await,
+        }
+    }
+
+    async fn truncate(&self, path: &RelativePath, len: u64) -> KayaResult<()> {
+        match self {
+            Self::Plain(d) => d.truncate(path, len).await,
+            Self::Encrypted(d) => d.truncate(path, len).await,
+        }
+    }
+
+    async fn rename(&self, from: &RelativePath, to: &RelativePath) -> KayaResult<()> {
+        match self {
+            Self::Plain(d) => d.rename(from, to).await,
+            Self::Encrypted(d) => d.rename(from, to).await,
+        }
+    }
+
+    async fn remove_file(&self, path: &RelativePath) -> KayaResult<()> {
+        match self {
+            Self::Plain(d) => d.remove_file(path).await,
+            Self::Encrypted(d) => d.remove_file(path).await,
+        }
+    }
+
+    async fn list_dir(&self, path: &RelativePath) -> KayaResult<Vec<DirEntry>> {
+        match self {
+            Self::Plain(d) => d.list_dir(path).await,
+            Self::Encrypted(d) => d.list_dir(path).await,
+        }
+    }
+
+    async fn file_len(&self, path: &RelativePath) -> KayaResult<u64> {
+        match self {
+            Self::Plain(d) => d.file_len(path).await,
+            Self::Encrypted(d) => d.file_len(path).await,
+        }
+    }
+}
+
+pub(crate) type SharedEngine = Arc<tokio::sync::Mutex<Engine<EngineDisk>>>;
 // (group_id, LogIndex) → oneshot channel for the client waiting on that proposal.
 pub(crate) type PendingKey = (u64, LogIndex);
 pub(crate) type PendingMap = HashMap<PendingKey, tokio::sync::oneshot::Sender<Result<(), String>>>;
@@ -337,10 +471,26 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         crate::otel_spans::install_default_durability_spans();
     }
 
-    let disk = Arc::new(FileDisk::new(engine_cfg.data_dir.clone()));
-    let engine = Engine::open(engine_cfg, disk)
+    let file_disk = FileDisk::new(engine_cfg.data_dir.clone());
+    let disk = Arc::new(match config.encryption_key {
+        Some(key) => EngineDisk::Encrypted(EncryptedDisk::new(file_disk, key)),
+        None => EngineDisk::Plain(file_disk),
+    });
+    let mut engine = Engine::open(engine_cfg, disk)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
+    // 2PC crash recovery: abort Preparing/Prepared; finish Committing.
+    match txn_coord::recover_incomplete_2pc(&mut engine).await {
+        Ok((0, 0)) => {}
+        Ok((aborted, finished)) => eprintln!(
+            "[node {}] 2PC recovery: aborted {aborted} in-doubt record(s), finished {finished} Committing",
+            config.node_id.0
+        ),
+        Err(e) => eprintln!(
+            "[node {}] warning: 2PC recovery scan failed: {e}",
+            config.node_id.0
+        ),
+    }
     let shared_engine: SharedEngine = Arc::new(tokio::sync::Mutex::new(engine));
 
     // ── multi-raft host (always ≥ group 0) ────────────────────────────────────
@@ -412,7 +562,18 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     let shared_raft: SharedRaftHost = Arc::new(Mutex::new(host));
     let shared_persisters: SharedPersisters = Arc::new(Mutex::new(persister_map));
     let apply_indexes: SharedApplyIndexes = Arc::new(Mutex::new(apply_map));
-    let shared_range_table = Arc::new(config.range_table.clone());
+    let shared_range_table: client_ops::SharedRangeTable =
+        Arc::new(tokio::sync::RwLock::new(config.range_table.clone()));
+    let split_rt = client_ops::SplitRuntime {
+        raft: shared_raft.clone(),
+        persisters: shared_persisters.clone(),
+        apply_indexes: apply_indexes.clone(),
+        data_dir: config.data_dir.clone(),
+        node_id: config.node_id,
+        peers: peers.clone(),
+        election_timeout_ticks: config.election_timeout_ticks,
+        heartbeat_interval_ticks: config.heartbeat_interval_ticks,
+    };
 
     let mut roster = config.roster.clone();
     load_persisted_roster(&config.data_dir, &mut roster);
@@ -552,6 +713,19 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         None
     };
 
+    // Read-only dashboard: spawned so it does not explode the select! matrix.
+    // Dropped when the process shuts down via the runtime.
+    if let Some(dashboard_addr) = config.dashboard_addr {
+        let raft = shared_raft.clone();
+        let ranges = shared_range_table.clone();
+        let node_id = config.node_id.0;
+        tokio::spawn(async move {
+            if let Err(e) = crate::dashboard::serve(dashboard_addr, node_id, raft, ranges).await {
+                eprintln!("[node {node_id}] dashboard listener error: {e}");
+            }
+        });
+    }
+
     // TLS for client listener: accept Tcp, handshake with TlsAcceptor (built from tls_config),
     // pass resulting stream (which implements AsyncRead/Write) to generic handle_connection.
     // (Scaffolding complete; symmetric to raft TLS listener.)
@@ -575,6 +749,14 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     let self_client = config.client_addr;
     let operator_token = config.operator_token.clone();
     let client_token = config.client_token.clone();
+    let acl = config.acl.clone();
+    let drain = config.drain;
+    if drain {
+        eprintln!(
+            "[node {}] drain mode: status will report drain=true; transfer leaders before remove",
+            config.node_id.0
+        );
+    }
 
     let shared_audit = if config.audit_log {
         let opened = AuditLog::open(&config.data_dir, config.node_id).and_then(|log| match config
@@ -619,14 +801,17 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         next_id,
         ros.clone(),
         shared_range_table,
+        split_rt,
         self_id,
         self_raft,
         self_client,
         operator_token,
         client_token,
+        acl,
         shared_audit,
         config.network_partitioned.clone(),
         config.max_client_connections,
+        drain,
     );
     // Load persisted Raft snapshot once at startup (before the event loop applies entries).
     snapshot::install_persisted_snapshot_at_startup(

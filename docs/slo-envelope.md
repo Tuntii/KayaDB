@@ -55,6 +55,9 @@ KayaDB does **not** yet publish a certified latency SLA. Use these as design gui
 | Strict write latency | Dominated by WAL fsync + Raft quorum RTT; watch `kaya_wal_fsync_max_us` and `kaya_raft_*` |
 | Read latency (leader) | Memtable/SSTable lookup + ReadIndex quorum; watch `kaya_get_max_us` |
 | Throughput | Group-commit batching (`WalBatchConfig`) amortizes fsync; tune batch size/interval to your durability/latency trade-off |
+| Multi-key SI / cross-range 2PC | Engine path gated loosely in CI (envelope v2); distributed latency dominated by per-group Raft propose RTT × sequential prepare/commit phases |
+
+**CI performance envelope v2 (M25):** `cargo test -p kaya-bench --test perf_gate --release` asserts put/get, multi-key SI, and multi-range 2PC smoke budgets (see `BENCHMARKS.md`). These are regression fences, not customer SLOs.
 
 **Recommended alerting signals:** `kaya_wal_fsync_max_us` spikes, `kaya_raft_is_leader` flapping, growing `kaya_engine_live_sstables` (compaction falling behind), rising `kaya_get_max_us`/`kaya_scan_max_us`.
 
@@ -75,7 +78,8 @@ Because this is a correctness prototype, adopt a **conservative** error budget:
 - Values > 16 MiB, keys > 4 KiB, scans intended to return > 100 000 keys or > 64 MiB in one call.
 - More than `--max-client-connections` concurrent clients (excess is backpressured, not served).
 - Relaxed-durability writes where the durability SLO is expected to hold.
-- Multi-tenant isolation, data-at-rest encryption, and delivery-guaranteed audit export — see `docs/security.md` §7 for accepted risks and mitigations.
+- Full multi-tenant isolation and delivery-guaranteed audit export — see `docs/security.md` §7. Optional engine encryption (`--encryption-key-file`) and per-prefix ACL (`--acl-file`) are available (M24) but do not close multi-tenancy or key-rotation risk.
+- Live range migrate, parallel-commit 2PC, and contractual p99 SLAs — see [deployment-guide-v2.md](deployment-guide-v2.md) non-goals.
 
 ---
 

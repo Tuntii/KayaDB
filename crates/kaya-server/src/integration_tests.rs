@@ -1066,6 +1066,139 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir3);
     }
 
+    /// M24 per-prefix ACL: two tokens / two prefixes; longest-prefix authorize.
+    #[serial]
+    #[tokio::test]
+    async fn per_prefix_acl_two_tokens() {
+        use crate::acl::PrefixAcl;
+        use std::collections::HashMap;
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir1 = std::env::temp_dir().join(format!("kayadb_acl_n1_{}", test_id));
+        let data_dir2 = std::env::temp_dir().join(format!("kayadb_acl_n2_{}", test_id));
+        let data_dir3 = std::env::temp_dir().join(format!("kayadb_acl_n3_{}", test_id));
+
+        let r1 = get_free_port().await;
+        let c1 = get_free_port().await;
+        let r2 = get_free_port().await;
+        let c2 = get_free_port().await;
+        let r3 = get_free_port().await;
+        let c3 = get_free_port().await;
+
+        let raft_addr1: SocketAddr = format!("127.0.0.1:{}", r1).parse().unwrap();
+        let client_addr1: SocketAddr = format!("127.0.0.1:{}", c1).parse().unwrap();
+        let raft_addr2: SocketAddr = format!("127.0.0.1:{}", r2).parse().unwrap();
+        let client_addr2: SocketAddr = format!("127.0.0.1:{}", c2).parse().unwrap();
+        let raft_addr3: SocketAddr = format!("127.0.0.1:{}", r3).parse().unwrap();
+        let client_addr3: SocketAddr = format!("127.0.0.1:{}", c3).parse().unwrap();
+
+        let peers1 = vec![(2, raft_addr2, client_addr2), (3, raft_addr3, client_addr3)];
+        let peers2 = vec![(1, raft_addr1, client_addr1), (3, raft_addr3, client_addr3)];
+        let peers3 = vec![(1, raft_addr1, client_addr1), (2, raft_addr2, client_addr2)];
+
+        let mut map = HashMap::new();
+        map.insert("team-a/".into(), "tok-a".into());
+        map.insert("team-b/".into(), "tok-b".into());
+        let acl = PrefixAcl::from_map(map).unwrap();
+
+        let config1 = ClusterConfig::new(1, &data_dir1, raft_addr1, client_addr1, peers1)
+            .with_acl(acl.clone());
+        let config2 = ClusterConfig::new(2, &data_dir2, raft_addr2, client_addr2, peers2)
+            .with_acl(acl.clone());
+        let config3 =
+            ClusterConfig::new(3, &data_dir3, raft_addr3, client_addr3, peers3).with_acl(acl);
+
+        let handle1 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config1).run().await;
+        });
+        let handle2 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config2).run().await;
+        });
+        let handle3 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config3).run().await;
+        });
+
+        let mut leader_addr = None;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr1).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr1);
+                break;
+            }
+            if check_health(client_addr2).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr2);
+                break;
+            }
+            if check_health(client_addr3).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr3);
+                break;
+            }
+        }
+        let leader_addr = leader_addr.expect("no leader elected in ACL-protected cluster");
+
+        let put_a = encode_put_payload(b"team-a/k1", b"va");
+        let put_b = encode_put_payload(b"team-b/k1", b"vb");
+        let put_other = encode_put_payload(b"other/k1", b"vo");
+
+        // No token -> denied
+        let (status, _) = roundtrip(leader_addr, 1, &put_a).await.unwrap();
+        assert_ne!(status, 0, "put without token must be ACL-denied");
+
+        // tok-a can write team-a, not team-b
+        let framed = encode_client_auth_payload(&put_a, Some("tok-a"));
+        let (status, body) = roundtrip(leader_addr, 1, &framed).await.unwrap();
+        assert_eq!(
+            status,
+            0,
+            "tok-a put team-a should succeed: {:?}",
+            String::from_utf8_lossy(&body)
+        );
+
+        let framed = encode_client_auth_payload(&put_b, Some("tok-a"));
+        let (status, _) = roundtrip(leader_addr, 1, &framed).await.unwrap();
+        assert_ne!(status, 0, "tok-a put team-b must be denied");
+
+        // tok-b can write team-b
+        let framed = encode_client_auth_payload(&put_b, Some("tok-b"));
+        let (status, body) = roundtrip(leader_addr, 1, &framed).await.unwrap();
+        assert_eq!(
+            status,
+            0,
+            "tok-b put team-b should succeed: {:?}",
+            String::from_utf8_lossy(&body)
+        );
+
+        // No rule matches other/ -> denied for both tokens
+        let framed = encode_client_auth_payload(&put_other, Some("tok-a"));
+        let (status, _) = roundtrip(leader_addr, 1, &framed).await.unwrap();
+        assert_ne!(status, 0, "unmapped prefix must be denied");
+
+        // GET: tok-a can read its key; tok-b cannot
+        let get_a = encode_key_payload(b"team-a/k1");
+        let framed = encode_client_auth_payload(&get_a, Some("tok-a"));
+        let (status, body) = roundtrip(leader_addr, 2, &framed).await.unwrap();
+        assert_eq!(status, 0, "tok-a get team-a should succeed");
+        assert_eq!(decode_value_payload(&body).unwrap(), b"va".to_vec());
+
+        let framed = encode_client_auth_payload(&get_a, Some("tok-b"));
+        let (status, _) = roundtrip(leader_addr, 2, &framed).await.unwrap();
+        assert_ne!(status, 0, "tok-b get team-a must be denied");
+
+        // HEALTH stays open
+        let (status, _) = roundtrip(leader_addr, 5, &[]).await.unwrap();
+        assert_eq!(status, 0, "health stays open under ACL");
+
+        handle1.abort();
+        handle2.abort();
+        handle3.abort();
+        let _ = std::fs::remove_dir_all(&data_dir1);
+        let _ = std::fs::remove_dir_all(&data_dir2);
+        let _ = std::fs::remove_dir_all(&data_dir3);
+    }
+
     #[cfg(feature = "tls")]
     #[serial]
     #[tokio::test]
@@ -1575,6 +1708,249 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
+    /// Cross-range multi-key TXN_COMMIT via 2PC (M23).
+    ///
+    /// Static two ranges (split at `m`), txn puts one key on each side, commit
+    /// must materialize both keys.
+    #[serial]
+    #[tokio::test]
+    async fn test_cross_range_txn_commit() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_cross_txn_{}", test_id));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let r = get_free_port().await;
+        let c = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{}", r).parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{}", c).parse().unwrap();
+
+        // [a, m) → group 1, [m, z) → group 2
+        let ranges = vec![
+            StaticRange::new(b"a".to_vec(), b"m".to_vec(), GroupId(1)),
+            StaticRange::new(b"m".to_vec(), b"z".to_vec(), GroupId(2)),
+        ];
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![])
+            .with_static_ranges(ranges);
+
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(
+            ready,
+            "single-node multi-raft leader not ready for cross-range txn"
+        );
+
+        // BEGIN
+        let (status, body) = roundtrip(client_addr, TXN_BEGIN_OPCODE, &[]).await.unwrap();
+        assert_eq!(status, STATUS_OK, "TXN_BEGIN");
+        let (txn_id, _) = decode_txn_begin_response(&body).unwrap();
+
+        // Put key on left range (group 1)
+        let put_left = encode_txn_op_payload(txn_id, TXN_OP_PUT, b"apple", Some(b"red"));
+        let (status, _) = roundtrip(client_addr, TXN_OP_OPCODE, &put_left)
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK, "TXN_OP put apple");
+
+        // Put key on right range (group 2)
+        let put_right = encode_txn_op_payload(txn_id, TXN_OP_PUT, b"mango", Some(b"yellow"));
+        let (status, _) = roundtrip(client_addr, TXN_OP_OPCODE, &put_right)
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK, "TXN_OP put mango");
+
+        // Uncommitted intents not visible outside the txn
+        let (status, _) = roundtrip(client_addr, 2, &encode_key_payload(b"apple"))
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_NOT_FOUND);
+        let (status, _) = roundtrip(client_addr, 2, &encode_key_payload(b"mango"))
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_NOT_FOUND);
+
+        // COMMIT — must run 2PC across groups 1 and 2
+        let commit_payload = encode_txn_id_payload(txn_id);
+        let (status, body) = roundtrip(client_addr, TXN_COMMIT_OPCODE, &commit_payload)
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            STATUS_OK,
+            "TXN_COMMIT cross-range 2PC should succeed, body={}",
+            String::from_utf8_lossy(&body)
+        );
+        let commit_ts = decode_txn_commit_response(&body).unwrap();
+        assert!(commit_ts > 0);
+
+        // Both keys visible after commit
+        let (status, body) = roundtrip(client_addr, 2, &encode_key_payload(b"apple"))
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK, "apple after 2PC commit");
+        assert_eq!(decode_value_payload(&body).unwrap(), b"red");
+
+        let (status, body) = roundtrip(client_addr, 2, &encode_key_payload(b"mango"))
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK, "mango after 2PC commit");
+        assert_eq!(decode_value_payload(&body).unwrap(), b"yellow");
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// Multi-range bank transfers via the high-level client (2PC is transparent).
+    ///
+    /// Accounts on left range `[a,m)` and right range `[m,z)`; SI transfers that
+    /// touch both sides must preserve the constant-sum invariant.
+    #[serial]
+    #[tokio::test]
+    async fn test_multi_range_bank_sum_invariant() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_bank_2pc_{}", test_id));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let r = get_free_port().await;
+        let c = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{}", r).parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{}", c).parse().unwrap();
+
+        // Left [a, m) → group 1; right [m, z) → group 2
+        let ranges = vec![
+            StaticRange::new(b"a".to_vec(), b"m".to_vec(), GroupId(1)),
+            StaticRange::new(b"m".to_vec(), b"z".to_vec(), GroupId(2)),
+        ];
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![])
+            .with_static_ranges(ranges);
+
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "leader not ready for multi-range bank");
+
+        // Keys chosen so left/right land in different groups.
+        // left: apple, banana  (both < m); right: mango, melon (both >= m)
+        let left_a = b"apple".as_slice();
+        let left_b = b"banana".as_slice();
+        let right_a = b"mango".as_slice();
+        let right_b = b"melon".as_slice();
+        let initial: i64 = 100;
+        let accounts: [&[u8]; 4] = [left_a, left_b, right_a, right_b];
+        let expected_total = initial * accounts.len() as i64;
+
+        let mut client = kaya_client::KayaClient::connect(client_addr)
+            .await
+            .expect("connect client");
+        client.set_max_redirects(5);
+
+        let bal = |n: i64| n.to_string().into_bytes();
+        let parse = |v: &[u8]| -> i64 {
+            std::str::from_utf8(v)
+                .unwrap()
+                .parse()
+                .expect("balance parse")
+        };
+
+        for key in &accounts {
+            client
+                .put(key, &bal(initial))
+                .await
+                .unwrap_or_else(|e| panic!("seed {}: {e}", String::from_utf8_lossy(key)));
+        }
+
+        // Helper: SI transfer amount from `from` to `to` (may span ranges → 2PC).
+        async fn transfer(
+            client: &mut kaya_client::KayaClient,
+            from: &[u8],
+            to: &[u8],
+            amount: i64,
+        ) {
+            let mut txn = client.begin_txn().await.expect("begin_txn");
+            let from_bal = parse_bal(txn.get(from).await.expect("get from").as_deref());
+            let to_bal = parse_bal(txn.get(to).await.expect("get to").as_deref());
+            assert!(from_bal >= amount, "insufficient funds for transfer");
+            txn.put(from, &encode_bal(from_bal - amount))
+                .await
+                .expect("put debit");
+            txn.put(to, &encode_bal(to_bal + amount))
+                .await
+                .expect("put credit");
+            let ts = txn.commit().await.expect("commit transfer");
+            assert!(ts > 0, "commit_ts must be positive");
+        }
+
+        fn encode_bal(n: i64) -> Vec<u8> {
+            n.to_string().into_bytes()
+        }
+        fn parse_bal(v: Option<&[u8]>) -> i64 {
+            let v = v.expect("account missing");
+            std::str::from_utf8(v)
+                .unwrap()
+                .parse()
+                .expect("balance parse")
+        }
+
+        // Cross-range: apple (left) → mango (right)
+        transfer(&mut client, left_a, right_a, 30).await;
+        // Cross-range reverse: melon (right) → banana (left)
+        transfer(&mut client, right_b, left_b, 20).await;
+        // Same-range left: apple → banana
+        transfer(&mut client, left_a, left_b, 10).await;
+        // Same-range right: mango → melon
+        transfer(&mut client, right_a, right_b, 5).await;
+        // Cross-range again: banana → melon
+        transfer(&mut client, left_b, right_b, 15).await;
+
+        let mut balances = Vec::with_capacity(accounts.len());
+        for key in &accounts {
+            let v = client
+                .get(key)
+                .await
+                .unwrap_or_else(|e| panic!("get {}: {e}", String::from_utf8_lossy(key)))
+                .unwrap_or_else(|| panic!("missing {}", String::from_utf8_lossy(key)));
+            balances.push(parse(&v));
+        }
+        let sum: i64 = balances.iter().sum();
+        assert_eq!(
+            sum, expected_total,
+            "bank sum invariant violated: sum={sum} expected={expected_total} balances={balances:?}"
+        );
+        // Expected after transfers:
+        // apple:  100-30-10 = 60
+        // banana: 100+20+10-15 = 115
+        // mango:  100+30-5 = 125
+        // melon:  100-20+5+15 = 100
+        assert_eq!(balances, vec![60, 115, 125, 100]);
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
     /// Single-node multi-raft: two static ranges, puts route to independent groups.
     #[serial]
     #[tokio::test]
@@ -1592,16 +1968,8 @@ mod tests {
         let client_addr: SocketAddr = format!("127.0.0.1:{}", c).parse().unwrap();
 
         let ranges = vec![
-            StaticRange {
-                start_key: b"a".to_vec(),
-                end_key: b"m".to_vec(),
-                group_id: GroupId(1),
-            },
-            StaticRange {
-                start_key: b"m".to_vec(),
-                end_key: b"z".to_vec(),
-                group_id: GroupId(2),
-            },
+            StaticRange::new(b"a".to_vec(), b"m".to_vec(), GroupId(1)),
+            StaticRange::new(b"m".to_vec(), b"z".to_vec(), GroupId(2)),
         ];
         let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![])
             .with_static_ranges(ranges);
@@ -1663,6 +2031,269 @@ mod tests {
                 || data_dir.join("groups").is_dir(),
             "expected groups/ directory for multi-raft layout"
         );
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// M21: split under load loses no writes; LIST_RANGES reflects meta epoch.
+    #[serial]
+    #[tokio::test]
+    async fn test_range_split_no_lost_writes() {
+        use kaya_net::{
+            decode_list_ranges_response, encode_split_range_request, LIST_RANGES_OPCODE,
+            SPLIT_RANGE_OPCODE,
+        };
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_range_split_{}", test_id));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let r = get_free_port().await;
+        let c = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{}", r).parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{}", c).parse().unwrap();
+
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![]);
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "node should elect");
+
+        for i in 0..20u8 {
+            let key = format!("k{i:02}");
+            let put = encode_put_payload(key.as_bytes(), b"pre");
+            let (status, _) = roundtrip(client_addr, 1, &put).await.unwrap();
+            assert_eq!(status, STATUS_OK, "pre-split put {key}");
+        }
+
+        let (status, body) = roundtrip(
+            client_addr,
+            SPLIT_RANGE_OPCODE,
+            &encode_split_range_request(b"k10"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, STATUS_OK, "split should succeed");
+        let (meta_epoch, halves) = decode_list_ranges_response(&body).unwrap();
+        assert!(meta_epoch >= 1);
+        assert_eq!(halves.len(), 2);
+
+        // New group may need a moment to elect on single-node.
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                break;
+            }
+        }
+
+        for i in 0..20u8 {
+            let key = format!("k{i:02}");
+            let put = encode_put_payload(key.as_bytes(), b"post");
+            let mut ok = false;
+            for _ in 0..20 {
+                let (status, _) = roundtrip(client_addr, 1, &put).await.unwrap();
+                if status == STATUS_OK {
+                    ok = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+            assert!(ok, "post-split put {key}");
+        }
+
+        for i in 0..20u8 {
+            let key = format!("k{i:02}");
+            let (status, body) = roundtrip(client_addr, 2, &encode_key_payload(key.as_bytes()))
+                .await
+                .unwrap();
+            assert_eq!(status, STATUS_OK, "get {key}");
+            assert_eq!(
+                decode_value_payload(&body).unwrap(),
+                b"post",
+                "value for {key}"
+            );
+        }
+
+        let (status, body) = roundtrip(client_addr, LIST_RANGES_OPCODE, &[])
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK);
+        let (epoch2, ranges) = decode_list_ranges_response(&body).unwrap();
+        assert!(epoch2 >= meta_epoch);
+        assert!(ranges.len() >= 2);
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// M22: split then merge recombines to one range; keys remain readable.
+    #[serial]
+    #[tokio::test]
+    async fn test_range_merge_recombines() {
+        use kaya_net::{
+            decode_list_ranges_response, encode_merge_range_request, encode_split_range_request,
+            LIST_RANGES_OPCODE, MERGE_RANGE_OPCODE, SPLIT_RANGE_OPCODE,
+        };
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_range_merge_{}", test_id));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let r = get_free_port().await;
+        let c = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{}", r).parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{}", c).parse().unwrap();
+
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![]);
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "node should elect");
+
+        for key in [b"a".as_slice(), b"m".as_slice(), b"z".as_slice()] {
+            let put = encode_put_payload(key, b"v1");
+            let (status, _) = roundtrip(client_addr, 1, &put).await.unwrap();
+            assert_eq!(status, STATUS_OK, "put {:?}", String::from_utf8_lossy(key));
+        }
+
+        let (status, body) = roundtrip(
+            client_addr,
+            SPLIT_RANGE_OPCODE,
+            &encode_split_range_request(b"m"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, STATUS_OK, "split should succeed");
+        let (split_epoch, halves) = decode_list_ranges_response(&body).unwrap();
+        assert_eq!(halves.len(), 2);
+        assert!(split_epoch >= 2);
+
+        // left_start is empty (whole-keyspace left half).
+        let (status, body) = roundtrip(
+            client_addr,
+            MERGE_RANGE_OPCODE,
+            &encode_merge_range_request(b""),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, STATUS_OK, "merge should succeed");
+        let (merge_epoch, merged) = decode_list_ranges_response(&body).unwrap();
+        assert_eq!(merged.len(), 1);
+        assert!(merge_epoch > split_epoch);
+        assert!(merged[0].4.is_empty(), "merged end should be unbounded");
+        assert_eq!(merged[0].2, 0, "merged keeps left group 0");
+
+        let (status, body) = roundtrip(client_addr, LIST_RANGES_OPCODE, &[])
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK);
+        let (_, ranges) = decode_list_ranges_response(&body).unwrap();
+        assert_eq!(ranges.len(), 1);
+
+        for key in [b"a".as_slice(), b"m".as_slice(), b"z".as_slice()] {
+            let (status, body) = roundtrip(client_addr, 2, &encode_key_payload(key))
+                .await
+                .unwrap();
+            assert_eq!(status, STATUS_OK, "get {:?}", String::from_utf8_lossy(key));
+            assert_eq!(decode_value_payload(&body).unwrap(), b"v1");
+        }
+
+        // Post-merge write still works.
+        let put = encode_put_payload(b"m", b"v2");
+        let (status, _) = roundtrip(client_addr, 1, &put).await.unwrap();
+        assert_eq!(status, STATUS_OK);
+        let (status, body) = roundtrip(client_addr, 2, &encode_key_payload(b"m"))
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(decode_value_payload(&body).unwrap(), b"v2");
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// M22: TRANSFER_LEADER self-transfer is a no-op success on the group-0 leader.
+    #[serial]
+    #[tokio::test]
+    async fn test_transfer_leader_self_noop() {
+        use kaya_net::{encode_transfer_leader_request, STATUS_NOT_LEADER, TRANSFER_LEADER_OPCODE};
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_xfer_leader_{}", test_id));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let r = get_free_port().await;
+        let c = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{}", r).parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{}", c).parse().unwrap();
+
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![]);
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "node should elect");
+
+        // Self-transfer on group 0: success, still leader.
+        let payload = encode_transfer_leader_request(0, 1);
+        let (status, body) = roundtrip(client_addr, TRANSFER_LEADER_OPCODE, &payload)
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            STATUS_OK,
+            "self transfer should succeed: {:?}",
+            String::from_utf8_lossy(&body)
+        );
+        assert_eq!(
+            check_health(client_addr).await.as_deref(),
+            Some("leader"),
+            "self-transfer must leave leadership intact"
+        );
+
+        // Non-voter target rejected.
+        let bad = encode_transfer_leader_request(0, 99);
+        let (status, _) = roundtrip(client_addr, TRANSFER_LEADER_OPCODE, &bad)
+            .await
+            .unwrap();
+        assert_ne!(status, STATUS_OK);
+        assert_ne!(status, STATUS_NOT_LEADER);
 
         handle.abort();
         let _ = std::fs::remove_dir_all(&data_dir);

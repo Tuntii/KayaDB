@@ -3,7 +3,8 @@
 //! Wire format:
 //!
 //! ```text
-//! type      : u8       (1 = Put, 2 = Delete, 3 = ConfigChange, 4 = TxnCommit)
+//! type      : u8       (1 = Put, 2 = Delete, 3 = ConfigChange, 4 = TxnCommit,
+//!                       5 = TxnPrepare, 6 = TxnCommit2pc, 7 = TxnAbort2pc)
 //! key_len   : u32 LE
 //! key       : bytes
 //! [Put only]
@@ -12,12 +13,16 @@
 //! [ConfigChange]
 //! phase     : u8
 //! member_count : u32 LE
-//! per member: id(u64) | raft_len(u32) | raft | client_len(u32) | client
-//! [TxnCommit]
+//! per member: id(u64) | raft_len(u32) | raft | client_len(u32) | client | [is_learner u8]
+//!             (is_learner is trailing; omitted in legacy logs → voter)
+//! [TxnCommit / TxnPrepare]
 //! txn_id    : u64 LE
+//! [TxnPrepare only] coordinator_group : u64 LE
 //! count     : u32 LE
 //! per mutation:
 //!   key_len u32 | key | has_value u8 (0/1) | [value_len u32 | value if has_value]
+//! [TxnCommit2pc / TxnAbort2pc]
+//! txn_id    : u64 LE
 //! ```
 
 /// Phase of a membership configuration change (joint consensus).
@@ -29,17 +34,54 @@ pub enum ConfigChangePhase {
     Final = 2,
 }
 
-/// A voting member with network endpoints (replicated in config-change entries).
+/// A cluster member with network endpoints (replicated in config-change entries).
+///
+/// Learners receive the log but do not vote or count toward quorum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusterMember {
     pub id: crate::NodeId,
     pub raft_addr: String,
     pub client_addr: String,
+    /// When `true`, the member is a non-voting learner replica.
+    pub is_learner: bool,
 }
 
 impl ClusterMember {
+    /// Voting member ids only (learners excluded).
     pub fn voter_ids(members: &[ClusterMember]) -> Vec<crate::NodeId> {
-        members.iter().map(|m| m.id).collect()
+        members
+            .iter()
+            .filter(|m| !m.is_learner)
+            .map(|m| m.id)
+            .collect()
+    }
+
+    /// Convenience constructor for a voting member.
+    pub fn voter(
+        id: crate::NodeId,
+        raft_addr: impl Into<String>,
+        client_addr: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            raft_addr: raft_addr.into(),
+            client_addr: client_addr.into(),
+            is_learner: false,
+        }
+    }
+
+    /// Convenience constructor for a non-voting learner.
+    pub fn learner(
+        id: crate::NodeId,
+        raft_addr: impl Into<String>,
+        client_addr: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            raft_addr: raft_addr.into(),
+            client_addr: client_addr.into(),
+            is_learner: true,
+        }
     }
 }
 
@@ -68,6 +110,29 @@ pub enum RaftCommand {
         /// `(key, Some(value))` = put; `(key, None)` = delete.
         mutations: Vec<(Vec<u8>, Option<Vec<u8>>)>,
     },
+    /// Cross-shard 2PC prepare (type byte 5).
+    ///
+    /// Participant stores durable intents under `\x00txn/intent/…` and a
+    /// prepare record under `\x00txn/rec/…`. Does not materialize user keys.
+    TxnPrepare {
+        txn_id: u64,
+        /// Raft group id of the coordinator (for recovery / diagnostics).
+        coordinator_group: u64,
+        /// `(key, Some(value))` = put intent; `(key, None)` = delete intent.
+        mutations: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    },
+    /// Cross-shard 2PC commit decision (type byte 6).
+    ///
+    /// Materializes prepared intents for `txn_id` then clears them.
+    TxnCommit2pc {
+        txn_id: u64,
+    },
+    /// Cross-shard 2PC abort decision (type byte 7).
+    ///
+    /// Deletes prepared intents for `txn_id` without materializing user keys.
+    TxnAbort2pc {
+        txn_id: u64,
+    },
 }
 
 impl RaftCommand {
@@ -95,26 +160,32 @@ impl RaftCommand {
                     out.extend_from_slice(&member.id.0.to_le_bytes());
                     push_string(&mut out, &member.raft_addr);
                     push_string(&mut out, &member.client_addr);
+                    // Trailing learner flag (new format). Always written on encode.
+                    out.push(if member.is_learner { 1u8 } else { 0u8 });
                 }
             }
             RaftCommand::TxnCommit { txn_id, mutations } => {
                 out.push(4u8);
                 out.extend_from_slice(&txn_id.to_le_bytes());
-                out.extend_from_slice(&(mutations.len() as u32).to_le_bytes());
-                for (key, value) in mutations {
-                    out.extend_from_slice(&(key.len() as u32).to_le_bytes());
-                    out.extend_from_slice(key);
-                    match value {
-                        Some(v) => {
-                            out.push(1u8);
-                            out.extend_from_slice(&(v.len() as u32).to_le_bytes());
-                            out.extend_from_slice(v);
-                        }
-                        None => {
-                            out.push(0u8);
-                        }
-                    }
-                }
+                push_mutations(&mut out, mutations);
+            }
+            RaftCommand::TxnPrepare {
+                txn_id,
+                coordinator_group,
+                mutations,
+            } => {
+                out.push(5u8);
+                out.extend_from_slice(&txn_id.to_le_bytes());
+                out.extend_from_slice(&coordinator_group.to_le_bytes());
+                push_mutations(&mut out, mutations);
+            }
+            RaftCommand::TxnCommit2pc { txn_id } => {
+                out.push(6u8);
+                out.extend_from_slice(&txn_id.to_le_bytes());
+            }
+            RaftCommand::TxnAbort2pc { txn_id } => {
+                out.push(7u8);
+                out.extend_from_slice(&txn_id.to_le_bytes());
             }
         }
         out
@@ -150,46 +221,117 @@ impl RaftCommand {
                             id: crate::NodeId(next_u64(&mut cur)?),
                             raft_addr: String::new(),
                             client_addr: String::new(),
+                            is_learner: false,
                         });
                     }
                     return Ok(RaftCommand::ConfigChange { phase, members });
                 }
-                let mut members = Vec::with_capacity(count);
-                for _ in 0..count {
-                    let id = crate::NodeId(next_u64(&mut cur)?);
-                    let raft_addr = next_string(&mut cur)?;
-                    let client_addr = next_string(&mut cur)?;
-                    members.push(ClusterMember {
-                        id,
-                        raft_addr,
-                        client_addr,
-                    });
+                // Prefer new format (trailing is_learner u8 per member). Fall back
+                // to address-only encoding used by older logs (all voters).
+                let snapshot = cur;
+                if let Ok(members) = decode_members_with_addrs(snapshot, count, true) {
+                    return Ok(RaftCommand::ConfigChange { phase, members });
                 }
+                let members = decode_members_with_addrs(snapshot, count, false)?;
                 Ok(RaftCommand::ConfigChange { phase, members })
             }
             4 => {
                 let txn_id = next_u64(&mut cur)?;
-                let count = next_u32(&mut cur)? as usize;
-                let mut mutations = Vec::with_capacity(count);
-                for _ in 0..count {
-                    let key = next_bytes(&mut cur)?;
-                    let has_value = next_u8(&mut cur)?;
-                    let value = match has_value {
-                        0 => None,
-                        1 => Some(next_bytes(&mut cur)?),
-                        other => {
-                            return Err(format!(
-                                "invalid TxnCommit has_value flag: {other} (expected 0 or 1)"
-                            ));
-                        }
-                    };
-                    mutations.push((key, value));
-                }
+                let mutations = next_mutations(&mut cur, "TxnCommit")?;
                 Ok(RaftCommand::TxnCommit { txn_id, mutations })
+            }
+            5 => {
+                let txn_id = next_u64(&mut cur)?;
+                let coordinator_group = next_u64(&mut cur)?;
+                let mutations = next_mutations(&mut cur, "TxnPrepare")?;
+                Ok(RaftCommand::TxnPrepare {
+                    txn_id,
+                    coordinator_group,
+                    mutations,
+                })
+            }
+            6 => {
+                let txn_id = next_u64(&mut cur)?;
+                Ok(RaftCommand::TxnCommit2pc { txn_id })
+            }
+            7 => {
+                let txn_id = next_u64(&mut cur)?;
+                Ok(RaftCommand::TxnAbort2pc { txn_id })
             }
             t => Err(format!("unknown RaftCommand type: {t}")),
         }
     }
+}
+
+fn push_mutations(out: &mut Vec<u8>, mutations: &[(Vec<u8>, Option<Vec<u8>>)]) {
+    out.extend_from_slice(&(mutations.len() as u32).to_le_bytes());
+    for (key, value) in mutations {
+        out.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        out.extend_from_slice(key);
+        match value {
+            Some(v) => {
+                out.push(1u8);
+                out.extend_from_slice(&(v.len() as u32).to_le_bytes());
+                out.extend_from_slice(v);
+            }
+            None => {
+                out.push(0u8);
+            }
+        }
+    }
+}
+
+fn next_mutations(cur: &mut &[u8], label: &str) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>, String> {
+    let count = next_u32(cur)? as usize;
+    let mut mutations = Vec::with_capacity(count);
+    for _ in 0..count {
+        let key = next_bytes(cur)?;
+        let has_value = next_u8(cur)?;
+        let value = match has_value {
+            0 => None,
+            1 => Some(next_bytes(cur)?),
+            other => {
+                return Err(format!(
+                    "invalid {label} has_value flag: {other} (expected 0 or 1)"
+                ));
+            }
+        };
+        mutations.push((key, value));
+    }
+    Ok(mutations)
+}
+
+/// Decode `count` members from address-bearing wire form.
+/// When `with_learner_flag` is true each member ends with a trailing u8 flag.
+fn decode_members_with_addrs(
+    data: &[u8],
+    count: usize,
+    with_learner_flag: bool,
+) -> Result<Vec<ClusterMember>, String> {
+    let mut cur = data;
+    let mut members = Vec::with_capacity(count);
+    for _ in 0..count {
+        let id = crate::NodeId(next_u64(&mut cur)?);
+        let raft_addr = next_string(&mut cur)?;
+        let client_addr = next_string(&mut cur)?;
+        let is_learner = if with_learner_flag {
+            next_u8(&mut cur)? != 0
+        } else {
+            false
+        };
+        members.push(ClusterMember {
+            id,
+            raft_addr,
+            client_addr,
+            is_learner,
+        });
+    }
+    // ConfigChange has no trailing payload after members; require full consume
+    // so the with/without-flag probe can disambiguate formats.
+    if !cur.is_empty() {
+        return Err("trailing bytes after members".to_owned());
+    }
+    Ok(members)
 }
 
 fn push_string(out: &mut Vec<u8>, s: &str) {
@@ -275,20 +417,64 @@ mod tests {
         let cmd = RaftCommand::ConfigChange {
             phase: ConfigChangePhase::Joint,
             members: vec![
-                ClusterMember {
-                    id: crate::NodeId(1),
-                    raft_addr: "127.0.0.1:7481".to_owned(),
-                    client_addr: "127.0.0.1:7379".to_owned(),
-                },
-                ClusterMember {
-                    id: crate::NodeId(4),
-                    raft_addr: "127.0.0.1:7484".to_owned(),
-                    client_addr: "127.0.0.1:7383".to_owned(),
-                },
+                ClusterMember::voter(crate::NodeId(1), "127.0.0.1:7481", "127.0.0.1:7379"),
+                ClusterMember::voter(crate::NodeId(4), "127.0.0.1:7484", "127.0.0.1:7383"),
             ],
         };
         let encoded = cmd.encode();
         assert_eq!(RaftCommand::decode(&encoded).unwrap(), cmd);
+    }
+
+    #[test]
+    fn round_trip_config_change_with_learner() {
+        let cmd = RaftCommand::ConfigChange {
+            phase: ConfigChangePhase::Final,
+            members: vec![
+                ClusterMember::voter(crate::NodeId(1), "127.0.0.1:7481", "127.0.0.1:7379"),
+                ClusterMember::learner(crate::NodeId(4), "127.0.0.1:7484", "127.0.0.1:7383"),
+            ],
+        };
+        let encoded = cmd.encode();
+        let decoded = RaftCommand::decode(&encoded).unwrap();
+        assert_eq!(decoded, cmd);
+        if let RaftCommand::ConfigChange { members, .. } = decoded {
+            assert!(!members[0].is_learner);
+            assert!(members[1].is_learner);
+            assert_eq!(ClusterMember::voter_ids(&members), vec![crate::NodeId(1)]);
+        }
+    }
+
+    #[test]
+    fn decode_legacy_address_members_as_voters() {
+        // Old wire: id | raft | client  (no trailing learner flag).
+        let mut legacy = vec![3u8, ConfigChangePhase::Final as u8];
+        legacy.extend_from_slice(&1u32.to_le_bytes());
+        legacy.extend_from_slice(&1u64.to_le_bytes());
+        push_string(&mut legacy, "127.0.0.1:7481");
+        push_string(&mut legacy, "127.0.0.1:7379");
+        let decoded = RaftCommand::decode(&legacy).unwrap();
+        match decoded {
+            RaftCommand::ConfigChange { members, .. } => {
+                assert_eq!(members.len(), 1);
+                assert_eq!(members[0].id, crate::NodeId(1));
+                assert_eq!(members[0].raft_addr, "127.0.0.1:7481");
+                assert!(!members[0].is_learner, "legacy members decode as voters");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn voter_ids_excludes_learners() {
+        let members = vec![
+            ClusterMember::voter(crate::NodeId(1), "a", "b"),
+            ClusterMember::learner(crate::NodeId(2), "c", "d"),
+            ClusterMember::voter(crate::NodeId(3), "e", "f"),
+        ];
+        assert_eq!(
+            ClusterMember::voter_ids(&members),
+            vec![crate::NodeId(1), crate::NodeId(3)]
+        );
     }
 
     #[test]
@@ -306,6 +492,7 @@ mod tests {
             } if members.len() == 2
                 && members[0].id == crate::NodeId(1)
                 && members[0].raft_addr.is_empty()
+                && !members[0].is_learner
         ));
     }
 
@@ -345,5 +532,62 @@ mod tests {
         bad.push(2u8); // invalid has_value
         let err = RaftCommand::decode(&bad).unwrap_err();
         assert!(err.contains("has_value"), "err={err}");
+    }
+
+    #[test]
+    fn round_trip_txn_prepare() {
+        let cmd = RaftCommand::TxnPrepare {
+            txn_id: 99,
+            coordinator_group: 3,
+            mutations: vec![(b"a".to_vec(), Some(b"1".to_vec())), (b"b".to_vec(), None)],
+        };
+        let encoded = cmd.encode();
+        assert_eq!(encoded[0], 5u8, "TxnPrepare type byte must be 5");
+        assert_eq!(RaftCommand::decode(&encoded).unwrap(), cmd);
+    }
+
+    #[test]
+    fn round_trip_txn_commit_2pc() {
+        let cmd = RaftCommand::TxnCommit2pc { txn_id: 42 };
+        let encoded = cmd.encode();
+        assert_eq!(encoded[0], 6u8, "TxnCommit2pc type byte must be 6");
+        assert_eq!(RaftCommand::decode(&encoded).unwrap(), cmd);
+    }
+
+    #[test]
+    fn round_trip_txn_abort_2pc() {
+        let cmd = RaftCommand::TxnAbort2pc { txn_id: 7 };
+        let encoded = cmd.encode();
+        assert_eq!(encoded[0], 7u8, "TxnAbort2pc type byte must be 7");
+        assert_eq!(RaftCommand::decode(&encoded).unwrap(), cmd);
+    }
+
+    #[test]
+    fn types_1_through_4_unchanged_by_2pc_extension() {
+        // Regression: type bytes 1–4 keep prior layouts.
+        let put = RaftCommand::Put {
+            key: b"k".to_vec(),
+            value: b"v".to_vec(),
+        };
+        assert_eq!(put.encode()[0], 1);
+        assert_eq!(RaftCommand::decode(&put.encode()).unwrap(), put);
+
+        let del = RaftCommand::Delete { key: b"k".to_vec() };
+        assert_eq!(del.encode()[0], 2);
+        assert_eq!(RaftCommand::decode(&del.encode()).unwrap(), del);
+
+        let cfg = RaftCommand::ConfigChange {
+            phase: ConfigChangePhase::Final,
+            members: vec![ClusterMember::voter(crate::NodeId(1), "r", "c")],
+        };
+        assert_eq!(cfg.encode()[0], 3);
+        assert_eq!(RaftCommand::decode(&cfg.encode()).unwrap(), cfg);
+
+        let txn = RaftCommand::TxnCommit {
+            txn_id: 1,
+            mutations: vec![(b"x".to_vec(), Some(b"y".to_vec()))],
+        };
+        assert_eq!(txn.encode()[0], 4);
+        assert_eq!(RaftCommand::decode(&txn.encode()).unwrap(), txn);
     }
 }

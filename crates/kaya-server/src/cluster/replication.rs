@@ -156,6 +156,32 @@ async fn apply_command(
                 .map(|_| None) // LSN correlation is optional for batch commits
                 .map_err(|e| e.to_string())
         }
+        Ok(RaftCommand::TxnPrepare {
+            txn_id, mutations, ..
+        }) => {
+            let mutations: Vec<_> = mutations.into_iter().collect();
+            engine
+                .lock()
+                .await
+                .apply_txn_prepare(txn_id, &mutations)
+                .await
+                .map(|_| None)
+                .map_err(|e| e.to_string())
+        }
+        Ok(RaftCommand::TxnCommit2pc { txn_id }) => engine
+            .lock()
+            .await
+            .apply_txn_commit_2pc(txn_id)
+            .await
+            .map(|_| None)
+            .map_err(|e| e.to_string()),
+        Ok(RaftCommand::TxnAbort2pc { txn_id }) => engine
+            .lock()
+            .await
+            .apply_txn_abort_2pc(txn_id)
+            .await
+            .map(|_| None)
+            .map_err(|e| e.to_string()),
         Err(e) => Err(format!("corrupt command in log: {e}")),
     }
 }

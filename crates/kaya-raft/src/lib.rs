@@ -19,7 +19,10 @@ pub use message::{
     AppendRequest, AppendResponse, ConfigChangeRequest, ConfigChangeResponse, Envelope,
     InstallSnapshotRequest, InstallSnapshotResponse, Message, VoteRequest, VoteResponse,
 };
-pub use multi_raft::{multi_raft_group_dir, GroupId, MultiRaftHost, StaticRange, StaticRangeTable};
+pub use multi_raft::{
+    multi_raft_group_dir, GroupId, MultiRaftHost, RangeDescriptor, RangeTable, StaticRange,
+    StaticRangeTable,
+};
 pub use node::{RaftConfig, RaftNode, RaftStatus, Role};
 pub use storage::{
     decode_hard_state, decode_log_file, default_hard_state, encode_hard_state, encode_log_file,
@@ -42,6 +45,7 @@ pub fn build_snapshot_payload(engine_data: &[u8], members: &[ClusterMember]) -> 
         buf.extend_from_slice(&m.id.0.to_le_bytes());
         push_len_prefixed(&mut buf, m.raft_addr.as_bytes());
         push_len_prefixed(&mut buf, m.client_addr.as_bytes());
+        buf.push(if m.is_learner { 1u8 } else { 0u8 });
     }
     buf
 }
@@ -75,24 +79,50 @@ pub fn parse_snapshot_payload(data: &[u8]) -> Result<(Vec<u8>, Vec<ClusterMember
     }
     let mcnt = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]) as usize;
     cur = &cur[4..];
+    // Prefer new format (trailing is_learner u8); fall back to legacy (all voters).
+    let members = if let Ok(m) = decode_snapshot_members(cur, mcnt, true) {
+        m
+    } else {
+        decode_snapshot_members(cur, mcnt, false).unwrap_or_default()
+    };
+    Ok((engine, members))
+}
+
+fn decode_snapshot_members(
+    data: &[u8],
+    mcnt: usize,
+    with_learner_flag: bool,
+) -> Result<Vec<ClusterMember>, String> {
+    let mut cur = data;
     let mut members = Vec::with_capacity(mcnt);
     for _ in 0..mcnt {
         if cur.len() < 8 {
-            break;
+            return Err("truncated member id".into());
         }
         let id = NodeId(u64::from_le_bytes([
             cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
         ]));
         cur = &cur[8..];
-        let raft = take_len_prefixed(&mut cur).unwrap_or_default();
-        let client = take_len_prefixed(&mut cur).unwrap_or_default();
+        let raft = take_len_prefixed(&mut cur)?;
+        let client = take_len_prefixed(&mut cur)?;
+        let is_learner = if with_learner_flag {
+            if cur.is_empty() {
+                return Err("missing learner flag".into());
+            }
+            let flag = cur[0];
+            cur = &cur[1..];
+            flag != 0
+        } else {
+            false
+        };
         members.push(ClusterMember {
             id,
             raft_addr: raft,
             client_addr: client,
+            is_learner,
         });
     }
-    Ok((engine, members))
+    Ok(members)
 }
 
 fn push_len_prefixed(buf: &mut Vec<u8>, b: &[u8]) {

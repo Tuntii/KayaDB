@@ -456,6 +456,7 @@ impl ClusterSim {
                 id,
                 raft_addr: format!("sim://raft/{}", id.0),
                 client_addr: format!("sim://client/{}", id.0),
+                is_learner: false,
             })
             .collect()
     }
@@ -788,6 +789,26 @@ async fn apply_command_to_engine(
                 .map(|_| None)
                 .map_err(|e| e.to_string())
         }
+        RaftCommand::TxnPrepare {
+            txn_id, mutations, ..
+        } => {
+            let mutations: Vec<_> = mutations.into_iter().collect();
+            engine
+                .apply_txn_prepare(txn_id, &mutations)
+                .await
+                .map(|_| None)
+                .map_err(|e| e.to_string())
+        }
+        RaftCommand::TxnCommit2pc { txn_id } => engine
+            .apply_txn_commit_2pc(txn_id)
+            .await
+            .map(|_| None)
+            .map_err(|e| e.to_string()),
+        RaftCommand::TxnAbort2pc { txn_id } => engine
+            .apply_txn_abort_2pc(txn_id)
+            .await
+            .map(|_| None)
+            .map_err(|e| e.to_string()),
     }
 }
 

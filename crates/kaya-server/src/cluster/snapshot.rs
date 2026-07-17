@@ -179,13 +179,12 @@ pub(crate) async fn maybe_compact_raft_log(
         }
     };
 
-    // Capture current membership so snapshot receivers can restore config.
+    // Capture current membership (voters + learners) so snapshot receivers restore config.
     let members_snapshot: Vec<ClusterMember> = {
         let roster_guard = roster.read().await;
-        let voters: Vec<NodeId> = {
+        let known: Vec<ClusterMember> = {
             let guard = host.lock().unwrap();
-            // Prefer group 0 membership; fall back to any group.
-            let cfg = guard
+            guard
                 .get(GroupId::ZERO)
                 .or_else(|| {
                     guard
@@ -193,21 +192,43 @@ pub(crate) async fn maybe_compact_raft_log(
                         .into_iter()
                         .find_map(|g| guard.get(g))
                 })
-                .map(|n| n.effective_config().stable_config().voters.clone())
-                .unwrap_or_default();
-            cfg.into_iter().collect()
+                .map(|n| {
+                    let members = n.membership().to_vec();
+                    if !members.is_empty() {
+                        members
+                    } else {
+                        n.effective_config()
+                            .stable_config()
+                            .voters
+                            .iter()
+                            .map(|&id| ClusterMember {
+                                id,
+                                raft_addr: String::new(),
+                                client_addr: String::new(),
+                                is_learner: false,
+                            })
+                            .collect()
+                    }
+                })
+                .unwrap_or_default()
         };
-        voters
+        known
             .into_iter()
-            .filter_map(|id| {
-                if let (Some(r), Some(c)) = (roster_guard.addr(id), roster_guard.client_addr(id)) {
-                    Some(ClusterMember {
-                        id,
-                        raft_addr: r.to_string(),
-                        client_addr: c.to_string(),
-                    })
-                } else {
+            .filter_map(|mut m| {
+                if m.raft_addr.is_empty() {
+                    if let Some(r) = roster_guard.addr(m.id) {
+                        m.raft_addr = r.to_string();
+                    }
+                }
+                if m.client_addr.is_empty() {
+                    if let Some(c) = roster_guard.client_addr(m.id) {
+                        m.client_addr = c.to_string();
+                    }
+                }
+                if m.raft_addr.is_empty() || m.client_addr.is_empty() {
                     None
+                } else {
+                    Some(m)
                 }
             })
             .collect()

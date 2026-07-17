@@ -12,6 +12,7 @@ var (
 	ErrTimeout         = errors.New("kaya: timeout")
 	ErrConnection      = errors.New("kaya: connection error")
 	ErrProtocol        = errors.New("kaya: protocol error")
+	ErrTxnConflict     = errors.New("kaya: transaction conflict")
 )
 
 // StatusError represents a server response with a non-success status code.

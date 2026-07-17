@@ -58,6 +58,8 @@ KayaDB completed **M13–M15** (TLS, tokens, audit, Prometheus, Go client, Docke
 - [Client library](getting-started.md#using-the-kaya-client-library) — async Rust client with leader redirection
 - [Client protocol](clients/client-protocol-spec.md) · [Wire format](clients/client-wire-protocol.md) · [Conformance vectors](clients/conformance/vectors.json) · [Go client](clients/go-client.md)
 - [Deployment](deployment.md) — Docker Compose + Kubernetes examples
+- [Deployment guide v2](deployment-guide-v2.md) — M22–M24 flags (drain, dashboard, encryption, ACL, ranges)
+- [SLO envelope](slo-envelope.md) — hard limits and design SLOs
 
 ### Architecture & internals
 

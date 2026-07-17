@@ -67,12 +67,21 @@ WAL/manifest may be mid-write. Add `--json` for machine-readable output
 (`copied`, `skipped`, `bytes_copied`).
 
 
-## CDC checkpoints (M19 foundation)
+## CDC checkpoints and backup watermarks (M19 polish)
 
-Engine::cdc_checkpoint(consumer_id) persists a consumer's last delivered
-sequence under {data_dir}/cdc/cursors/{id}. Incremental kayactl backup
-remains a filesystem tree copy today; a later M19 step can use CDC checkpoints
-as watermarks for logical incremental export. See spec/docs/cdc-spec.md.
+`Engine::cdc_checkpoint(consumer_id)` persists a consumer's last delivered
+sequence under `{data_dir}/cdc/cursors/{id}`.
+
+Link a filesystem backup to that watermark:
+
+```bash
+# After consuming/checkpointing as consumer "backup":
+kayactl backup --data ./data/nodeN --out /backups/kaya/nodeN \
+  --incremental --cdc-consumer backup
+```
+
+This writes `dest/cdc/backup_watermark` with the consumer's durable sequence
+and includes `cdc_watermark` in `--json` output. See `spec/docs/cdc-spec.md`.
 
 ## Automation
 See `kayactl recover --dry-run` for inspecting a data directory before reuse.

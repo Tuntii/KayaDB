@@ -9,6 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (post-arc polish)
+- **2PC `Committing` state (byte 5):** `apply_txn_commit_2pc` durably writes `Committing` before materializing user keys; startup recovery finishes `Committing` (never aborts it); `Preparing`/`Prepared` still abort fail-closed
+- **ACL gate:** when PrefixAcl is configured, `CDC_POLL` / `CDC_CHECKPOINT` and `SPLIT_RANGE` / `MERGE_RANGE` require a client token that appears on some ACL rule (same as `TXN_BEGIN`)
+- **Docs residuals:** range meta table is process-local memory (restart loses dynamic splits); cross-group 2PC requires this node to be leader of all participant groups
+
+### Added (M16–M25 arc — production path complete)
+- **Arc close-out (2026-07-17):** M16–M25 documented production path closed. ROADMAP north-star re-eval: **v0.2.0 candidate** with residual risks listed honestly (no live range migrate, sequential 2PC + fail-closed recovery, no HLC uncertainty clamp, Jepsen grand matrix / minimal counterexample / scheduled profiling CI / Zig client / key rotation / Dashboard v2 still open). Not an unqualified production-SLA claim.
+
+### Added (M25 — Scale proof & ecosystem production path)
+- **Go client TXN + retries:** opcodes 9–12, `BeginTxn` / `Transaction` Get/Put/Delete/Commit/Rollback, `RetryPolicy` (exp backoff + full jitter + request timeout)
+- **TypeScript client:** `clients/kaya-ts/` zero-dep Node TCP (put/get/delete/health/hello, NOT_LEADER redirect, optional client token)
+- **Conformance v3:** MERGE_RANGE (17) + SPLIT_RANGE + txn edge vectors; Rust runner coverage
+- **Perf envelope v2:** `kaya-bench` smoke helpers `run_smoke_txn_multi_key` + `run_smoke_multi_range_2pc`; CI `perf_gate` loose budgets; `BENCHMARKS.md` + `spec/docs/benchmarking-spec.md` tables
+- **Deployment guide v2:** `docs/deployment-guide-v2.md` — M22–M24 flags (`--drain`, `--dashboard-addr`, `--encryption-key-file`, `--acl-file`), range ops, staging profile; linked from deployment/SLO/docs nav
+- SLO notes: multi-key / 2PC guidance in `docs/slo-envelope.md`
+- ROADMAP: M25 production path closed; M16–M25 arc complete as v0.2.0 candidate. *Out of path:* scheduled profiling CI, full Jepsen grand matrix, linearizability minimal counterexample, Zig client
+
+### Added (M24 — Production hardening path)
+- **Encryption-at-rest:** `EncryptedDisk` AES-256-GCM Disk wrapper (`KAYAENC1 | plain_len | nonce | ciphertext+tag`); server `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE` (32 raw bytes; v1 single key as KEK=DEK); contract + unit tests
+- **Per-prefix ACL:** `PrefixAcl` + `--acl-file` / `KAYA_ACL_FILE` (JSON `prefix → token`, UTF-8 or `0x`/`hex:`); longest-prefix authorize on PUT/GET/DELETE/SCAN/TXN_*; empty map denies all; IT `per_prefix_acl_two_tokens`
+- **Security docs:** `docs/security.md` enforcement table + §7 re-justified for M24 exit (encryption + ACL closed; key rotation and full multi-tenancy remain accepted risks)
+- ROADMAP: M24 production path closed. *Out of path:* online KEK/DEK rotation, full kernel+userspace eBPF attribution, io_uring completion tracing, stap/perf privileged CI, Dashboard v2
+
+### Added (M23 — Cross-shard transactions production path)
+- **2PC engine records (shared-engine):** `\x00txn/rec/{txn_id}` + `\x00txn/intent/{txn_id}/{key}`; `Engine::apply_txn_prepare` / `apply_txn_commit_2pc` / `apply_txn_abort_2pc`; commit materializes intents via `apply_mutations` (index+CDC fire)
+- **RaftCommand types 5/6/7:** `TxnPrepare` / `TxnCommit2pc` / `TxnAbort2pc` (types 1–4 layouts unchanged)
+- **Coordinator:** `txn_coord::commit_cross_group` on multi-group `TXN_COMMIT` (lex-smallest-key coordinator group); **sequential** prepare then commit/abort proposes; single-group stays type-4 `TxnCommit`; client opcodes unchanged (range-transparent)
+- **Recovery:** startup scan aborts local `Preparing`/`Prepared` (fail-closed); finishes `Committing` to `Committed` (durable decision); no global decision log
+- **TLA+ sketch:** `spec/specs/txn/TwoPhaseCommit.tla` + `.cfg` (prepare/decide/recover; TXN-2PC invariants)
+- **IT:** `test_cross_range_txn_commit`; multi-range bank `test_multi_range_bank_sum_invariant` (SI transfers across ranges, sum holds)
+- Spec: `spec/docs/transactions-spec.md` §17
+- ROADMAP: M23 production path closed. *Out of path:* parallel prepare/commit stretch, HLC uncertainty-interval clamp, multi-range Jepsen bank under full chaos matrix
+
+### Added (M22 — Rebalancing, merges & placement production path)
+- **Range merge (shared-engine):** `StaticRangeTable::merge_with_next` + wire `MERGE_RANGE` (17) + `kayactl range merge`; IT `test_range_merge_recombines`. Routing-only merge (no physical key move); orphan Raft group after merge stays hosted (reclaim follow-on)
+- **Leadership transfer:** admin `TRANSFER_LEADER` (18) — leader steps down for free election among voters (no TimeoutNow / forced target win); operator-token path; rolling-restart runbook note
+- **Learner replicas:** `ClusterMember.is_learner` (forward-compatible encode); learners receive log but do not vote or campaign; admin `PROMOTE_LEARNER` (19); learner remove allowed without voter-floor violation
+- **Advisory balancer:** `plan_range_count` + admin `REBALANCE_PLAN` (20) + `kayactl range rebalance-plan` — range-count heuristic only; **does not** move data, transfer leases, or change the meta table (no live migrate)
+- **Drain / decommission:** `kayadb-server --drain` / `KAYA_DRAIN=1`; STATS JSON `"drain": true|false`; draining node rejects `SPLIT_RANGE`; runbook `docs/runbooks/decommission-node.md` (transfer leaders → remove member → wipe `data_dir`)
+- **Dashboard v1:** optional `--dashboard-addr` read-only HTTP — `GET /health`, `/v1/ranges`, `/v1/raft`
+- Spec: `spec/docs/range-routing-spec.md` (merge algorithm, REBALANCE_PLAN advisory, exit table)
+- ROADMAP: M22 production path closed. *Out of path:* live range migrate, locality tags, auto size-threshold split
+
+### Added (M21 — Range metadata, routing & splits)
+- Epoch’d range descriptors + `StaticRangeTable::split_at` / meta_epoch (shared-engine routing split)
+- Runtime Raft group hosting on split (`ensure_group_hosted`)
+- Wire: `LIST_RANGES` (15), `SPLIT_RANGE` (16), `STATUS_RANGE_MOVED` (11)
+- Rust client: `list_ranges` / `split_range` + `RangeCache`
+- `kayactl --server … range list|split`
+- IT: `test_range_split_no_lost_writes`
+- Spec: `spec/docs/range-routing-spec.md`
+
+### Added (M18/M19 polish)
+- **Secondary indexes polish:** field extractors (`WholeValue` / `Prefix` / `Field`), meta v2, online backfill pause/resume/step, `verify_index` divergence gate, chaos churn test, `kayactl index create|list|drop|scan|verify|backfill`
+- **CDC polish:** `cdc_compact` (rewrite log below min consumer seq), backup watermark file + `kayactl backup --cdc-consumer`, crash/reopen failover continuity test
+- **CDC wire:** opcodes 13 (`CDC_POLL`) / 14 (`CDC_CHECKPOINT`); Rust `KayaClient` + Go `CdcPoll`/`CdcCheckpoint`; conformance vectors v2
+- Specs updated: `spec/docs/secondary-index-spec.md`, `spec/docs/cdc-spec.md`
+
 ### Added (M16–M20 production path close-out)
 - **Atomic multi-key SI commit:** `RaftCommand::TxnCommit` (type 4) — single Raft log entry; `txn_take_commit` + `Engine::apply_mutations`; no sequential N Put/Delete proposes
 - **HLC commit timestamps:** `EngineConfig.use_hlc` + `WalWriter::ensure_min_sequence`; multi-group ClusterNode auto-enables HLC

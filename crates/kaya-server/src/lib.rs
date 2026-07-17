@@ -1,8 +1,10 @@
+pub mod acl;
 pub mod apply_index;
 pub mod audit;
 pub mod client_auth;
 pub mod cluster;
 pub mod command;
+pub mod dashboard;
 pub mod membership;
 pub mod metrics;
 pub mod operator_auth;

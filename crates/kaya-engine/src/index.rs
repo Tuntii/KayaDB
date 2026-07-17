@@ -1,9 +1,12 @@
-//! Secondary indexes foundation (M18).
+//! Secondary indexes (M18 + polish).
 //!
-//! MVP model: an index maps **full primary value → primary key** for user keys under a
+//! An index maps **extracted secondary key → primary key** for user keys under a
 //! configured `primary_prefix`. Index metadata and entries live under the reserved
 //! system key space `\x00idx/…` and are maintained on the non-txn `put`/`delete` path
 //! (and therefore also when `txn_commit` materializes intents via those paths).
+//!
+//! Polish (beyond foundation): field extractors, online backfill pause/resume,
+//! `verify_index` divergence checker.
 
 use std::collections::BTreeMap;
 
@@ -19,7 +22,180 @@ pub const INDEX_META_PREFIX: &[u8] = b"\x00idx/meta/";
 /// Data entry key prefix (binary layout follows; see encoding helpers).
 pub const INDEX_DATA_PREFIX: &[u8] = b"\x00idx/data/";
 
-const META_VERSION: u8 = 1;
+const META_VERSION_V1: u8 = 1;
+const META_VERSION_V2: u8 = 2;
+
+/// How the secondary key is derived from a primary value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexExtractor {
+    /// Secondary key = full primary value (default / foundation).
+    WholeValue,
+    /// First `len` bytes of the value (or the whole value if shorter).
+    Prefix { len: u16 },
+    /// Split value by `delimiter`, take 0-based field `index`.
+    /// Missing field → no secondary (entry skipped / removed).
+    Field { delimiter: u8, index: u16 },
+}
+
+impl Default for IndexExtractor {
+    fn default() -> Self {
+        Self::WholeValue
+    }
+}
+
+impl IndexExtractor {
+    /// Extract the secondary key from a primary value, if present.
+    pub fn extract(&self, value: &[u8]) -> Option<Bytes> {
+        match self {
+            Self::WholeValue => Some(value.to_vec()),
+            Self::Prefix { len } => {
+                let n = (*len as usize).min(value.len());
+                Some(value[..n].to_vec())
+            }
+            Self::Field { delimiter, index } => {
+                let mut start = 0usize;
+                let mut field_i = 0u16;
+                for (i, &b) in value.iter().enumerate() {
+                    if b == *delimiter {
+                        if field_i == *index {
+                            return Some(value[start..i].to_vec());
+                        }
+                        field_i = field_i.saturating_add(1);
+                        start = i + 1;
+                    }
+                }
+                if field_i == *index {
+                    Some(value[start..].to_vec())
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn tag(&self) -> u8 {
+        match self {
+            Self::WholeValue => 0,
+            Self::Prefix { .. } => 1,
+            Self::Field { .. } => 2,
+        }
+    }
+
+    fn encode_params(&self) -> Vec<u8> {
+        match self {
+            Self::WholeValue => Vec::new(),
+            Self::Prefix { len } => len.to_be_bytes().to_vec(),
+            Self::Field { delimiter, index } => {
+                let mut v = Vec::with_capacity(3);
+                v.push(*delimiter);
+                v.extend_from_slice(&index.to_be_bytes());
+                v
+            }
+        }
+    }
+
+    fn decode(tag: u8, params: &[u8]) -> Result<Self> {
+        match tag {
+            0 => Ok(Self::WholeValue),
+            1 => {
+                if params.len() != 2 {
+                    return Err(KayaError::corruption("index extractor prefix params"));
+                }
+                Ok(Self::Prefix {
+                    len: u16::from_be_bytes(params.try_into().unwrap()),
+                })
+            }
+            2 => {
+                if params.len() != 3 {
+                    return Err(KayaError::corruption("index extractor field params"));
+                }
+                Ok(Self::Field {
+                    delimiter: params[0],
+                    index: u16::from_be_bytes(params[1..3].try_into().unwrap()),
+                })
+            }
+            other => Err(KayaError::corruption(format!(
+                "unknown index extractor tag {other}"
+            ))),
+        }
+    }
+}
+
+/// Online backfill status for an index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackfillStatus {
+    /// No online backfill in progress (sync create finished, or idle).
+    Idle,
+    /// Backfill running; more steps available.
+    Running,
+    /// Backfill paused by operator; resume continues from cursor.
+    Paused,
+    /// Online backfill completed.
+    Complete,
+}
+
+/// Progress of online index backfill.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillProgress {
+    pub status: BackfillStatus,
+    pub scanned: u64,
+    pub indexed: u64,
+    /// Exclusive lower bound for the next scan batch (`None` = start).
+    pub last_key: Option<Bytes>,
+}
+
+impl Default for BackfillProgress {
+    fn default() -> Self {
+        Self {
+            status: BackfillStatus::Idle,
+            scanned: 0,
+            indexed: 0,
+            last_key: None,
+        }
+    }
+}
+
+/// How `create_index` performs the initial backfill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackfillMode {
+    /// Scan and index all matching keys before returning (foundation behaviour).
+    #[default]
+    Sync,
+    /// Register the index immediately; operator drives `index_backfill_step`.
+    Online,
+}
+
+/// Options for creating a secondary index.
+#[derive(Debug, Clone)]
+pub struct CreateIndexOptions {
+    pub extractor: IndexExtractor,
+    pub backfill: BackfillMode,
+}
+
+impl Default for CreateIndexOptions {
+    fn default() -> Self {
+        Self {
+            extractor: IndexExtractor::WholeValue,
+            backfill: BackfillMode::Sync,
+        }
+    }
+}
+
+/// Kind of index↔primary divergence found by [`Engine::verify_index`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexDivergenceKind {
+    /// Primary key has a value that should be indexed but no entry exists.
+    MissingInIndex { expected_secondary: Bytes },
+    /// Index entry exists but primary is missing or value no longer extracts to it.
+    ExtraInIndex { secondary: Bytes },
+}
+
+/// A single divergence report from [`Engine::verify_index`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexDivergence {
+    pub primary_key: Bytes,
+    pub kind: IndexDivergenceKind,
+}
 
 /// In-memory / durable index definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +205,8 @@ pub struct IndexDef {
     pub primary_prefix: Bytes,
     /// Unique secondary values (always `false` in this foundation).
     pub unique: bool,
+    /// How secondary keys are extracted from primary values.
+    pub extractor: IndexExtractor,
 }
 
 /// True if `key` is in the reserved index system space.
@@ -40,6 +218,11 @@ pub(crate) fn reject_if_system_key(key: &[u8]) -> Result<()> {
     if is_index_system_key(key) {
         return Err(KayaError::invalid_argument(
             "keys under reserved system prefix \\x00idx/ are not writable via public API",
+        ));
+    }
+    if crate::txn2pc::is_txn_system_key(key) {
+        return Err(KayaError::invalid_argument(
+            "keys under reserved system prefix \\x00txn/ are not writable via public API",
         ));
     }
     Ok(())
@@ -73,36 +256,75 @@ fn name_from_meta_key(key: &[u8]) -> Option<&str> {
     std::str::from_utf8(rest).ok()
 }
 
-/// Binary meta value: version u8 | unique u8 | prefix_len u32be | primary_prefix.
+/// Binary meta value v2:
+/// `version u8 | unique u8 | extractor_tag u8 | params_len u16be | params | prefix_len u32be | primary_prefix`
+///
+/// v1 (legacy): `version=1 | unique | prefix_len u32be | primary_prefix` → WholeValue.
 pub(crate) fn encode_meta_value(def: &IndexDef) -> Bytes {
-    let mut v = Vec::with_capacity(6 + def.primary_prefix.len());
-    v.push(META_VERSION);
+    let params = def.extractor.encode_params();
+    let mut v = Vec::with_capacity(1 + 1 + 1 + 2 + params.len() + 4 + def.primary_prefix.len());
+    v.push(META_VERSION_V2);
     v.push(u8::from(def.unique));
+    v.push(def.extractor.tag());
+    v.extend_from_slice(&(params.len() as u16).to_be_bytes());
+    v.extend_from_slice(&params);
     v.extend_from_slice(&(def.primary_prefix.len() as u32).to_be_bytes());
     v.extend_from_slice(&def.primary_prefix);
     v
 }
 
 pub(crate) fn decode_meta_value(name: &str, value: &[u8]) -> Result<IndexDef> {
-    if value.len() < 6 {
-        return Err(KayaError::corruption("index meta value too short"));
+    if value.is_empty() {
+        return Err(KayaError::corruption("index meta value empty"));
     }
     let version = value[0];
-    if version != META_VERSION {
-        return Err(KayaError::corruption(format!(
-            "unsupported index meta version {version}"
-        )));
+    match version {
+        META_VERSION_V1 => {
+            if value.len() < 6 {
+                return Err(KayaError::corruption("index meta value too short"));
+            }
+            let unique = value[1] != 0;
+            let prefix_len = u32::from_be_bytes(value[2..6].try_into().unwrap()) as usize;
+            if value.len() != 6 + prefix_len {
+                return Err(KayaError::corruption("index meta value length mismatch"));
+            }
+            Ok(IndexDef {
+                name: name.to_string(),
+                primary_prefix: value[6..].to_vec(),
+                unique,
+                extractor: IndexExtractor::WholeValue,
+            })
+        }
+        META_VERSION_V2 => {
+            if value.len() < 9 {
+                return Err(KayaError::corruption("index meta v2 too short"));
+            }
+            let unique = value[1] != 0;
+            let tag = value[2];
+            let params_len = u16::from_be_bytes(value[3..5].try_into().unwrap()) as usize;
+            if value.len() < 5 + params_len + 4 {
+                return Err(KayaError::corruption("index meta v2 truncated"));
+            }
+            let params = &value[5..5 + params_len];
+            let extractor = IndexExtractor::decode(tag, params)?;
+            let rest = &value[5 + params_len..];
+            let prefix_len = u32::from_be_bytes(rest[0..4].try_into().unwrap()) as usize;
+            if rest.len() != 4 + prefix_len {
+                return Err(KayaError::corruption(
+                    "index meta v2 prefix length mismatch",
+                ));
+            }
+            Ok(IndexDef {
+                name: name.to_string(),
+                primary_prefix: rest[4..].to_vec(),
+                unique,
+                extractor,
+            })
+        }
+        other => Err(KayaError::corruption(format!(
+            "unsupported index meta version {other}"
+        ))),
     }
-    let unique = value[1] != 0;
-    let prefix_len = u32::from_be_bytes(value[2..6].try_into().unwrap()) as usize;
-    if value.len() != 6 + prefix_len {
-        return Err(KayaError::corruption("index meta value length mismatch"));
-    }
-    Ok(IndexDef {
-        name: name.to_string(),
-        primary_prefix: value[6..].to_vec(),
-        unique,
-    })
 }
 
 /// Data key layout (prefix-scan friendly on secondary):
@@ -161,22 +383,28 @@ pub(crate) fn decode_data_key(name: &str, key: &[u8]) -> Option<(Bytes, Bytes)> 
 }
 
 impl<D: Disk> Engine<D> {
-    /// Create a secondary index over keys with `primary_prefix`.
-    ///
-    /// Secondary key = full primary value (MVP extraction). Existing matching
-    /// keys are backfilled best-effort in this call.
+    /// Create a secondary index over keys with `primary_prefix` (sync backfill, whole value).
     pub async fn create_index(&mut self, name: &str, primary_prefix: &[u8]) -> Result<()> {
+        self.create_index_with(name, primary_prefix, CreateIndexOptions::default())
+            .await
+    }
+
+    /// Create a secondary index with extractor and backfill mode.
+    pub async fn create_index_with(
+        &mut self,
+        name: &str,
+        primary_prefix: &[u8],
+        opts: CreateIndexOptions,
+    ) -> Result<()> {
         validate_index_name(name)?;
         if self.indexes.contains_key(name) {
             return Err(KayaError::invalid_argument(format!(
                 "index {name:?} already exists"
             )));
         }
-        // Reject empty prefix only as "all keys" if explicitly allowed — MVP requires
-        // a non-empty primary prefix to avoid accidental full-space indexes.
         if primary_prefix.is_empty() {
             return Err(KayaError::invalid_argument(
-                "primary_prefix must be non-empty in M18 foundation",
+                "primary_prefix must be non-empty",
             ));
         }
         self.validate_key(primary_prefix)?;
@@ -185,22 +413,72 @@ impl<D: Disk> Engine<D> {
             name: name.to_string(),
             primary_prefix: primary_prefix.to_vec(),
             unique: false,
+            extractor: opts.extractor,
         };
         let meta_key = encode_meta_key(name);
         let meta_val = encode_meta_value(&def);
-        let opts = WriteOptions::default();
-        self.write_put(meta_key, meta_val, opts.clone()).await?;
+        let write_opts = WriteOptions::default();
+        self.write_put(meta_key, meta_val, write_opts.clone())
+            .await?;
         self.indexes.insert(name.to_string(), def);
+        self.index_backfill.insert(
+            name.to_string(),
+            match opts.backfill {
+                BackfillMode::Sync => BackfillProgress {
+                    status: BackfillStatus::Idle,
+                    ..Default::default()
+                },
+                BackfillMode::Online => BackfillProgress {
+                    status: BackfillStatus::Running,
+                    scanned: 0,
+                    indexed: 0,
+                    last_key: None,
+                },
+            },
+        );
 
-        // Best-effort backfill of current latest values under the prefix.
+        match opts.backfill {
+            BackfillMode::Sync => {
+                self.run_sync_backfill(name, primary_prefix, &write_opts)
+                    .await?;
+            }
+            BackfillMode::Online => {
+                // Operator drives steps via `index_backfill_step`.
+            }
+        }
+        Ok(())
+    }
+
+    async fn run_sync_backfill(
+        &mut self,
+        name: &str,
+        primary_prefix: &[u8],
+        opts: &WriteOptions,
+    ) -> Result<()> {
         let existing = self.scan_prefix_inner(primary_prefix, ScanOptions::default())?;
+        let mut scanned = 0u64;
+        let mut indexed = 0u64;
         for kv in existing {
             if is_index_system_key(&kv.key) {
                 continue;
             }
-            self.insert_index_entries_for(&kv.key, &kv.value, &opts)
-                .await?;
+            scanned += 1;
+            if self
+                .insert_index_entries_for_named(name, &kv.key, &kv.value, opts)
+                .await?
+            {
+                indexed += 1;
+            }
         }
+        self.index_backfill.insert(
+            name.to_string(),
+            BackfillProgress {
+                status: BackfillStatus::Complete,
+                scanned,
+                indexed,
+                last_key: None,
+            },
+        );
         Ok(())
     }
 
@@ -209,7 +487,12 @@ impl<D: Disk> Engine<D> {
         self.indexes.keys().cloned().collect()
     }
 
-    /// Drop index metadata and all data entries.
+    /// Return a clone of the index definition, if present.
+    pub fn get_index(&self, name: &str) -> Option<IndexDef> {
+        self.indexes.get(name).cloned()
+    }
+
+    /// Drop index metadata, data entries, and backfill state.
     pub async fn drop_index(&mut self, name: &str) -> Result<()> {
         if !self.indexes.contains_key(name) {
             return Err(KayaError::invalid_argument(format!(
@@ -220,13 +503,13 @@ impl<D: Disk> Engine<D> {
         let scan_prefix = encode_data_scan_prefix(name, b"");
         let entries = self.scan_prefix_inner(&scan_prefix, ScanOptions::default())?;
         for kv in entries {
-            // Only delete keys that decode as this index's data entries.
             if decode_data_key(name, &kv.key).is_some() {
                 self.write_delete(kv.key, opts.clone()).await?;
             }
         }
         self.write_delete(encode_meta_key(name), opts).await?;
         self.indexes.remove(name);
+        self.index_backfill.remove(name);
         Ok(())
     }
 
@@ -248,14 +531,185 @@ impl<D: Disk> Engine<D> {
         let mut out = Vec::with_capacity(items.len());
         for kv in items {
             if let Some((sec, pk)) = decode_data_key(name, &kv.key) {
-                // Enforce prefix match (scan_prefix is byte-prefix; always true when
-                // encoding is correct, but guard against meta/data key collisions).
                 if sec.starts_with(value_prefix) {
                     out.push((sec, pk));
                 }
             }
         }
         Ok(out)
+    }
+
+    /// Current backfill progress for an index (defaults to Idle if never tracked).
+    pub fn index_backfill_status(&self, name: &str) -> Result<BackfillProgress> {
+        if !self.indexes.contains_key(name) {
+            return Err(KayaError::invalid_argument(format!(
+                "unknown index {name:?}"
+            )));
+        }
+        Ok(self.index_backfill.get(name).cloned().unwrap_or_default())
+    }
+
+    /// Pause an online backfill (no-op if already paused/complete/idle).
+    pub fn index_backfill_pause(&mut self, name: &str) -> Result<BackfillProgress> {
+        if !self.indexes.contains_key(name) {
+            return Err(KayaError::invalid_argument(format!(
+                "unknown index {name:?}"
+            )));
+        }
+        let prog = self.index_backfill.entry(name.to_string()).or_default();
+        if prog.status == BackfillStatus::Running {
+            prog.status = BackfillStatus::Paused;
+        }
+        Ok(prog.clone())
+    }
+
+    /// Resume a paused online backfill.
+    pub fn index_backfill_resume(&mut self, name: &str) -> Result<BackfillProgress> {
+        if !self.indexes.contains_key(name) {
+            return Err(KayaError::invalid_argument(format!(
+                "unknown index {name:?}"
+            )));
+        }
+        let prog = self.index_backfill.entry(name.to_string()).or_default();
+        match prog.status {
+            BackfillStatus::Paused | BackfillStatus::Idle => {
+                // Idle → treat as starting online backfill from scratch/cursor.
+                if prog.status == BackfillStatus::Idle
+                    && prog.last_key.is_none()
+                    && prog.scanned == 0
+                {
+                    // Allow resume of a sync-created index as a re-scan (operator-driven).
+                }
+                prog.status = BackfillStatus::Running;
+            }
+            BackfillStatus::Complete => {
+                return Err(KayaError::invalid_argument(format!(
+                    "index {name:?} backfill already complete"
+                )));
+            }
+            BackfillStatus::Running => {}
+        }
+        Ok(prog.clone())
+    }
+
+    /// Process up to `batch_size` primary keys for online backfill.
+    ///
+    /// Returns updated progress. Requires status `Running` (call resume after pause).
+    pub async fn index_backfill_step(
+        &mut self,
+        name: &str,
+        batch_size: usize,
+    ) -> Result<BackfillProgress> {
+        if batch_size == 0 {
+            return self.index_backfill_status(name);
+        }
+        let def = self
+            .indexes
+            .get(name)
+            .cloned()
+            .ok_or_else(|| KayaError::invalid_argument(format!("unknown index {name:?}")))?;
+
+        let mut prog = self.index_backfill.get(name).cloned().unwrap_or_default();
+        if prog.status == BackfillStatus::Paused {
+            return Err(KayaError::invalid_argument(format!(
+                "index {name:?} backfill is paused; resume first"
+            )));
+        }
+        if prog.status == BackfillStatus::Complete {
+            return Ok(prog);
+        }
+        prog.status = BackfillStatus::Running;
+
+        let prefix = def.primary_prefix.clone();
+        let all = self.scan_prefix_inner(&prefix, ScanOptions::default())?;
+        let start_after = prog.last_key.clone();
+        let opts = WriteOptions::default();
+        let mut processed = 0usize;
+
+        for kv in all {
+            if is_index_system_key(&kv.key) {
+                continue;
+            }
+            if let Some(ref last) = start_after {
+                if kv.key.as_slice() <= last.as_slice() {
+                    continue;
+                }
+            }
+            prog.scanned += 1;
+            if self
+                .insert_index_entries_for_named(name, &kv.key, &kv.value, &opts)
+                .await?
+            {
+                prog.indexed += 1;
+            }
+            prog.last_key = Some(kv.key.clone());
+            processed += 1;
+            if processed >= batch_size {
+                self.index_backfill.insert(name.to_string(), prog.clone());
+                return Ok(prog);
+            }
+        }
+
+        prog.status = BackfillStatus::Complete;
+        self.index_backfill.insert(name.to_string(), prog.clone());
+        Ok(prog)
+    }
+
+    /// Verify index entries against current primary values (divergence gate).
+    ///
+    /// Empty result means the index is consistent for the current latest snapshot.
+    pub async fn verify_index(&mut self, name: &str) -> Result<Vec<IndexDivergence>> {
+        let def = self
+            .indexes
+            .get(name)
+            .cloned()
+            .ok_or_else(|| KayaError::invalid_argument(format!("unknown index {name:?}")))?;
+
+        let mut divergences = Vec::new();
+        let mut expected: BTreeMap<Bytes, Bytes> = BTreeMap::new(); // primary -> secondary
+
+        let primaries = self.scan_prefix_inner(&def.primary_prefix, ScanOptions::default())?;
+        for kv in primaries {
+            if is_index_system_key(&kv.key) {
+                continue;
+            }
+            if let Some(sec) = def.extractor.extract(&kv.value) {
+                expected.insert(kv.key.clone(), sec);
+            }
+        }
+
+        let idx_entries =
+            self.scan_prefix_inner(&encode_data_scan_prefix(name, b""), ScanOptions::default())?;
+        let mut seen_primary: BTreeMap<Bytes, Bytes> = BTreeMap::new();
+        for kv in idx_entries {
+            let Some((sec, pk)) = decode_data_key(name, &kv.key) else {
+                continue;
+            };
+            match expected.get(&pk) {
+                Some(exp_sec) if exp_sec == &sec => {
+                    seen_primary.insert(pk, sec);
+                }
+                Some(_) | None => {
+                    divergences.push(IndexDivergence {
+                        primary_key: pk.clone(),
+                        kind: IndexDivergenceKind::ExtraInIndex { secondary: sec },
+                    });
+                }
+            }
+        }
+
+        for (pk, sec) in &expected {
+            if !seen_primary.contains_key(pk) {
+                divergences.push(IndexDivergence {
+                    primary_key: pk.clone(),
+                    kind: IndexDivergenceKind::MissingInIndex {
+                        expected_secondary: sec.clone(),
+                    },
+                });
+            }
+        }
+
+        Ok(divergences)
     }
 
     /// Load durable index metadata into `self.indexes` (called from `open`).
@@ -270,6 +724,20 @@ impl<D: Disk> Engine<D> {
             map.insert(def.name.clone(), def);
         }
         self.indexes = map;
+        // Backfill state is ephemeral (not durable); mark Complete for recovered indexes.
+        self.index_backfill = self
+            .indexes
+            .keys()
+            .map(|n| {
+                (
+                    n.clone(),
+                    BackfillProgress {
+                        status: BackfillStatus::Complete,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
         Ok(())
     }
 
@@ -294,27 +762,27 @@ impl<D: Disk> Engine<D> {
             return Ok(());
         }
 
-        if let Some(old) = old_value {
-            if old != new_value {
-                for def in &matching {
-                    let old_ik = encode_data_key(&def.name, old, key);
-                    self.write_delete(old_ik, opts.clone()).await?;
-                }
-            } else {
-                // Value unchanged → index entry already correct (if present).
-                // Still ensure entry exists (covers create-after-write edge).
-                for def in &matching {
-                    let ik = encode_data_key(&def.name, new_value, key);
-                    if self.get_inner(&ik, ReadTimestamp::Latest)?.is_none() {
-                        self.write_put(ik, Bytes::new(), opts.clone()).await?;
+        for def in &matching {
+            if let Some(old) = old_value {
+                if let Some(old_sec) = def.extractor.extract(old) {
+                    let new_sec = def.extractor.extract(new_value);
+                    if new_sec.as_ref() != Some(&old_sec) {
+                        let old_ik = encode_data_key(&def.name, &old_sec, key);
+                        self.write_delete(old_ik, opts.clone()).await?;
+                    } else if let Some(ref sec) = new_sec {
+                        // Unchanged secondary: ensure entry exists.
+                        let ik = encode_data_key(&def.name, sec, key);
+                        if self.get_inner(&ik, ReadTimestamp::Latest)?.is_none() {
+                            self.write_put(ik, Bytes::new(), opts.clone()).await?;
+                        }
+                        continue;
                     }
                 }
-                return Ok(());
             }
-        }
-        for def in &matching {
-            let ik = encode_data_key(&def.name, new_value, key);
-            self.write_put(ik, Bytes::new(), opts.clone()).await?;
+            if let Some(sec) = def.extractor.extract(new_value) {
+                let ik = encode_data_key(&def.name, &sec, key);
+                self.write_put(ik, Bytes::new(), opts.clone()).await?;
+            }
         }
         Ok(())
     }
@@ -332,36 +800,41 @@ impl<D: Disk> Engine<D> {
         let Some(old) = old_value else {
             return Ok(());
         };
-        let matching: Vec<String> = self
+        let matching: Vec<IndexDef> = self
             .indexes
             .values()
             .filter(|d| key.starts_with(&d.primary_prefix))
-            .map(|d| d.name.clone())
+            .cloned()
             .collect();
-        for name in matching {
-            let ik = encode_data_key(&name, old, key);
-            self.write_delete(ik, opts.clone()).await?;
+        for def in matching {
+            if let Some(sec) = def.extractor.extract(old) {
+                let ik = encode_data_key(&def.name, &sec, key);
+                self.write_delete(ik, opts.clone()).await?;
+            }
         }
         Ok(())
     }
 
-    async fn insert_index_entries_for(
+    /// Insert index entry for one named index. Returns true if an entry was written.
+    async fn insert_index_entries_for_named(
         &mut self,
+        name: &str,
         key: &[u8],
         value: &[u8],
         opts: &WriteOptions,
-    ) -> Result<()> {
-        let matching: Vec<String> = self
-            .indexes
-            .values()
-            .filter(|d| key.starts_with(&d.primary_prefix))
-            .map(|d| d.name.clone())
-            .collect();
-        for name in matching {
-            let ik = encode_data_key(&name, value, key);
-            self.write_put(ik, Bytes::new(), opts.clone()).await?;
+    ) -> Result<bool> {
+        let Some(def) = self.indexes.get(name).cloned() else {
+            return Ok(false);
+        };
+        if !key.starts_with(&def.primary_prefix) {
+            return Ok(false);
         }
-        Ok(())
+        let Some(sec) = def.extractor.extract(value) else {
+            return Ok(false);
+        };
+        let ik = encode_data_key(name, &sec, key);
+        self.write_put(ik, Bytes::new(), opts.clone()).await?;
+        Ok(true)
     }
 
     /// Raw put (WAL + memtable) without index maintenance or system-key rejection.
@@ -467,14 +940,43 @@ mod encoding_tests {
     }
 
     #[test]
-    fn meta_value_roundtrip() {
+    fn meta_value_roundtrip_v2() {
         let def = IndexDef {
             name: "x".into(),
             primary_prefix: b"user:".to_vec(),
             unique: false,
+            extractor: IndexExtractor::Field {
+                delimiter: b'|',
+                index: 1,
+            },
         };
         let v = encode_meta_value(&def);
         let got = decode_meta_value("x", &v).unwrap();
         assert_eq!(got, def);
+    }
+
+    #[test]
+    fn meta_value_v1_legacy_decodes() {
+        // Hand-build v1: version=1, unique=0, prefix_len=5, "user:"
+        let mut v = vec![1u8, 0];
+        v.extend_from_slice(&5u32.to_be_bytes());
+        v.extend_from_slice(b"user:");
+        let got = decode_meta_value("legacy", &v).unwrap();
+        assert_eq!(got.extractor, IndexExtractor::WholeValue);
+        assert_eq!(got.primary_prefix, b"user:");
+    }
+
+    #[test]
+    fn extractor_field_and_prefix() {
+        let f = IndexExtractor::Field {
+            delimiter: b',',
+            index: 1,
+        };
+        assert_eq!(f.extract(b"a,b,c").as_deref(), Some(b"b".as_slice()));
+        assert_eq!(f.extract(b"only").as_deref(), None);
+
+        let p = IndexExtractor::Prefix { len: 3 };
+        assert_eq!(p.extract(b"abcdef").as_deref(), Some(b"abc".as_slice()));
+        assert_eq!(p.extract(b"ab").as_deref(), Some(b"ab".as_slice()));
     }
 }

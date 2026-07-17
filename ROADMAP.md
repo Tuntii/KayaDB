@@ -1,7 +1,7 @@
 # KayaDB Development Roadmap
 
 **Status:** Living roadmap  
-**Last updated:** 2026-07-12 (M16–M20 production path closed — atomic TxnCommit, HLC, multi-raft ClusterNode; M21+ open)
+**Last updated:** 2026-07-17 (M16–M25 production path complete; v0.2.0 candidate)
 
 > **"Geniş ve yaşayan yol haritası"** — Bu belge hem tarihi başarıları arşivler, hem şu anki odak noktalarını gösterir, hem de uzun vadeli vizyonu (birden fazla paralel track ile) detaylandırır. Tasarım-öncelikli ve correctness-öncelikli felsefe korunur.
 
@@ -76,32 +76,53 @@ Goal: close post-M14 parallel-track gaps across security, client ecosystem, obse
 
 ## Next arc: M16–M25 — Distributed Transactional KV
 
-**Status (2026-07-12):** **M16–M20 production path closed** on branch work (atomic multi-key `TxnCommit`, HLC commit timestamps, multi-raft `ClusterNode` + static ranges). M21–M25 remain open. We still do **not** claim full v0.2.0 / north-star production readiness until M24–M25 exit gates.
+**Status (2026-07-17):** **M16–M25 production path complete.** MVCC → single-group SI → index/CDC → multi-raft → range split/merge/placement → cross-shard 2PC → encryption/ACL → ecosystem/scale-proof gates are closed for the *documented production path*. North-star re-eval below.
 
-**Hedef kimlik (M25):** range sharding + multi-raft + **cross-shard transaction** (Raft üzerine 2PC) — CockroachDB/TiKV çekirdeği sınıfında, adım adım kanıtlanarak. API yüzeyi programatik kalır: **KV + txn + secondary index** (SQL yok; post-M25 v2 adayı). Sıralama: **önce transaction, sonra sharding** — cross-shard txn zaten MVCC + timestamp altyapısı ister; önce tek grupta Jepsen'le kanıtla, sonra dağıt.
+**Hedef kimlik (shipped path):** range sharding + multi-raft + **cross-shard transaction** (Raft üzerine 2PC) — CockroachDB/TiKV çekirdeği sınıfında, adım adım kanıtlanarak. API yüzeyi programatik: **KV + txn + secondary index** (SQL yok; post-arc v2 adayı).
 
-Her milestone değişmez disiplini korur: **spec → sim → gerçek implementasyon → chaos/Jepsen exit gate → docs/CHANGELOG sync**. v0.1.47'deki deferred kalemlerin tamamı bu arc'ta somut bir eve yerleşti (aşağıda ⬅ işaretli).
+Her milestone değişmez disiplini korur: **spec → sim → gerçek implementasyon → chaos/Jepsen exit gate → docs/CHANGELOG sync**.
 
 ### Faz 1 — Transaction çekirdeği (tek Raft grubu)
 
 1. **M16 — MVCC storage foundation ✅** — Complete (2026-07-12): multi-version memtable (typed `InternalKey`), SSTable v4, engine `get_at` / `ReadTimestamp::At`, compaction GC watermark, versioned sim `RefModel` + MVCC crash properties, `kayactl inspect` v4. *Exit met:* snapshot-read + GC safety in sim; workspace tests green.
 2. **M17 — Single-group ACID transactions ✅ production path** — Complete (2026-07-12): SI write intents, TXN opcodes 9–12, Rust client txn API, TLA+ commit model (`spec/specs/txn/`), bank workload. **Production close-out:** atomic `RaftCommand::TxnCommit` (type 4) — single log entry for multi-key commit (no sequential N Put/Delete). Spec: `spec/docs/transactions-spec.md`. *Exit met:* SI + wire/client + TLA+ + bank + Raft atomic commit path green.
-3. **M18 — Secondary indexes ✅ production path** — Complete (2026-07-12): engine-local secondary indexes; maintenance on put/delete **and** Raft `apply_mutations` / `TxnCommit` apply (same paths). Spec: `spec/docs/secondary-index-spec.md`. *Remaining polish:* field extractors, online backfill pause/resume, chaos divergence gate, `kayactl index`, conformance v2.
-4. **M19 — CDC / changefeeds ✅ production path** — Complete (2026-07-12): file CDC on put/delete; fires on Raft apply (shared put/delete path). Spec: `spec/docs/cdc-spec.md`. *Remaining polish:* dedicated Raft-log CDC / TCP+Go subscribe, failover chaos gate, log compaction, `backup --incremental` CDC watermark link.
+3. **M18 — Secondary indexes ✅ production path + polish** — Complete (2026-07-12 path; polish 2026-07-16): engine-local secondary indexes; maintenance on put/delete **and** Raft apply. **Polish:** field extractors (`WholeValue` / `Prefix` / `Field`), online backfill pause/resume/step, `verify_index` chaos divergence gate, `kayactl index create|list|drop|scan|verify|backfill`, meta v2. Spec: `spec/docs/secondary-index-spec.md`.
+4. **M19 — CDC / changefeeds ✅ production path + polish** — Complete (2026-07-12 path; polish 2026-07-16): file CDC on put/delete; fires on Raft apply. **Polish:** TCP opcodes 13/14 + Rust/Go subscribe, crash/reopen failover gate, `cdc_compact`, `kayactl backup --cdc-consumer` watermark, conformance v2 CDC vectors. Spec: `spec/docs/cdc-spec.md`.
 
 ### Faz 2 — Dağıtım (multi-raft + sharding)
 
-5. **M20 — Multi-raft foundation ✅ production path** — Complete (2026-07-12): Envelope.group_id; per-group storage; MultiRaftHost + StaticRangeTable; HLC; **ClusterNode always hosts MultiRaftHost (≥ group 0)** with static range routing; HLC commit_ts via `EngineConfig.use_hlc` / multi-group auto-enable. Spec: `spec/docs/multi-raft-spec.md`. *IT:* `test_multi_raft_static_ranges_put_get`. *Follow-on (M21+):* dynamic splits / RANGE_MOVED, cross-group 2PC (M23), per-range Jepsen, full OTel trace-context, live clock-skew nemesis.
-6. **M21 — Range metadata, routing & splits ⬜** — Meta range (epoch'lu descriptor tablosu), client range cache + `RANGE_MOVED` retry, batch op bölme, boyut eşikli dinamik split (önce sim'de), `kayactl range`. *Exit:* yük altında split sırasında sıfır kayıp yazma.
-7. **M22 — Rebalancing, merges & placement ⬜** — Learner→promote replica taşıma, lease/leadership transfer, store-bazlı balancer + locality etiketleri, cold-range merge, decommission runbook. ⬅ *Dashboard v1* (read-only cluster/range viewer). *Exit:* chaos altında node add/drain/decommission kesintisiz.
-8. **M23 — Cross-shard transactions ⬜** — Raft üzerine 2PC (txn record + intents, coordinator crash recovery), HLC commit ts + uncertainty interval, parallel-commit stretch. ⬅ *TLA+ genişletme (2/2):* 2PC + recovery modeli. *Exit:* multi-range Jepsen bank, split+merge+rebalance+kill+partition kombinasyonu altında yeşil.
+5. **M20 — Multi-raft foundation ✅ production path** — Complete (2026-07-12): Envelope.group_id; per-group storage; MultiRaftHost + StaticRangeTable; HLC; **ClusterNode always hosts MultiRaftHost (≥ group 0)** with static range routing; HLC commit_ts via `EngineConfig.use_hlc` / multi-group auto-enable. Spec: `spec/docs/multi-raft-spec.md`. *IT:* `test_multi_raft_static_ranges_put_get`.
+6. **M21 — Range metadata, routing & splits ✅** — Complete (2026-07-16): epoch’d meta range table (`StaticRangeTable` / `RangeTable`), `split_at` + runtime group host, wire `LIST_RANGES` (15) / `SPLIT_RANGE` (16), `STATUS_RANGE_MOVED` (11), client `list_ranges`/`split_range` cache, `kayactl range list|split`, IT `test_range_split_no_lost_writes`. Spec: `spec/docs/range-routing-spec.md`. *Shared-engine routing split* (no physical key move).
+7. **M22 — Rebalancing, merges & placement ✅ production path** — Complete (2026-07-17): shared-engine `merge_with_next` + wire `MERGE_RANGE` (17) + `kayactl range merge` (no physical key move; orphan group reclaim follow-on); admin `TRANSFER_LEADER` (18) (step-down; no TimeoutNow); learner membership flag + `PROMOTE_LEARNER` (19) (learners receive log, do not vote/campaign); **advisory** `REBALANCE_PLAN` (20) range-count heuristic (**no live migrate / MOVE_RANGE**); drain mode (`--drain` / `KAYA_DRAIN`) + decommission runbook; Dashboard v1 read-only HTTP (`--dashboard-addr`: `/health`, `/v1/ranges`, `/v1/raft`). Spec: `spec/docs/range-routing-spec.md`. *Not in this path:* live range migrate, locality tags, auto size-threshold split, TimeoutNow preferred-candidate election, full chaos add/drain/decommission gate.
+8. **M23 — Cross-shard transactions ✅ production path** — Complete (2026-07-17): shared-engine 2PC records (`\x00txn/rec|intent/…`, `apply_txn_{prepare,commit_2pc,abort_2pc}`); RaftCommand types 5/6/7 (`TxnPrepare` / `TxnCommit2pc` / `TxnAbort2pc`); server `txn_coord::commit_cross_group` when `TXN_COMMIT` spans >1 group via `StaticRangeTable` (client-transparent); **sequential** prepare then commit/abort proposes (not parallel-commit stretch); startup recovery (`Preparing`/`Prepared` → abort; `Committing` → finish); TLA+ sketch `spec/specs/txn/TwoPhaseCommit.tla`; IT `test_cross_range_txn_commit` + multi-range bank `test_multi_range_bank_sum_invariant`. Spec: `spec/docs/transactions-spec.md` §17. *Not in this path:* parallel prepare/commit stretch, HLC uncertainty-interval wait/clamp, durable global decision log, multi-range Jepsen bank under full split+merge+rebalance+kill+partition chaos matrix. Requires this node leader of all participant groups.
 
 ### Faz 3 — Hardening + kanıt
 
-9. **M24 — Production hardening ⬜** — Encryption-at-rest (pluggable Disk wrapper, AES-GCM, KEK/DEK + rotation; §7 riski kapanır), per-prefix ACL. ⬅ *Kernel+userspace birleşik attribution*, ⬅ *io_uring completion tracing*, ⬅ *stap/perf privileged CI*, ⬅ *Dashboard v2* (trace timeline + eBPF + range health). *Exit:* security.md §7 tablosu boşalır/yeniden gerekçelenir; dashboard day-2 ops'ta kullanılır.
-10. **M25 — Scale proof & ecosystem close-out ⬜** — Performance envelope v2 (txn+sharded regression gate'ler; ⬅ *scheduled profiling CI*), Jepsen grand matrix, ⬅ *linearizability minimal counterexample*, ⬅ *TS/JS + Zig client'lar* + Go txn/retry paritesi + conformance v3, deployment guide v2 + SLO v2. *Exit:* north-star yeniden değerlendirilir → **v0.2.0**.
+9. **M24 — Production hardening ✅ production path** — Complete (2026-07-17): **EncryptedDisk** AES-256-GCM Disk wrapper (`KAYAENC1`|plain_len|nonce|ct+tag; single 32-byte key as KEK=DEK via `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE`); **per-prefix ACL** (`--acl-file` / `KAYA_ACL_FILE` JSON prefix→token, longest-prefix authorize on PUT/GET/DELETE/SCAN/TXN_*). `docs/security.md` §7 re-justified (encryption + ACL closed; key rotation + full multi-tenancy still accepted risk). *Not in this path (deferred):* full kernel+userspace fsync attribution, io_uring completion tracing, stap/perf privileged CI, Dashboard v2 (trace timeline + eBPF + range health — v1 remains day-2 ops), online KEK/DEK rotation.
+10. **M25 — Scale proof & ecosystem close-out ✅ production path** — Complete (2026-07-17): Go client TXN + `RetryPolicy` parity; TypeScript client (`clients/kaya-ts/`); conformance vectors v3 (MERGE/SPLIT + txn edges); **perf envelope v2** (multi-key SI + multi-range 2PC smoke budgets in `kaya-bench`/`BENCHMARKS.md`); **deployment guide v2** (`docs/deployment-guide-v2.md`, M22–M24 flags + range ops) + SLO notes. *Not in this path (honest residuals):* scheduled profiling CI (needs Linux perf runner), full Jepsen grand matrix under combined chaos, linearizability minimal-counterexample printer, Zig client (optional stretch skipped).
 
-**Kapsam dışı (bilinçli):** SQL katmanı (post-M25 v2 adayı), tam multi-tenancy (yalnızca per-prefix ACL), geo-replication/follower reads, kanıtsız production SLA iddiası.
+**Kapsam dışı (bilinçli):** SQL katmanı (post-arc v2 adayı), tam multi-tenancy (yalnızca per-prefix ACL), geo-replication/follower reads, kanıtsız production SLA iddiası.
+
+### North-star re-eval (2026-07-17) — **v0.2.0 candidate**
+
+The M16–M25 arc has closed its **documented production path**: operators can run multi-raft range-sharded KV with single-group SI and sequential cross-range 2PC, encrypt data at rest, enforce per-prefix ACL, split/merge/drain ranges, and use Rust/Go/Python/TS clients under published perf/SLO envelopes and a v2 deployment guide.
+
+**v0.2.0 is a candidate, not a claim of unlimited production readiness.** Residual risks that block an unqualified north-star / “production SLA” claim:
+
+| Residual risk | Why it still matters |
+|---|---|
+| No physical key migration / live `MOVE_RANGE` | Split/merge are routing-only; rebalance plan is advisory; load move is operator + follow-on |
+| Range meta table is process-local memory | Dynamic splits/merges live in-process only (not Raft-replicated); restart loses dynamic range layout and reverts to configured/default ranges |
+| Sequential 2PC; this node must lead all participant groups | No parallel prepare/commit stretch; no durable global decision log; `Preparing`/`Prepared` → abort on restart; `Committing` finishes commit. Cross-group 2PC requires this node to be leader of every participant group |
+| No HLC uncertainty-interval wait/clamp | Clock skew under multi-node wall clocks is not fully mitigated |
+| Jepsen grand matrix not CI-default | Multi-range bank under split+merge+rebalance+kill+partition chaos remains manual/nightly follow-on |
+| Linearizability minimal counterexample | WGL reports violations; compact minimal counterexample printer still open |
+| Encryption key rotation / multi-tenancy | Single KEK=DEK key; no online rotation; ACL is prefix-token isolation only |
+| Observability gaps | Kernel+userspace fsync attribution, io_uring completion tracing, stap/perf privileged CI, Dashboard v2, scheduled profiling CI |
+| Orphan Raft groups after merge | Group reclaim after `merge_with_next` is follow-on |
+| Client gaps | Zig client not shipped; TS client is minimal (put/get/delete/health/hello) |
+
+**Next cut after v0.2.0 candidate:** pick residual rows that matter for the next release train (live range migrate, 2PC recovery hardening, chaos grand matrix in CI, key rotation) rather than reopening the whole arc.
 
 ---
 
@@ -613,7 +634,7 @@ M12 — Jepsen prep + Linux observability experiments ✅
 M13 — Productization ✅
 M14 — Correctness + algorithms (compaction, bloom, WAL batching, CI gates, Jepsen full, io_uring) ✅
 M15 — Remaining tracks (client auth, audit, conformance, Go client, Prometheus, deploy, HELLO, watch) ✅
-M16–M25 — Distributed Transactional KV arc (MVCC → txn → index → CDC → multi-raft → sharding → 2PC → hardening → scale proof) ⬜
+M16–M25 — Distributed Transactional KV arc (MVCC → txn → index → CDC → multi-raft → sharding → 2PC → hardening → scale proof) ✅ production path (v0.2.0 candidate; residual risks listed in north-star re-eval)
 ```
 
 ---
@@ -671,13 +692,13 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 - ✅ `scripts/ebpf/Makefile` (Phase 2A)
 - ✅ Flamegraph + stack collapse entegrasyonu (Phase 2C): `durability-flamegraph.bt`, `kayactl ebpf flamegraph`, `make flamegraph`
 - ✅ OpenTelemetry spans (Phase 2C; `kayadb-server --features otel --otel`; Prometheus `/metrics` ✅ M15)
-- 🟡 External stap/perf USDT attachment (in-process markers + operator guide in `scripts/ebpf/README.md`; ⬜ stap-in-CI **deferred → M24** — needs a privileged Linux CI runner)
+- 🟡 External stap/perf USDT attachment (in-process markers + operator guide in `scripts/ebpf/README.md`; ⬜ stap-in-CI **deferred past M24** — needs a privileged Linux CI runner; not required for M24 security production path)
 
-**Uzun vadeli / İleri seviye** — ⬜ **deferred, artık M16–M25 arc'ında planlı** (building blocks — histograms, USDT markers, flamegraphs, correlate, per-file trace — hazır):
-- Kernel + userspace birleşik attribution (hangi fsync'in ne kadarını kernel'da geçirdiğini net raporla) → **M24**
-- Production-grade tracing (trace correlation across cluster nodes + client) → **M20 (v1) / M24 (full)**
-- GUI / web dashboard (trace timeline + eBPF histogram + cluster health) → **M22 (v1) / M24 (v2)**
-- io_uring completion tracing (Track B ile birleşik) → **M24**
+**Uzun vadeli / İleri seviye** — ⬜ **deferred past M24 production path** (building blocks — histograms, USDT markers, flamegraphs, correlate, per-file trace — hazır; M24 closed on encryption + ACL only):
+- Kernel + userspace birleşik attribution (hangi fsync'in ne kadarını kernel'da geçirdiğini net raporla) → **post-M24 / open**
+- Production-grade tracing (trace correlation across cluster nodes + client) → **M20 (v1) ✅ / full still open**
+- GUI / web dashboard — ✅ M22 v1 (read-only cluster/range/raft JSON via `--dashboard-addr`); full trace timeline + eBPF histogram → **Dashboard v2 deferred past M24**
+- io_uring completion tracing (Track B ile birleşik) → **post-M24 / open**
 
 **Non-goals (değişmez):**
 - Root gerektiren testler default olarak
@@ -698,16 +719,16 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 - Rust-native Jepsen CI (smoke + nightly T1–T7) — ✅ M14
 - Chaos matrix CI (DiskFull, NetworkPartition, ClockSkew) — ✅ M14
 - Daha zengin nemesis seti + clock skew, disk latency injection — 🟡 v0.1.47 (deterministic sim: `SimNetworkConfig.latency_ticks` + `reorder_percent`, asymmetric `isolate_outgoing`/`isolate_incoming`; live-cluster wall-clock skew/disk-latency still needs OS tooling)
-- Linearizability checker'in production'a yakın versiyonu (WGL) — ✅ M11 (`LinearizabilityChecker::check_concurrent`, WGL algorithm, `Vec<String>` violation report; used in Jepsen full gate). Daha zengin raporlama (minimal counterexample) ⬜ → **M25**
-- TLA+ modellerinin genişletilmesi (manifest + compaction + Raft bir arada) — ⬜ **deferred → M17 (commit protokolü) + M23 (2PC + recovery)** (TLA+/TLC toolchain kendi spec'iyle gelir)
+- Linearizability checker'in production'a yakın versiyonu (WGL) — ✅ M11 (`LinearizabilityChecker::check_concurrent`, WGL algorithm, `Vec<String>` violation report; used in Jepsen full gate). Daha zengin raporlama (minimal counterexample) ⬜ **post-M25 residual**
+- TLA+ modellerinin genişletilmesi (manifest + compaction + Raft bir arada) — 🟡 M17 single-group commit ✅ + M23 2PC sketch ✅ (`spec/specs/txn/`); full multi-module (manifest+compaction+Raft) model still open
 
 ### Track D: Client & Language Ecosystem
 
 - Go client gerçek implementasyon + conformance — ✅ M15 (`clients/kaya-go/`)
-- Protocol conformance vectors + Rust runner — ✅ M15 (`docs/clients/conformance/vectors.json`)
+- Protocol conformance vectors + Rust runner — ✅ M15 (`docs/clients/conformance/vectors.json`); **v3** ✅ M25 (MERGE/SPLIT + txn edges)
 - HELLO protocol version handshake (opcode 0) — ✅ M15
-- Python, TypeScript/JavaScript, Zig native client'lar — 🟡 Python ✅ v0.1.47 (`clients/kaya-py/`, zero-dep); TS/JS, Zig ⬜ **deferred → M25** (each a standalone client sub-project; Python + Go + wire-spec give the reference to port from)
-- Yüksek seviye özellikler: retry policy'leri, observability hook'lar, connection pooling — 🟡 Rust ✅ v0.1.47 (`RetryPolicy` backoff+jitter+timeout, keep-alive connection reuse, `ClientObserver` hook); porting the same to Go ⬜ → **M25**
+- Python, TypeScript/JavaScript, Zig native client'lar — 🟡 Python ✅ v0.1.47 (`clients/kaya-py/`); TypeScript ✅ M25 (`clients/kaya-ts/`, minimal put/get/delete/health/hello); Zig ⬜ **post-M25 residual** (optional stretch, not required for arc close)
+- Yüksek seviye özellikler: retry policy'leri, observability hook'lar, connection pooling — 🟡 Rust ✅ v0.1.47 (`RetryPolicy` backoff+jitter+timeout, keep-alive connection reuse, `ClientObserver` hook); Go TXN + `RetryPolicy` ✅ M25
 
 ### Track E: Operations, Security & Production
 
@@ -725,13 +746,15 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 
 - Latency histogram'ları her yerde (WAL, read path, compaction) — ✅ v0.1.47 (`kaya_core::LatencyHistogram` p50/p99; `Engine::histograms()` for get/scan/fsync/flush/compaction; read-path now measured; Prometheus latency metrics expanded)
 - CI regression gate'leri + BENCHMARKS.md otomasyonu — ✅ (`kaya-bench/tests/perf_gate.rs` release-mode assertion, `scripts/bench-report.{sh,ps1}`, CI step in `.github/workflows/ci.yml`, `BENCHMARKS.md`)
-- Linux perf + eBPF ile düzenli profiling — 🟡 bpftrace/eBPF tooling ✅ (Track A); scheduled/automated profiling runs ⬜ → **M25** (needs a Linux perf CI runner)
+- Linux perf + eBPF ile düzenli profiling — 🟡 bpftrace/eBPF tooling ✅ (Track A); scheduled/automated profiling runs ⬜ **post-M25 residual** (needs a Linux perf CI runner)
 - Large value, high concurrency, mixed workload benchmark'ları — ✅ v0.1.47 (`kaya-bench/benches/mixed_workload.rs`: 64 KiB large-value, 5 000-key flush+cold-read, interleaved put/get/delete/scan)
+- Perf envelope v2 (multi-key SI + multi-range 2PC smoke budgets) — ✅ M25 (`kaya-bench` / `BENCHMARKS.md` / `perf_gate`)
 
 ### Track G: DX, Tooling & Documentation
 
 - `kayactl` interactive / watch modları — ✅ M15 `kayactl watch status`
-- Trace + cluster görselleştirme (dashboard) — ⬜ **deferred → M22 (v1) / M24 (v2)** (web/GUI project; same track as Track A's dashboard)
+- Trace + cluster görselleştirme (dashboard) — 🟡 M22 v1 ✅ (`GET /health|/v1/ranges|/v1/raft`); full timeline + eBPF ⬜ **Dashboard v2 post-M25 residual**
+- Deployment guide v2 (M22–M24 flags + range ops) — ✅ M25 (`docs/deployment-guide-v2.md`)
 - Daha iyi hata mesajları ve recovery rehberliği — ✅ v0.1.47 (`KayaError::guidance()` actionable hints; structural `LockConflict`; `kayactl` prints `HINT:` lines)
 - Katkı deneyimini iyileştirme (eBPF "good first issue" etiketleri vs.) — ✅ `CONTRIBUTING.md` "Good first issues" now lists eBPF-script and language-client-porting areas
 

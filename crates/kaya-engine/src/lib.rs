@@ -19,13 +19,22 @@ mod recovery;
 mod snapshot;
 mod stats;
 mod txn;
+mod txn2pc;
 
-pub use cdc::{CdcCursor, CdcEvent, CdcOp, CDC_CURSORS_DIR, CDC_LOG_PATH};
-pub use index::{IndexDef, INDEX_DATA_PREFIX, INDEX_META_PREFIX, INDEX_SYS_PREFIX};
+pub use cdc::{CdcCursor, CdcEvent, CdcOp, CDC_BACKUP_WATERMARK, CDC_CURSORS_DIR, CDC_LOG_PATH};
+pub use index::{
+    BackfillMode, BackfillProgress, BackfillStatus, CreateIndexOptions, IndexDef, IndexDivergence,
+    IndexDivergenceKind, IndexExtractor, INDEX_DATA_PREFIX, INDEX_META_PREFIX, INDEX_SYS_PREFIX,
+};
 pub use recovery::recover;
 pub use snapshot::SnapshotView;
 pub use stats::{CompactionResult, EngineStats, FlushResult, WriteResult};
 pub use txn::{Intent, TxnId};
+pub use txn2pc::{
+    decode_intent_value, encode_intent_key, encode_intent_scan_prefix, encode_intent_value,
+    encode_rec_key, is_txn_system_key, user_key_from_intent_key, Txn2pcState, TXN_INTENT_PREFIX,
+    TXN_REC_PREFIX, TXN_SYS_PREFIX,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WriteOptions {
@@ -113,6 +122,8 @@ pub struct Engine<D: Disk> {
     txn: txn::TxnTables,
     /// Registered secondary indexes (M18 foundation); loaded from system meta keys on open.
     indexes: std::collections::BTreeMap<String, index::IndexDef>,
+    /// Ephemeral online backfill progress per index (not durable across reopen).
+    index_backfill: std::collections::BTreeMap<String, index::BackfillProgress>,
     /// CDC changefeed state (M19 foundation); loaded from `cdc/log.jsonl` when enabled.
     cdc: cdc::CdcState,
     /// Hybrid logical clock used when `config.use_hlc` is true.
@@ -277,6 +288,7 @@ impl<D: Disk> Engine<D> {
             gc_watermark: 0,
             txn: txn::TxnTables::new(),
             indexes: std::collections::BTreeMap::new(),
+            index_backfill: std::collections::BTreeMap::new(),
             cdc: cdc::CdcState::new(),
             hlc: Hlc::zero(),
             lock_file,
@@ -319,6 +331,8 @@ impl<D: Disk> Engine<D> {
     }
 
     /// When use_hlc, tick the local HLC and ensure the next WAL sequence equals the packed ts.
+    ///
+    /// v1: no `max_offset_ms` uncertainty wait — see `kaya_core::hlc` module docs.
     pub(crate) async fn prepare_hlc_write_sequence(&mut self) {
         if !self.config.use_hlc {
             return;
@@ -2182,6 +2196,115 @@ mod tests {
             assert_eq!(engine2.list_indexes(), vec!["by_val".to_string()]);
             let hits = engine2.scan_by_index("by_val", b"alice").await.unwrap();
             assert_eq!(hits, vec![(b"alice".to_vec(), b"user:1".to_vec())]);
+        });
+    }
+
+    #[test]
+    fn index_field_extractor_and_verify() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine
+                .create_index_with(
+                    "by_email",
+                    b"user:",
+                    CreateIndexOptions {
+                        extractor: IndexExtractor::Field {
+                            delimiter: b'|',
+                            index: 1,
+                        },
+                        backfill: BackfillMode::Sync,
+                    },
+                )
+                .await
+                .unwrap();
+            engine
+                .put(
+                    b"user:1".to_vec(),
+                    b"alice|alice@x.com|admin".to_vec(),
+                    strict_opts(),
+                )
+                .await
+                .unwrap();
+            let hits = engine.scan_by_index("by_email", b"alice@").await.unwrap();
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].0, b"alice@x.com");
+            assert!(engine.verify_index("by_email").await.unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn index_online_backfill_pause_resume() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            for i in 0..5u8 {
+                engine
+                    .put(
+                        format!("user:{i}").into_bytes(),
+                        format!("v{i}").into_bytes(),
+                        strict_opts(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            engine
+                .create_index_with(
+                    "by_val",
+                    b"user:",
+                    CreateIndexOptions {
+                        extractor: IndexExtractor::WholeValue,
+                        backfill: BackfillMode::Online,
+                    },
+                )
+                .await
+                .unwrap();
+            let p1 = engine.index_backfill_step("by_val", 2).await.unwrap();
+            assert_eq!(p1.status, BackfillStatus::Running);
+            assert_eq!(p1.scanned, 2);
+            engine.index_backfill_pause("by_val").unwrap();
+            assert_eq!(
+                engine.index_backfill_status("by_val").unwrap().status,
+                BackfillStatus::Paused
+            );
+            assert!(engine.index_backfill_step("by_val", 2).await.is_err());
+            engine.index_backfill_resume("by_val").unwrap();
+            let mut last = engine.index_backfill_step("by_val", 100).await.unwrap();
+            while last.status == BackfillStatus::Running {
+                last = engine.index_backfill_step("by_val", 100).await.unwrap();
+            }
+            assert_eq!(last.status, BackfillStatus::Complete);
+            assert_eq!(last.scanned, 5);
+            assert!(engine.verify_index("by_val").await.unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn index_chaos_divergence_gate() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine.create_index("by_val", b"k:").await.unwrap();
+            // Deterministic chaos-style churn.
+            for i in 0..40u8 {
+                let key = format!("k:{i}").into_bytes();
+                let val = format!("v{i}").into_bytes();
+                engine.put(key.clone(), val, strict_opts()).await.unwrap();
+                if i % 3 == 0 {
+                    engine
+                        .put(key.clone(), format!("v{i}x").into_bytes(), strict_opts())
+                        .await
+                        .unwrap();
+                }
+                if i % 5 == 0 {
+                    engine.delete(key, strict_opts()).await.unwrap();
+                }
+            }
+            let div = engine.verify_index("by_val").await.unwrap();
+            assert!(
+                div.is_empty(),
+                "index must match primary after churn: {div:?}"
+            );
         });
     }
 

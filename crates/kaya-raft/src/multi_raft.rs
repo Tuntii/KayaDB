@@ -30,7 +30,7 @@ impl GroupId {
     pub const ZERO: GroupId = GroupId(0);
 }
 
-/// One static key-range assignment: `[start_key, end_key)` → group.
+/// One key-range assignment: `[start_key, end_key)` → group (M20 static / M21 meta).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticRange {
     /// Inclusive start key.
@@ -38,52 +38,214 @@ pub struct StaticRange {
     /// Exclusive end key. Empty means "unbounded upper" (all keys ≥ start).
     pub end_key: Vec<u8>,
     pub group_id: GroupId,
+    /// Stable range identity (bumped only when a new range is created by split).
+    pub range_id: u64,
+    /// Per-range epoch; increments when this range is split or otherwise mutated.
+    pub epoch: u64,
 }
 
-/// Static range table: ordered list of non-overlapping ranges.
+impl StaticRange {
+    /// Construct a range without meta fields (M20-compatible helper).
+    pub fn new(start_key: Vec<u8>, end_key: Vec<u8>, group_id: GroupId) -> Self {
+        Self {
+            start_key,
+            end_key,
+            group_id,
+            range_id: 0,
+            epoch: 0,
+        }
+    }
+
+    /// True if `key` is in `[start_key, end_key)`.
+    pub fn contains(&self, key: &[u8]) -> bool {
+        if key < self.start_key.as_slice() {
+            return false;
+        }
+        self.end_key.is_empty() || key < self.end_key.as_slice()
+    }
+}
+
+/// Alias used in docs / M21 wording.
+pub type RangeDescriptor = StaticRange;
+
+/// Range / meta table: ordered non-overlapping ranges + cluster meta epoch (M21).
 ///
-/// Lookup is linear scan for the foundation (N is expected small until M21).
+/// Lookup is linear (N is expected small until large-scale sharding).
+/// Dynamic [`Self::split_at`] / [`Self::merge_with_next`] update routing; engine
+/// data stays shared across groups.
 #[derive(Debug, Clone, Default)]
 pub struct StaticRangeTable {
     ranges: Vec<StaticRange>,
+    /// Global meta epoch; increments on every split/merge (client cache invalidation).
+    meta_epoch: u64,
+    next_range_id: u64,
+    next_group_id: u64,
 }
+
+/// Alias for the M21 meta range table.
+pub type RangeTable = StaticRangeTable;
 
 impl StaticRangeTable {
     pub fn new() -> Self {
-        Self { ranges: Vec::new() }
+        Self {
+            ranges: Vec::new(),
+            meta_epoch: 0,
+            next_range_id: 1,
+            next_group_id: 1,
+        }
     }
 
     /// Build from a list of ranges. Ranges are sorted by `start_key`.
+    /// Assigns sequential `range_id`s when callers left them at 0.
     pub fn from_ranges(mut ranges: Vec<StaticRange>) -> Self {
         ranges.sort_by(|a, b| a.start_key.cmp(&b.start_key));
-        Self { ranges }
+        let mut next_range_id = 1u64;
+        let mut max_group = 0u64;
+        for r in &mut ranges {
+            if r.range_id == 0 {
+                r.range_id = next_range_id;
+                next_range_id += 1;
+            } else {
+                next_range_id = next_range_id.max(r.range_id + 1);
+            }
+            max_group = max_group.max(r.group_id.0);
+            if r.epoch == 0 {
+                r.epoch = 1;
+            }
+        }
+        Self {
+            ranges,
+            meta_epoch: 1,
+            next_range_id,
+            next_group_id: max_group.saturating_add(1).max(1),
+        }
     }
 
     /// Single-range whole keyspace → `group_id`.
     pub fn single_group(group_id: GroupId) -> Self {
-        Self::from_ranges(vec![StaticRange {
+        let mut t = Self::from_ranges(vec![StaticRange {
             start_key: vec![],
             end_key: vec![],
             group_id,
-        }])
+            range_id: 1,
+            epoch: 1,
+        }]);
+        t.next_group_id = group_id.0.saturating_add(1).max(1);
+        t.next_range_id = 2;
+        t
     }
 
     pub fn ranges(&self) -> &[StaticRange] {
         &self.ranges
     }
 
+    pub fn meta_epoch(&self) -> u64 {
+        self.meta_epoch
+    }
+
     /// Look up the group for `key`. Returns `None` if no range covers the key.
     pub fn lookup(&self, key: &[u8]) -> Option<GroupId> {
+        self.lookup_range(key).map(|r| r.group_id)
+    }
+
+    /// Look up the full descriptor for `key`.
+    pub fn lookup_range(&self, key: &[u8]) -> Option<&StaticRange> {
         for r in &self.ranges {
-            if key < r.start_key.as_slice() {
-                continue;
-            }
-            // empty end_key ⇒ unbounded upper
-            if r.end_key.is_empty() || key < r.end_key.as_slice() {
-                return Some(r.group_id);
+            if r.contains(key) {
+                return Some(r);
             }
         }
         None
+    }
+
+    /// Split the range that contains `split_key` into
+    /// `[start, split_key)` (keeps old group) and `[split_key, end)` (new group).
+    ///
+    /// Returns `(left, right, new_group_id)`. `split_key` must be strictly inside
+    /// the range (not equal to start; not ≥ end when end is bounded).
+    pub fn split_at(
+        &mut self,
+        split_key: &[u8],
+    ) -> Result<(StaticRange, StaticRange, GroupId), String> {
+        if split_key.is_empty() {
+            return Err("split_key must be non-empty".into());
+        }
+        let idx = self
+            .ranges
+            .iter()
+            .position(|r| r.contains(split_key))
+            .ok_or_else(|| "split_key is not covered by any range".to_string())?;
+        let old = self.ranges[idx].clone();
+        if split_key == old.start_key.as_slice() {
+            return Err("split_key must be strictly greater than range start".into());
+        }
+        if !old.end_key.is_empty() && split_key >= old.end_key.as_slice() {
+            return Err("split_key must be strictly less than range end".into());
+        }
+
+        let new_group = GroupId(self.next_group_id);
+        self.next_group_id = self.next_group_id.saturating_add(1);
+        let new_range_id = self.next_range_id;
+        self.next_range_id = self.next_range_id.saturating_add(1);
+        self.meta_epoch = self.meta_epoch.saturating_add(1);
+
+        let left = StaticRange {
+            start_key: old.start_key.clone(),
+            end_key: split_key.to_vec(),
+            group_id: old.group_id,
+            range_id: old.range_id,
+            epoch: old.epoch.saturating_add(1),
+        };
+        let right = StaticRange {
+            start_key: split_key.to_vec(),
+            end_key: old.end_key.clone(),
+            group_id: new_group,
+            range_id: new_range_id,
+            epoch: 1,
+        };
+
+        self.ranges[idx] = left.clone();
+        self.ranges.insert(idx + 1, right.clone());
+        Ok((left, right, new_group))
+    }
+
+    /// Merge the range whose `start_key` equals `left_start` with its right neighbor.
+    ///
+    /// The merged range keeps `L.group_id` and `L.range_id`, takes `R.end_key`, and
+    /// sets `epoch = max(L.epoch, R.epoch) + 1`. `R` is dropped from the table and
+    /// `meta_epoch` is bumped. The Raft group that owned `R` is **not** torn down
+    /// here (orphan group may stay hosted and idle; reclaim is follow-on work).
+    pub fn merge_with_next(&mut self, left_start: &[u8]) -> Result<StaticRange, String> {
+        let idx = self
+            .ranges
+            .iter()
+            .position(|r| r.start_key.as_slice() == left_start)
+            .ok_or_else(|| "no range with the given left_start".to_string())?;
+        if idx + 1 >= self.ranges.len() {
+            return Err("left range has no right neighbor to merge".into());
+        }
+        let left = &self.ranges[idx];
+        let right = &self.ranges[idx + 1];
+        if left.end_key != right.start_key {
+            return Err("left and right ranges are not adjacent".into());
+        }
+
+        let merged = StaticRange {
+            start_key: left.start_key.clone(),
+            end_key: right.end_key.clone(),
+            group_id: left.group_id,
+            range_id: left.range_id,
+            epoch: left.epoch.max(right.epoch).saturating_add(1),
+        };
+        self.ranges[idx] = merged.clone();
+        self.ranges.remove(idx + 1);
+        self.meta_epoch = self.meta_epoch.saturating_add(1);
+        Ok(merged)
+    }
+
+    /// Allocate the next free group id without splitting (tests / bootstrap).
+    pub fn peek_next_group_id(&self) -> GroupId {
+        GroupId(self.next_group_id)
     }
 }
 
@@ -197,6 +359,23 @@ impl MultiRaftHost {
             .get(&group_id)
             .map(|n| n.is_leader())
             .unwrap_or(false)
+    }
+
+    /// Transfer leadership of `group_id` to `target` (M22).
+    ///
+    /// Returns an error if the group is not hosted or the local node cannot
+    /// transfer (not leader / non-voter target). See
+    /// [`RaftNode::transfer_leadership`].
+    pub fn transfer_leadership(
+        &mut self,
+        group_id: GroupId,
+        target: crate::types::NodeId,
+    ) -> Result<(), String> {
+        let node = self
+            .groups
+            .get_mut(&group_id)
+            .ok_or_else(|| format!("group {} not hosted", group_id.0))?;
+        node.transfer_leadership(target)
     }
 
     /// True if this process is leader of any hosted group.
@@ -323,16 +502,8 @@ mod tests {
     #[test]
     fn static_range_lookup() {
         let table = StaticRangeTable::from_ranges(vec![
-            StaticRange {
-                start_key: b"a".to_vec(),
-                end_key: b"m".to_vec(),
-                group_id: GroupId(1),
-            },
-            StaticRange {
-                start_key: b"m".to_vec(),
-                end_key: b"z".to_vec(),
-                group_id: GroupId(2),
-            },
+            StaticRange::new(b"a".to_vec(), b"m".to_vec(), GroupId(1)),
+            StaticRange::new(b"m".to_vec(), b"z".to_vec(), GroupId(2)),
         ]);
         assert_eq!(table.lookup(b"a"), Some(GroupId(1)));
         assert_eq!(table.lookup(b"hello"), Some(GroupId(1)));
@@ -340,6 +511,7 @@ mod tests {
         assert_eq!(table.lookup(b"xyz"), Some(GroupId(2)));
         assert_eq!(table.lookup(b"z"), None);
         assert_eq!(table.lookup(b"0"), None);
+        assert_eq!(table.meta_epoch(), 1);
     }
 
     #[test]
@@ -347,6 +519,81 @@ mod tests {
         let table = StaticRangeTable::single_group(GroupId::ZERO);
         assert_eq!(table.lookup(b""), Some(GroupId::ZERO));
         assert_eq!(table.lookup(b"anything"), Some(GroupId::ZERO));
+    }
+
+    #[test]
+    fn split_at_updates_routing_and_epoch() {
+        let mut table = StaticRangeTable::single_group(GroupId::ZERO);
+        let epoch0 = table.meta_epoch();
+        let (left, right, new_gid) = table.split_at(b"m").unwrap();
+        assert_eq!(left.group_id, GroupId::ZERO);
+        assert_eq!(left.end_key, b"m");
+        assert_eq!(right.start_key, b"m");
+        assert_eq!(right.group_id, new_gid);
+        assert_eq!(table.lookup(b"a"), Some(GroupId::ZERO));
+        assert_eq!(table.lookup(b"m"), Some(new_gid));
+        assert_eq!(table.lookup(b"z"), Some(new_gid));
+        assert!(table.meta_epoch() > epoch0);
+        assert_eq!(table.ranges().len(), 2);
+    }
+
+    #[test]
+    fn split_rejects_boundary_and_uncovered() {
+        let mut table = StaticRangeTable::from_ranges(vec![StaticRange::new(
+            b"a".to_vec(),
+            b"z".to_vec(),
+            GroupId(1),
+        )]);
+        assert!(table.split_at(b"a").is_err());
+        assert!(table.split_at(b"z").is_err());
+        assert!(table.split_at(b"0").is_err());
+    }
+
+    /// Mirrors the server SPLIT_RANGE path: peek + (host) + split_at under
+    /// exclusive access so the hosted id matches the allocated id.
+    #[test]
+    fn merge_with_next_recombines_split_ranges() {
+        let mut t = StaticRangeTable::single_group(GroupId(0));
+        t.split_at(b"m").unwrap();
+        assert_eq!(t.ranges().len(), 2);
+        let merged = t.merge_with_next(b"").unwrap(); // left starts at empty
+        assert_eq!(t.ranges().len(), 1);
+        assert!(merged.end_key.is_empty());
+        assert_eq!(t.meta_epoch(), 3); // start 1 + split + merge
+        assert_eq!(merged.group_id, GroupId(0));
+        assert_eq!(merged.range_id, 1);
+        assert_eq!(t.lookup(b"a"), Some(GroupId(0)));
+        assert_eq!(t.lookup(b"m"), Some(GroupId(0)));
+        assert_eq!(t.lookup(b"z"), Some(GroupId(0)));
+    }
+
+    #[test]
+    fn merge_with_next_rejects_missing_and_last() {
+        let mut t = StaticRangeTable::single_group(GroupId(0));
+        assert!(t.merge_with_next(b"").is_err()); // only one range
+        assert!(t.merge_with_next(b"nope").is_err());
+        t.split_at(b"m").unwrap();
+        // Right half has no neighbor.
+        assert!(t.merge_with_next(b"m").is_err());
+    }
+
+    #[test]
+    fn peek_then_split_allocates_stable_group_ids() {
+        let mut table = StaticRangeTable::single_group(GroupId::ZERO);
+        let mut hosted = vec![GroupId::ZERO];
+
+        for key in [b"m".as_slice(), b"t".as_slice()] {
+            let peek = table.peek_next_group_id();
+            // Server hosts `peek` before split_at; table mutation is exclusive.
+            hosted.push(peek);
+            let (_, right, gid) = table.split_at(key).unwrap();
+            assert_eq!(gid, peek, "hosted peek must match split_at allocation");
+            assert_eq!(right.group_id, gid);
+        }
+        assert_eq!(hosted, vec![GroupId(0), GroupId(1), GroupId(2)]);
+        assert_eq!(table.lookup(b"a"), Some(GroupId::ZERO));
+        assert_eq!(table.lookup(b"m"), Some(GroupId(1)));
+        assert_eq!(table.lookup(b"t"), Some(GroupId(2)));
     }
 
     #[test]

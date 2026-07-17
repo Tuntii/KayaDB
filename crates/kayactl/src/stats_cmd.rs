@@ -88,6 +88,9 @@ pub(crate) fn print_human_stats_from_json(json: &str) {
     if let Some(peers) = extract("peer_count") {
         println!("Peer Count:     {}", peers);
     }
+    if let Some(drain) = extract("drain") {
+        println!("Drain:          {}", drain);
+    }
 
     println!("\n--- LSM Storage Engine Metrics ---");
     if let Some(put) = extract("put_count") {

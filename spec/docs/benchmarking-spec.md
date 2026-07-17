@@ -114,10 +114,12 @@ cargo test -p kaya-bench --test perf_gate --release
 ```
 
 - Located in `crates/kaya-bench/tests/perf_gate.rs`
-- Exercises the identical `run_smoke_put_get` path used by the criterion smoke bench.
-- Uses a time budget with headroom (500µs release / 10ms debug).
-- Fails CI on gross regressions (>>10x slowdowns) of the core engine hot path.
-- This satisfies the "CI regression gate" requirement for the performance envelope (M13-6 / ROADMAP item 6).
+- Exercises `run_smoke_put_get` (same as criterion smoke) plus M25 envelope v2 helpers:
+  - `run_smoke_txn_multi_key` (SI multi-key commit)
+  - `run_smoke_multi_range_2pc` (2PC prepare+commit materialization)
+- Budgets (release / debug): put/get 500µs / 10ms; multi-key 5ms / 50ms; multi-range 2PC 10ms / 100ms.
+- Fails CI on gross regressions (>>10x slowdowns) of the core engine and txn paths.
+- This satisfies the "CI regression gate" requirement for the performance envelope (M13-6 / M25 v2).
 
 Manual/nightly:
 

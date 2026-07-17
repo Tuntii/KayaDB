@@ -50,6 +50,18 @@ struct PendingRead {
     acks: HashSet<NodeId>,
 }
 
+fn members_from_voter_ids(voters: &BTreeSet<NodeId>) -> Vec<ClusterMember> {
+    voters
+        .iter()
+        .map(|&id| ClusterMember {
+            id,
+            raft_addr: String::new(),
+            client_addr: String::new(),
+            is_learner: false,
+        })
+        .collect()
+}
+
 /// A complete Raft state-machine node.
 ///
 /// All I/O is removed from this struct. The caller drives logical time via
@@ -96,6 +108,10 @@ pub struct RaftNode {
 
     // ── Joint-consensus membership ────────────────────────────────────────────
     effective_config: EffectiveConfig,
+    /// Full membership (voters + learners) from the last applied Final config
+    /// (or the initial voter set). Learners are excluded from quorum but still
+    /// receive log replication via `next_index` seeding.
+    current_membership: Vec<ClusterMember>,
     /// Target member set while a joint→final change is in flight.
     pending_membership: Option<Vec<ClusterMember>>,
 }
@@ -104,7 +120,8 @@ impl RaftNode {
     pub fn new(config: RaftConfig) -> Self {
         let mut voters: BTreeSet<NodeId> = config.peers.iter().copied().collect();
         voters.insert(config.id);
-        let effective_config = EffectiveConfig::stable(voters);
+        let effective_config = EffectiveConfig::stable(voters.clone());
+        let current_membership = members_from_voter_ids(&voters);
         Self {
             config,
             current_term: Term(0),
@@ -126,6 +143,7 @@ impl RaftNode {
             ready_reads: Vec::new(),
             pending_snapshot: None,
             effective_config,
+            current_membership,
             pending_membership: None,
         }
     }
@@ -138,7 +156,8 @@ impl RaftNode {
     pub fn recover(config: RaftConfig, state: PersistedRaftState) -> Self {
         let mut voters: BTreeSet<NodeId> = config.peers.iter().copied().collect();
         voters.insert(config.id);
-        let effective_config = EffectiveConfig::stable(voters);
+        let effective_config = EffectiveConfig::stable(voters.clone());
+        let current_membership = members_from_voter_ids(&voters);
         Self {
             config,
             current_term: state.hard_state.current_term,
@@ -160,6 +179,7 @@ impl RaftNode {
             ready_reads: Vec::new(),
             pending_snapshot: None,
             effective_config,
+            current_membership,
             pending_membership: None,
         }
     }
@@ -196,6 +216,38 @@ impl RaftNode {
     /// Returns `true` if this node currently believes itself to be the leader.
     pub fn is_leader(&self) -> bool {
         self.role == Role::Leader
+    }
+
+    /// Request leadership transfer to `target` (M22).
+    ///
+    /// Only valid while this node is leader:
+    /// - `target == self` → no-op success
+    /// - otherwise become follower so a free election can proceed, keeping
+    ///   `voted_for` (and the current term) so this node cannot double-vote
+    ///   in term T
+    ///
+    /// Minimal transfer: does **not** send TimeoutNow / force the target's
+    /// election. The preferred candidate is not guaranteed; the next election
+    /// is free among voters. Returns an error when not leader or when `target`
+    /// is not in the current voter set.
+    pub fn transfer_leadership(&mut self, target: NodeId) -> Result<(), String> {
+        if self.role != Role::Leader {
+            return Err("not leader".to_owned());
+        }
+        if !self.effective_config.all_voters().contains(&target) {
+            return Err(format!(
+                "target node {} is not a voter in the effective config",
+                target.0
+            ));
+        }
+        if target == self.config.id {
+            return Ok(());
+        }
+        // Voluntary same-term step-down: become follower and clear leader identity
+        // / pending reads, but keep `voted_for` so this node cannot double-vote
+        // in term T (it already voted for itself when it became leader).
+        self.step_down_keeping_vote();
+        Ok(())
     }
 
     /// Snapshot of the node's observable state.
@@ -369,11 +421,50 @@ impl RaftNode {
         &self.effective_config
     }
 
+    /// Full membership (voters + learners) known to this node.
+    pub fn membership(&self) -> &[ClusterMember] {
+        &self.current_membership
+    }
+
+    /// Whether this node is a non-voting learner in applied (or pending) membership.
+    fn is_self_learner(&self) -> bool {
+        let flag_for = |members: &[ClusterMember]| {
+            members
+                .iter()
+                .find(|m| m.id == self.config.id)
+                .map(|m| m.is_learner)
+        };
+        if let Some(ref pending) = self.pending_membership {
+            if let Some(flag) = flag_for(pending) {
+                return flag;
+            }
+        }
+        flag_for(&self.current_membership).unwrap_or(false)
+    }
+
+    /// Whether this node is in the effective voter set (joint: union of both sides).
+    fn is_self_voter(&self) -> bool {
+        self.effective_config.all_voters().contains(&self.config.id)
+    }
+
     fn sync_peers_from_effective_config(&mut self) {
+        // Voting / election peers exclude learners (voters only).
         self.config.peers = self
             .effective_config
             .stable_config()
             .peers_of(self.config.id);
+    }
+
+    /// Seed replication state for every member (including learners) so the
+    /// leader ships AppendEntries / snapshots to non-voters too.
+    fn seed_replication_for_members(&mut self, members: &[ClusterMember]) {
+        let last = self.log.last_index();
+        for m in members {
+            if m.id != self.config.id {
+                self.next_index.entry(m.id).or_insert(LogIndex(last.0 + 1));
+                self.match_index.entry(m.id).or_insert(LogIndex(0));
+            }
+        }
     }
 
     fn apply_config_command(
@@ -382,13 +473,17 @@ impl RaftNode {
         members: Vec<ClusterMember>,
         out: &mut Vec<Envelope>,
     ) {
-        let voter_set: BTreeSet<NodeId> = members.iter().map(|m| m.id).collect();
+        // Quorum / elections use voters only; learners stay out of EffectiveConfig.
+        let voter_set: BTreeSet<NodeId> = ClusterMember::voter_ids(&members).into_iter().collect();
         match phase {
             ConfigChangePhase::Joint => {
                 let outgoing = self.effective_config.stable_config().clone();
                 let incoming = ClusterConfiguration::from_voters(voter_set);
                 self.effective_config = EffectiveConfig::Joint { outgoing, incoming };
+                // Track provisional membership so add/remove/promote see learners mid-change.
+                self.current_membership = members.clone();
                 self.sync_peers_from_effective_config();
+                self.seed_replication_for_members(&members);
                 if self.role == Role::Leader {
                     if let Some(final_members) = self.pending_membership.take() {
                         let cmd = RaftCommand::ConfigChange {
@@ -411,14 +506,15 @@ impl RaftNode {
             ConfigChangePhase::Final => {
                 self.effective_config =
                     EffectiveConfig::Stable(ClusterConfiguration::from_voters(voter_set));
+                self.current_membership = members.clone();
                 self.sync_peers_from_effective_config();
                 self.pending_membership = None;
-                let last = self.log.last_index();
-                for &peer in &self.config.peers {
-                    self.next_index.entry(peer).or_insert(LogIndex(last.0 + 1));
-                    self.match_index.entry(peer).or_insert(LogIndex(0));
-                }
+                self.seed_replication_for_members(&members);
             }
+        }
+        // Learners / removed nodes must not remain leader or candidate.
+        if !self.is_self_voter() && self.role != Role::Follower {
+            self.step_down_keeping_vote();
         }
     }
 
@@ -433,8 +529,27 @@ impl RaftNode {
         self.pending_reads.clear();
     }
 
+    /// Voluntary leadership transfer within the current term.
+    ///
+    /// Becomes follower and clears leader-only state, but **keeps** `voted_for`
+    /// and `current_term`. Clearing the vote would allow a second RequestVote
+    /// grant in the same term (double-voting).
+    fn step_down_keeping_vote(&mut self) {
+        self.role = Role::Follower;
+        self.leader_id = None;
+        self.election_ticks = 0;
+        self.votes_received.clear();
+        self.pending_reads.clear();
+    }
+
     /// Increment term, become candidate, vote for self, send RequestVote to peers.
     fn start_election(&mut self, out: &mut Vec<Envelope>) {
+        // Learners and non-voters never campaign or self-elect.
+        if self.is_self_learner() || !self.is_self_voter() {
+            self.election_ticks = 0;
+            return;
+        }
+
         self.current_term = Term(self.current_term.0 + 1);
         self.role = Role::Candidate;
         self.voted_for = Some(self.config.id);
@@ -559,6 +674,19 @@ impl RaftNode {
     }
 
     fn on_vote_request(&mut self, from: NodeId, req: VoteRequest, out: &mut Vec<Envelope>) {
+        // Learners never grant votes (non-voting replicas).
+        if self.is_self_learner() {
+            out.push(Envelope::new(
+                self.config.id,
+                from,
+                Message::VoteResponse(VoteResponse {
+                    term: self.current_term,
+                    vote_granted: false,
+                }),
+            ));
+            return;
+        }
+
         // Raft §5.2, §5.4.1: grant if haven't voted (or voted for this candidate)
         // and candidate log is at least as up-to-date as ours.
         let log_ok = (req.last_log_term, req.last_log_index)
@@ -774,17 +902,14 @@ impl RaftNode {
     /// This ensures new/lagging nodes get the membership that was in effect
     /// at the snapshot point.
     pub fn restore_config_from_snapshot(&mut self, members: Vec<ClusterMember>) {
-        let voter_set: BTreeSet<NodeId> = members.iter().map(|m| m.id).collect();
+        let voter_set: BTreeSet<NodeId> = ClusterMember::voter_ids(&members).into_iter().collect();
         self.effective_config =
             EffectiveConfig::Stable(ClusterConfiguration::from_voters(voter_set));
+        self.current_membership = members.clone();
         self.sync_peers_from_effective_config();
         self.pending_membership = None;
-        // Re-seed peer tracking for current peers (safe on snapshot install)
-        let last = self.log.last_index();
-        for &peer in &self.config.peers {
-            self.next_index.entry(peer).or_insert(LogIndex(last.0 + 1));
-            self.match_index.entry(peer).or_insert(LogIndex(0));
-        }
+        // Re-seed peer tracking for voters + learners (safe on snapshot install).
+        self.seed_replication_for_members(&members);
     }
 
     /// Propose a joint-consensus membership change. Only valid on leader.
@@ -808,10 +933,12 @@ impl RaftNode {
         by_id.insert(self.config.id);
         let mut members: Vec<ClusterMember> = new_members;
         if !members.iter().any(|m| m.id == self.config.id) {
+            // Leader proposing the change is a voter (cannot be a pure learner).
             members.push(ClusterMember {
                 id: self.config.id,
                 raft_addr: String::new(),
                 client_addr: String::new(),
+                is_learner: false,
             });
         }
         members.sort_by_key(|m| m.id.0);
@@ -828,18 +955,9 @@ impl RaftNode {
         self.match_index.insert(self.config.id, idx);
         self.next_index.insert(self.config.id, LogIndex(idx.0 + 1));
 
-        // Seed replication state for any new members so the leader will start
-        // sending AppendEntries (including the joint entry) to them promptly.
-        // This helps the incoming configuration participate in replication early.
-        let last_log = self.log.last_index();
-        for m in &members {
-            if m.id != self.config.id {
-                self.next_index
-                    .entry(m.id)
-                    .or_insert(LogIndex(last_log.0 + 1));
-                self.match_index.entry(m.id).or_insert(LogIndex(0));
-            }
-        }
+        // Seed replication state for any new members (including learners) so the
+        // leader starts sending AppendEntries (including the joint entry) promptly.
+        self.seed_replication_for_members(&members);
 
         // Ensure commit/apply for single-node membership changes.
         self.try_advance_commit();
@@ -1167,6 +1285,117 @@ mod tests {
     }
 
     #[test]
+    fn learner_excluded_from_quorum_after_config_change() {
+        // Single-node leader applies a Final config with 1 voter + 1 learner
+        // directly (avoids joint-commit needing a second live voter).
+        let mut node = make_node(1, vec![]);
+        let mut out = Vec::new();
+        for _ in 0..20 {
+            out.extend(node.tick());
+            if node.role == Role::Leader {
+                break;
+            }
+        }
+        assert_eq!(node.role, Role::Leader);
+
+        let members = vec![
+            ClusterMember::voter(NodeId(1), "r1", "c1"),
+            ClusterMember::learner(NodeId(3), "r3", "c3"),
+        ];
+        // Apply Final via the apply path used for committed config entries.
+        node.apply_config_command(ConfigChangePhase::Final, members, &mut out);
+
+        let voters = &node.effective_config().stable_config().voters;
+        assert_eq!(voters.len(), 1);
+        assert!(voters.contains(&NodeId(1)));
+        assert!(
+            !voters.contains(&NodeId(3)),
+            "learner must not be in voter set"
+        );
+        assert_eq!(node.quorum_size(), 1);
+        assert_eq!(node.cluster_size(), 1);
+
+        let membership = node.membership();
+        assert_eq!(membership.len(), 2);
+        assert!(membership.iter().any(|m| m.id == NodeId(3) && m.is_learner));
+        assert!(membership
+            .iter()
+            .any(|m| m.id == NodeId(1) && !m.is_learner));
+        // Learner still gets replication state (log shipping without vote).
+        assert!(node.next_index.contains_key(&NodeId(3)));
+    }
+
+    #[test]
+    fn learner_does_not_campaign_or_become_leader() {
+        // Node starts as a voter among peers, then Final demotes self to learner.
+        let mut node = make_node(3, vec![1, 2]);
+        let mut out = Vec::new();
+        let members = vec![
+            ClusterMember::voter(NodeId(1), "r1", "c1"),
+            ClusterMember::voter(NodeId(2), "r2", "c2"),
+            ClusterMember::learner(NodeId(3), "r3", "c3"),
+        ];
+        node.apply_config_command(ConfigChangePhase::Final, members, &mut out);
+
+        assert!(node.is_self_learner());
+        assert!(!node.is_self_voter());
+        assert_eq!(node.role, Role::Follower);
+
+        let term_before = node.current_term;
+        out.clear();
+        for _ in 0..50 {
+            out.extend(node.tick());
+        }
+        assert_ne!(node.role, Role::Leader, "learner must not become leader");
+        assert_ne!(
+            node.role,
+            Role::Candidate,
+            "learner must not become candidate"
+        );
+        assert_eq!(
+            node.current_term, term_before,
+            "learner election must not start (term unchanged)"
+        );
+        assert!(
+            !out.iter()
+                .any(|e| matches!(e.message, Message::VoteRequest(_))),
+            "learner must not send VoteRequest"
+        );
+    }
+
+    #[test]
+    fn learner_does_not_grant_votes() {
+        let mut node = make_node(3, vec![1, 2]);
+        let mut out = Vec::new();
+        node.apply_config_command(
+            ConfigChangePhase::Final,
+            vec![
+                ClusterMember::voter(NodeId(1), "r1", "c1"),
+                ClusterMember::voter(NodeId(2), "r2", "c2"),
+                ClusterMember::learner(NodeId(3), "r3", "c3"),
+            ],
+            &mut out,
+        );
+
+        out = node.handle(Envelope::new(
+            NodeId(1),
+            NodeId(3),
+            Message::VoteRequest(VoteRequest {
+                term: Term(1),
+                candidate_id: NodeId(1),
+                last_log_index: LogIndex(0),
+                last_log_term: Term(0),
+            }),
+        ));
+        let granted = out.iter().find_map(|e| match &e.message {
+            Message::VoteResponse(r) => Some(r.vote_granted),
+            _ => None,
+        });
+        assert_eq!(granted, Some(false), "learner must not grant votes");
+        assert!(node.voted_for.is_none() || node.voted_for != Some(NodeId(1)));
+    }
+
+    #[test]
     fn recover_restores_term_and_log() {
         let cfg = RaftConfig {
             id: NodeId(1),
@@ -1237,5 +1466,112 @@ mod tests {
             ready.contains(&read_id),
             "single-node ReadIndex must become ready immediately"
         );
+    }
+
+    #[test]
+    fn transfer_leadership_to_self_is_noop_success() {
+        let mut node = make_node(1, vec![]);
+        let mut out = Vec::new();
+        for _ in 0..20 {
+            out.extend(node.tick());
+            if node.is_leader() {
+                break;
+            }
+        }
+        assert!(node.is_leader());
+        assert!(node.transfer_leadership(NodeId(1)).is_ok());
+        assert!(
+            node.is_leader(),
+            "self-transfer must leave leadership intact"
+        );
+    }
+
+    #[test]
+    fn transfer_leadership_when_not_leader_errors() {
+        let mut node = make_node(1, vec![2, 3]);
+        assert!(!node.is_leader());
+        let err = node
+            .transfer_leadership(NodeId(2))
+            .expect_err("follower cannot transfer");
+        assert_eq!(err, "not leader");
+    }
+
+    #[test]
+    fn transfer_leadership_steps_down_to_follower() {
+        let mut node = make_node(1, vec![2, 3]);
+        let mut out = Vec::new();
+        node.start_election(&mut out);
+        node.handle(Envelope::new(
+            NodeId(2),
+            NodeId(1),
+            Message::VoteResponse(VoteResponse {
+                term: Term(1),
+                vote_granted: true,
+            }),
+        ));
+        assert!(node.is_leader());
+        let term_before = node.current_term;
+        assert_eq!(
+            node.voted_for,
+            Some(NodeId(1)),
+            "leader must have voted for self"
+        );
+
+        node.transfer_leadership(NodeId(2))
+            .expect("transfer to peer");
+        assert!(!node.is_leader());
+        assert_eq!(node.status().role, Role::Follower);
+        assert_eq!(node.status().leader_id, None);
+        assert_eq!(node.current_term, term_before, "transfer keeps term");
+        assert_eq!(
+            node.voted_for,
+            Some(NodeId(1)),
+            "same-term transfer must keep voted_for to prevent double-voting"
+        );
+    }
+
+    #[test]
+    fn transfer_leadership_keeps_voted_for() {
+        let mut node = make_node(1, vec![2, 3]);
+        let mut out = Vec::new();
+        node.start_election(&mut out);
+        node.handle(Envelope::new(
+            NodeId(2),
+            NodeId(1),
+            Message::VoteResponse(VoteResponse {
+                term: Term(1),
+                vote_granted: true,
+            }),
+        ));
+        assert!(node.is_leader());
+        assert_eq!(node.voted_for, Some(node.config.id));
+
+        node.transfer_leadership(NodeId(2))
+            .expect("transfer to peer");
+
+        // Former leader remains bound to its self-vote in term T.
+        assert_eq!(node.role, Role::Follower);
+        assert_eq!(node.voted_for, Some(NodeId(1)));
+    }
+
+    #[test]
+    fn transfer_leadership_rejects_non_voter() {
+        let mut node = make_node(1, vec![2, 3]);
+        let mut out = Vec::new();
+        node.start_election(&mut out);
+        node.handle(Envelope::new(
+            NodeId(2),
+            NodeId(1),
+            Message::VoteResponse(VoteResponse {
+                term: Term(1),
+                vote_granted: true,
+            }),
+        ));
+        assert!(node.is_leader());
+        let err = node
+            .transfer_leadership(NodeId(99))
+            .expect_err("unknown target");
+        assert!(err.contains("not a voter"), "{err}");
+        assert!(node.is_leader(), "failed transfer must not step down");
     }
 }
