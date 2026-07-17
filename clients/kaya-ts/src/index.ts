@@ -1,0 +1,32 @@
+export {
+  CLIENT_AUTH_PREFIX,
+  OP_DELETE,
+  OP_GET,
+  OP_HEALTH,
+  OP_HELLO,
+  OP_PUT,
+  OP_SCAN,
+  OP_STATS,
+  PROTO_VERSION,
+  STATUS_ERROR,
+  STATUS_INVALID_ARGUMENT,
+  STATUS_NOT_FOUND,
+  STATUS_NOT_LEADER,
+  STATUS_OK,
+  decodeErrorPayload,
+  decodeHelloResponse,
+  decodeValuePayload,
+  encodeClientFrame,
+  encodeHelloRequest,
+  encodeKeyPayload,
+  encodePutPayload,
+  wrapClientAuth,
+} from "./codec.ts";
+
+export {
+  InvalidArgument,
+  KayaClient,
+  KayaError,
+  NotFound,
+  type KayaClientOptions,
+} from "./client.ts";

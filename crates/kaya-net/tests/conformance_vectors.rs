@@ -5,11 +5,13 @@
 use kaya_net::{
     decode_admin_payload, decode_cdc_checkpoint_request, decode_cdc_poll_request,
     decode_cdc_poll_response, decode_client_auth_payload, decode_error_payload, decode_key_payload,
-    decode_put_payload, decode_scan_response, decode_txn_begin_response,
-    decode_txn_commit_response, decode_txn_id_payload, decode_txn_op_payload, encode_admin_payload,
+    decode_merge_range_request, decode_put_payload, decode_scan_response,
+    decode_split_range_request, decode_txn_begin_response, decode_txn_commit_response,
+    decode_txn_id_payload, decode_txn_op_payload, encode_admin_payload,
     encode_cdc_checkpoint_request, encode_cdc_poll_request, encode_cdc_poll_response,
-    encode_client_auth_payload, encode_error_payload, encode_key_payload, encode_put_payload,
-    encode_scan_response, encode_txn_begin_response, encode_txn_commit_response,
+    encode_client_auth_payload, encode_error_payload, encode_key_payload,
+    encode_merge_range_request, encode_put_payload, encode_scan_response,
+    encode_split_range_request, encode_txn_begin_response, encode_txn_commit_response,
     encode_txn_id_payload, encode_txn_op_payload, CDC_EVENT_DELETE, CDC_EVENT_PUT, TXN_OP_DELETE,
     TXN_OP_GET, TXN_OP_PUT,
 };
@@ -23,6 +25,9 @@ struct ConformanceVector {
     function: String,
     input: VectorInput,
     expect_ok: bool,
+    /// Optional suite revision marker (v3 = MERGE_RANGE / range ops + 2PC edge cases).
+    #[serde(default)]
+    version: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -130,6 +135,8 @@ fn run_vector(vector: &ConformanceVector) {
         "txn_commit_roundtrip" => run_txn_commit_roundtrip(&vector.input),
         "cdc_poll_roundtrip" => run_cdc_poll_roundtrip(&vector.input),
         "cdc_checkpoint_roundtrip" => run_cdc_checkpoint_roundtrip(&vector.input),
+        "merge_range_roundtrip" => run_merge_range_roundtrip(&vector.input),
+        "split_range_roundtrip" => run_split_range_roundtrip(&vector.input),
         other => panic!("unknown fn '{other}' in vector '{}'", vector.name),
     };
 
@@ -262,6 +269,11 @@ fn conformance_vectors_load_file() {
         vectors.len() >= 20,
         "expected at least 20 conformance vectors, got {}",
         vectors.len()
+    );
+    let v3 = vectors.iter().filter(|v| v.version == Some(3)).count();
+    assert!(
+        v3 >= 5,
+        "expected at least 5 conformance v3 vectors (MERGE_RANGE/range), got {v3}"
     );
 }
 
@@ -414,6 +426,38 @@ fn run_cdc_checkpoint_roundtrip(input: &VectorInput) -> Result<(), String> {
     if decoded != consumer {
         return Err(format!(
             "cdc checkpoint mismatch: got {decoded:?}, want {consumer:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// MERGE_RANGE (opcode 17): `left_start_len(u32) | left_start` (M22 / conformance v3).
+fn run_merge_range_roundtrip(input: &VectorInput) -> Result<(), String> {
+    if let Some(raw) = &input.raw_hex {
+        return decode_merge_range_request(&decode_hex(raw)?).map(|_| ());
+    }
+    let key = bytes_from_fields(input.key.as_deref(), input.key_hex.as_deref(), "key")?;
+    let encoded = encode_merge_range_request(&key);
+    let decoded = decode_merge_range_request(&encoded)?;
+    if decoded != key {
+        return Err(format!(
+            "merge_range mismatch: got {decoded:?}, want {key:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// SPLIT_RANGE (opcode 16): same shape as merge; covered for range-ops suite v3.
+fn run_split_range_roundtrip(input: &VectorInput) -> Result<(), String> {
+    if let Some(raw) = &input.raw_hex {
+        return decode_split_range_request(&decode_hex(raw)?).map(|_| ());
+    }
+    let key = bytes_from_fields(input.key.as_deref(), input.key_hex.as_deref(), "key")?;
+    let encoded = encode_split_range_request(&key);
+    let decoded = decode_split_range_request(&encoded)?;
+    if decoded != key {
+        return Err(format!(
+            "split_range mismatch: got {decoded:?}, want {key:?}"
         ));
     }
     Ok(())
