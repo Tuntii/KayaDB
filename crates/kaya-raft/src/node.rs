@@ -426,6 +426,27 @@ impl RaftNode {
         &self.current_membership
     }
 
+    /// Whether this node is a non-voting learner in applied (or pending) membership.
+    fn is_self_learner(&self) -> bool {
+        let flag_for = |members: &[ClusterMember]| {
+            members
+                .iter()
+                .find(|m| m.id == self.config.id)
+                .map(|m| m.is_learner)
+        };
+        if let Some(ref pending) = self.pending_membership {
+            if let Some(flag) = flag_for(pending) {
+                return flag;
+            }
+        }
+        flag_for(&self.current_membership).unwrap_or(false)
+    }
+
+    /// Whether this node is in the effective voter set (joint: union of both sides).
+    fn is_self_voter(&self) -> bool {
+        self.effective_config.all_voters().contains(&self.config.id)
+    }
+
     fn sync_peers_from_effective_config(&mut self) {
         // Voting / election peers exclude learners (voters only).
         self.config.peers = self
@@ -493,6 +514,10 @@ impl RaftNode {
                 self.seed_replication_for_members(&members);
             }
         }
+        // Learners / removed nodes must not remain leader or candidate.
+        if !self.is_self_voter() && self.role != Role::Follower {
+            self.step_down_keeping_vote();
+        }
     }
 
     /// Revert to follower, adopting `new_term`.
@@ -521,6 +546,12 @@ impl RaftNode {
 
     /// Increment term, become candidate, vote for self, send RequestVote to peers.
     fn start_election(&mut self, out: &mut Vec<Envelope>) {
+        // Learners and non-voters never campaign or self-elect.
+        if self.is_self_learner() || !self.is_self_voter() {
+            self.election_ticks = 0;
+            return;
+        }
+
         self.current_term = Term(self.current_term.0 + 1);
         self.role = Role::Candidate;
         self.voted_for = Some(self.config.id);
@@ -645,6 +676,19 @@ impl RaftNode {
     }
 
     fn on_vote_request(&mut self, from: NodeId, req: VoteRequest, out: &mut Vec<Envelope>) {
+        // Learners never grant votes (non-voting replicas).
+        if self.is_self_learner() {
+            out.push(Envelope::new(
+                self.config.id,
+                from,
+                Message::VoteResponse(VoteResponse {
+                    term: self.current_term,
+                    vote_granted: false,
+                }),
+            ));
+            return;
+        }
+
         // Raft §5.2, §5.4.1: grant if haven't voted (or voted for this candidate)
         // and candidate log is at least as up-to-date as ours.
         let log_ok = (req.last_log_term, req.last_log_index)
@@ -1281,6 +1325,71 @@ mod tests {
         );
         // Learner still gets replication state (log shipping without vote).
         assert!(node.next_index.contains_key(&NodeId(3)));
+    }
+
+    #[test]
+    fn learner_does_not_campaign_or_become_leader() {
+        // Node starts as a voter among peers, then Final demotes self to learner.
+        let mut node = make_node(3, vec![1, 2]);
+        let mut out = Vec::new();
+        let members = vec![
+            ClusterMember::voter(NodeId(1), "r1", "c1"),
+            ClusterMember::voter(NodeId(2), "r2", "c2"),
+            ClusterMember::learner(NodeId(3), "r3", "c3"),
+        ];
+        node.apply_config_command(ConfigChangePhase::Final, members, &mut out);
+
+        assert!(node.is_self_learner());
+        assert!(!node.is_self_voter());
+        assert_eq!(node.role, Role::Follower);
+
+        let term_before = node.current_term;
+        out.clear();
+        for _ in 0..50 {
+            out.extend(node.tick());
+        }
+        assert_ne!(node.role, Role::Leader, "learner must not become leader");
+        assert_ne!(node.role, Role::Candidate, "learner must not become candidate");
+        assert_eq!(
+            node.current_term, term_before,
+            "learner election must not start (term unchanged)"
+        );
+        assert!(
+            !out.iter().any(|e| matches!(e.message, Message::VoteRequest(_))),
+            "learner must not send VoteRequest"
+        );
+    }
+
+    #[test]
+    fn learner_does_not_grant_votes() {
+        let mut node = make_node(3, vec![1, 2]);
+        let mut out = Vec::new();
+        node.apply_config_command(
+            ConfigChangePhase::Final,
+            vec![
+                ClusterMember::voter(NodeId(1), "r1", "c1"),
+                ClusterMember::voter(NodeId(2), "r2", "c2"),
+                ClusterMember::learner(NodeId(3), "r3", "c3"),
+            ],
+            &mut out,
+        );
+
+        out = node.handle(Envelope::new(
+            NodeId(1),
+            NodeId(3),
+            Message::VoteRequest(VoteRequest {
+                term: Term(1),
+                candidate_id: NodeId(1),
+                last_log_index: LogIndex(0),
+                last_log_term: Term(0),
+            }),
+        ));
+        let granted = out.iter().find_map(|e| match &e.message {
+            Message::VoteResponse(r) => Some(r.vote_granted),
+            _ => None,
+        });
+        assert_eq!(granted, Some(false), "learner must not grant votes");
+        assert!(node.voted_for.is_none() || node.voted_for != Some(NodeId(1)));
     }
 
     #[test]

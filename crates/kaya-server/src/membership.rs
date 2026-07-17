@@ -253,9 +253,13 @@ pub fn members_for_remove(
         }
     }
 
-    let remaining_voters = by_id.values().filter(|m| !m.is_learner).count();
-    if remaining_voters < 2 {
-        return None;
+    // Min-voter floor applies only when removing a voter; learner removal is
+    // always allowed when the node was present (checked above).
+    if !is_learner_removal {
+        let remaining_voters = by_id.values().filter(|m| !m.is_learner).count();
+        if remaining_voters < 2 {
+            return None;
+        }
     }
     Some(by_id.into_values().collect())
 }
@@ -368,5 +372,62 @@ mod tests {
         );
         assert!(next.iter().any(|m| m.id == NodeId(3) && m.is_learner));
         assert!(next.iter().any(|m| m.id == NodeId(2) && !m.is_learner));
+    }
+
+    #[test]
+    fn members_for_remove_allows_learner_even_with_single_voter() {
+        let roster = NodeRoster::new_with_client([
+            (NodeId(1), addr(7481), addr(7379)),
+            (NodeId(3), addr(7483), addr(7381)),
+        ]);
+        let current = vec![
+            ClusterMember::voter(NodeId(1), "127.0.0.1:7481", "127.0.0.1:7379"),
+            ClusterMember::learner(NodeId(3), "127.0.0.1:7483", "127.0.0.1:7381"),
+        ];
+        let self_entry = current[0].clone();
+        let next = members_for_remove(
+            &roster,
+            &[NodeId(1)],
+            &current,
+            NodeId(3),
+            self_entry,
+        )
+        .expect("removing a learner must succeed even with one voter left");
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].id, NodeId(1));
+        assert!(!next[0].is_learner);
+    }
+
+    #[test]
+    fn members_for_remove_blocks_voter_when_floor_would_break() {
+        let roster = NodeRoster::new_with_client([
+            (NodeId(1), addr(7481), addr(7379)),
+            (NodeId(2), addr(7482), addr(7380)),
+            (NodeId(3), addr(7483), addr(7381)),
+        ]);
+        let current = vec![
+            ClusterMember::voter(NodeId(1), "127.0.0.1:7481", "127.0.0.1:7379"),
+            ClusterMember::voter(NodeId(2), "127.0.0.1:7482", "127.0.0.1:7380"),
+            ClusterMember::learner(NodeId(3), "127.0.0.1:7483", "127.0.0.1:7381"),
+        ];
+        let self_entry = current[0].clone();
+        // Two voters: removing a voter would leave < 2.
+        assert!(members_for_remove(
+            &roster,
+            &[NodeId(1), NodeId(2)],
+            &current,
+            NodeId(2),
+            self_entry.clone(),
+        )
+        .is_none());
+        // Learner still removable.
+        assert!(members_for_remove(
+            &roster,
+            &[NodeId(1), NodeId(2)],
+            &current,
+            NodeId(3),
+            self_entry,
+        )
+        .is_some());
     }
 }
