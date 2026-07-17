@@ -163,7 +163,10 @@ impl StaticRangeTable {
     ///
     /// Returns `(left, right, new_group_id)`. `split_key` must be strictly inside
     /// the range (not equal to start; not ≥ end when end is bounded).
-    pub fn split_at(&mut self, split_key: &[u8]) -> Result<(StaticRange, StaticRange, GroupId), String> {
+    pub fn split_at(
+        &mut self,
+        split_key: &[u8],
+    ) -> Result<(StaticRange, StaticRange, GroupId), String> {
         if split_key.is_empty() {
             return Err("split_key must be non-empty".into());
         }
@@ -356,6 +359,23 @@ impl MultiRaftHost {
             .get(&group_id)
             .map(|n| n.is_leader())
             .unwrap_or(false)
+    }
+
+    /// Transfer leadership of `group_id` to `target` (M22).
+    ///
+    /// Returns an error if the group is not hosted or the local node cannot
+    /// transfer (not leader / non-voter target). See
+    /// [`RaftNode::transfer_leadership`].
+    pub fn transfer_leadership(
+        &mut self,
+        group_id: GroupId,
+        target: crate::types::NodeId,
+    ) -> Result<(), String> {
+        let node = self
+            .groups
+            .get_mut(&group_id)
+            .ok_or_else(|| format!("group {} not hosted", group_id.0))?;
+        node.transfer_leadership(target)
     }
 
     /// True if this process is leader of any hosted group.

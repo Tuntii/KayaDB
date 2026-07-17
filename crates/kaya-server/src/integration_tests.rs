@@ -1860,4 +1860,66 @@ mod tests {
         handle.abort();
         let _ = std::fs::remove_dir_all(&data_dir);
     }
+
+    /// M22: TRANSFER_LEADER self-transfer is a no-op success on the group-0 leader.
+    #[serial]
+    #[tokio::test]
+    async fn test_transfer_leader_self_noop() {
+        use kaya_net::{encode_transfer_leader_request, STATUS_NOT_LEADER, TRANSFER_LEADER_OPCODE};
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_xfer_leader_{}", test_id));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let r = get_free_port().await;
+        let c = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{}", r).parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{}", c).parse().unwrap();
+
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![]);
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "node should elect");
+
+        // Self-transfer on group 0: success, still leader.
+        let payload = encode_transfer_leader_request(0, 1);
+        let (status, body) = roundtrip(client_addr, TRANSFER_LEADER_OPCODE, &payload)
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            STATUS_OK,
+            "self transfer should succeed: {:?}",
+            String::from_utf8_lossy(&body)
+        );
+        assert_eq!(
+            check_health(client_addr).await.as_deref(),
+            Some("leader"),
+            "self-transfer must leave leadership intact"
+        );
+
+        // Non-voter target rejected.
+        let bad = encode_transfer_leader_request(0, 99);
+        let (status, _) = roundtrip(client_addr, TRANSFER_LEADER_OPCODE, &bad)
+            .await
+            .unwrap();
+        assert_ne!(status, STATUS_OK);
+        assert_ne!(status, STATUS_NOT_LEADER);
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
 }

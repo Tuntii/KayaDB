@@ -42,13 +42,26 @@ Goal: restart nodes one-by-one with minimal disruption.
 
 7. Finally restart the original leader (after a new stable leader exists).
 
+### Optional: transfer leadership before restarting the leader
+
+M22 exposes admin opcode **TRANSFER_LEADER (18)** so you can ask the current leader of a Raft group to step down before you stop it. Request body:
+
+```
+group_id        : u64 LE   (0 for the primary / single group)
+target_node_id  : u64 LE   (preferred successor voter; may be self for a no-op check)
+```
+
+Requires the operator token when the cluster is started with `--operator-token` / `KAYA_OPERATOR_TOKEN` (same framing as ADD/REMOVE_MEMBER: optional `ADMIN\x00` prefix via `encode_admin_payload`).
+
+**Semantics (minimal M22):** if the callee is not leader → `STATUS_NOT_LEADER`; if `target == self` → success no-op; otherwise the leader becomes a follower. This implementation does **not** send TimeoutNow to force the target to win the next election — the subsequent election is free among voters. Prefer transferring only when the target is caught up and healthy; then wait for a new stable leader via `kayactl status` before stopping the old leader.
+
 ## Verification
 - After every restart, `peer_count` should return to the expected value.
 - You can read/write through any client port.
 - No linearizability violations in ongoing workloads (if running chaos or client load).
 
 ## With Operator Token
-The token is not usually needed for pure restarts (only for membership changes). If using `--tls-*` for native TLS, ensure clients/kayactl connect via the TLS-wrapped ports.
+The token is not usually needed for pure restarts (only for membership changes and TRANSFER_LEADER). If using `--tls-*` for native TLS, ensure clients/kayactl connect via the TLS-wrapped ports.
 
 ## Tips
 - Do not restart more than one node at a time.

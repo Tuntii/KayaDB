@@ -20,27 +20,27 @@ use kaya_net::{
     decode_cdc_checkpoint_request, decode_cdc_poll_request, decode_hello_request,
     decode_key_payload, decode_member_payload, decode_merge_range_request, decode_put_payload,
     decode_remove_member_payload, decode_scan_payload, decode_split_range_request,
-    decode_txn_id_payload, decode_txn_op_payload, encode_cdc_poll_response, encode_error_payload,
-    encode_hello_response, encode_list_ranges_response, encode_range_moved_payload,
-    encode_scan_response, encode_txn_begin_response, encode_txn_commit_response,
-    encode_value_payload, read_client_frame, send_envelopes, write_client_response, NodeRoster,
-    LIST_RANGES_OPCODE, MERGE_RANGE_OPCODE, PROTO_VERSION, SPLIT_RANGE_OPCODE, STATUS_ERROR,
-    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK, STATUS_RANGE_MOVED,
-    STATUS_TXN_CONFLICT, CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE, CDC_EVENT_PUT, CDC_POLL_OPCODE,
-    TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT,
-    TXN_ROLLBACK_OPCODE,
+    decode_transfer_leader_request, decode_txn_id_payload, decode_txn_op_payload,
+    encode_cdc_poll_response, encode_error_payload, encode_hello_response,
+    encode_list_ranges_response, encode_range_moved_payload, encode_scan_response,
+    encode_txn_begin_response, encode_txn_commit_response, encode_value_payload, read_client_frame,
+    send_envelopes, write_client_response, NodeRoster, CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE,
+    CDC_EVENT_PUT, CDC_POLL_OPCODE, LIST_RANGES_OPCODE, MERGE_RANGE_OPCODE, PROTO_VERSION,
+    SPLIT_RANGE_OPCODE, STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER,
+    STATUS_OK, STATUS_RANGE_MOVED, STATUS_TXN_CONFLICT, TRANSFER_LEADER_OPCODE, TXN_BEGIN_OPCODE,
+    TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
 };
 use kaya_raft::{
     multi_raft_group_dir, ClusterMember, GroupId, NodeId, RaftConfig, RaftNode, StaticRangeTable,
 };
 use tokio::sync::RwLock;
 
-use crate::apply_index::RaftApplyIndex;
-use crate::raft_persister::RaftPersister;
 use super::{
     SharedApplyIndexes, SharedEngine, SharedPending, SharedPendingReads, SharedPersisters,
     SharedRaftHost,
 };
+use crate::apply_index::RaftApplyIndex;
+use crate::raft_persister::RaftPersister;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
@@ -407,10 +407,14 @@ async fn dispatch(
         };
     }
 
-    // Handle admin opcodes 7/8 (ADD/REMOVE) with optional operator token enforcement.
-    // Supports backward-compat raw payloads (no token configured) and ADMIN-prefixed
-    // payloads when clients present the credential. If server has token set, must match.
-    if opcode == ADD_MEMBER_OPCODE || opcode == REMOVE_MEMBER_OPCODE {
+    // Handle admin opcodes 7/8/18 (ADD/REMOVE/TRANSFER_LEADER) with optional operator
+    // token enforcement. Supports backward-compat raw payloads (no token configured)
+    // and ADMIN-prefixed payloads when clients present the credential. If server has
+    // token set, must match.
+    if opcode == ADD_MEMBER_OPCODE
+        || opcode == REMOVE_MEMBER_OPCODE
+        || opcode == TRANSFER_LEADER_OPCODE
+    {
         // Peel optional ADMIN prefix + token if present; otherwise treat payload as legacy raw.
         let (clean_payload, presented) =
             if payload.len() >= ADMIN_AUTH_PREFIX.len() && payload.starts_with(ADMIN_AUTH_PREFIX) {
@@ -473,7 +477,7 @@ async fn dispatch(
                     None,
                 ),
             };
-        } else {
+        } else if opcode == REMOVE_MEMBER_OPCODE {
             return match decode_remove_member_payload(&clean_payload) {
                 Ok(node_id) => {
                     let (status, body) = propose_remove_member(
@@ -486,6 +490,36 @@ async fn dispatch(
                     )
                     .await;
                     outcome(status, body, operator_auth, None)
+                }
+                Err(e) => outcome(
+                    STATUS_INVALID_ARGUMENT,
+                    encode_error_payload(&e),
+                    operator_auth,
+                    None,
+                ),
+            };
+        } else {
+            // TRANSFER_LEADER (18): group_id | target_node_id — leader steps down.
+            return match decode_transfer_leader_request(&clean_payload) {
+                Ok((group_id, target_node_id)) => {
+                    let result = {
+                        let mut host = raft.lock().unwrap();
+                        host.transfer_leadership(GroupId(group_id), NodeId(target_node_id))
+                    };
+                    match result {
+                        Ok(()) => outcome(STATUS_OK, vec![], operator_auth, None),
+                        Err(e) if e == "not leader" => {
+                            let roster_snapshot = roster.read().await.clone();
+                            let hint = get_leader_hint(raft, &roster_snapshot);
+                            outcome(STATUS_NOT_LEADER, hint, operator_auth, None)
+                        }
+                        Err(e) => outcome(
+                            STATUS_INVALID_ARGUMENT,
+                            encode_error_payload(&e),
+                            operator_auth,
+                            None,
+                        ),
+                    }
                 }
                 Err(e) => outcome(
                     STATUS_INVALID_ARGUMENT,
@@ -838,7 +872,12 @@ async fn dispatch(
                                     (e.seq, op, e.key, e.value)
                                 })
                                 .collect();
-                            outcome(STATUS_OK, encode_cdc_poll_response(&wire), client_auth, None)
+                            outcome(
+                                STATUS_OK,
+                                encode_cdc_poll_response(&wire),
+                                client_auth,
+                                None,
+                            )
                         }
                         Err(e) => outcome(
                             STATUS_ERROR,

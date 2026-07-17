@@ -62,6 +62,9 @@ pub const LIST_RANGES_OPCODE: u8 = 15;
 pub const SPLIT_RANGE_OPCODE: u8 = 16;
 /// MERGE_RANGE — merge a range with its right neighbor (M22 admin; leader of group 0).
 pub const MERGE_RANGE_OPCODE: u8 = 17;
+/// TRANSFER_LEADER — step down so leadership can move to a target voter (M22 admin).
+/// Requires operator token when configured (same as ADD/REMOVE_MEMBER).
+pub const TRANSFER_LEADER_OPCODE: u8 = 18;
 
 /// CDC event op: put.
 pub const CDC_EVENT_PUT: u8 = 1;
@@ -712,7 +715,8 @@ pub fn decode_cdc_poll_request(data: &[u8]) -> Result<(String, u64, u32), String
     let mut cur = data;
     let id_len = take_u16(&mut cur)? as usize;
     let id_bytes = take_bytes(&mut cur, id_len)?;
-    let consumer_id = String::from_utf8(id_bytes).map_err(|_| "cdc consumer_id not utf-8".to_owned())?;
+    let consumer_id =
+        String::from_utf8(id_bytes).map_err(|_| "cdc consumer_id not utf-8".to_owned())?;
     let from_seq = take_u64(&mut cur)?;
     let limit = take_u32(&mut cur)?;
     Ok((consumer_id, from_seq, limit))
@@ -852,6 +856,25 @@ pub fn decode_merge_range_request(data: &[u8]) -> Result<Vec<u8>, String> {
     let mut cur = data;
     let len = take_u32(&mut cur)? as usize;
     take_bytes(&mut cur, len)
+}
+
+/// Encode TRANSFER_LEADER request: `group_id(u64 LE) | target_node_id(u64 LE)`.
+pub fn encode_transfer_leader_request(group_id: u64, target_node_id: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16);
+    out.extend_from_slice(&group_id.to_le_bytes());
+    out.extend_from_slice(&target_node_id.to_le_bytes());
+    out
+}
+
+/// Decode TRANSFER_LEADER request → `(group_id, target_node_id)`.
+pub fn decode_transfer_leader_request(data: &[u8]) -> Result<(u64, u64), String> {
+    if data.len() < 16 {
+        return Err("truncated TRANSFER_LEADER payload".to_owned());
+    }
+    let mut cur = data;
+    let group_id = take_u64(&mut cur)?;
+    let target_node_id = take_u64(&mut cur)?;
+    Ok((group_id, target_node_id))
 }
 
 /// Encode RANGE_MOVED body: single updated descriptor covering the key
@@ -1538,6 +1561,15 @@ mod tests {
         assert_eq!(decode_merge_range_request(&key).unwrap(), b"m");
         assert_eq!(MERGE_RANGE_OPCODE, 17);
         assert_eq!(SPLIT_RANGE_OPCODE, 16);
+    }
+
+    #[test]
+    fn transfer_leader_request_roundtrips() {
+        let payload = encode_transfer_leader_request(3, 7);
+        assert_eq!(decode_transfer_leader_request(&payload).unwrap(), (3, 7));
+        assert_eq!(TRANSFER_LEADER_OPCODE, 18);
+        assert!(decode_transfer_leader_request(&[]).is_err());
+        assert!(decode_transfer_leader_request(&[0u8; 15]).is_err());
     }
 
     #[test]

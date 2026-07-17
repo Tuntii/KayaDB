@@ -198,6 +198,35 @@ impl RaftNode {
         self.role == Role::Leader
     }
 
+    /// Request leadership transfer to `target` (M22).
+    ///
+    /// Only valid while this node is leader:
+    /// - `target == self` → no-op success
+    /// - otherwise step down to follower so a free election can proceed
+    ///
+    /// Minimal transfer: does **not** send TimeoutNow / force the target's
+    /// election. The preferred candidate is not guaranteed; the next election
+    /// is free among voters. Returns an error when not leader or when `target`
+    /// is not in the current voter set.
+    pub fn transfer_leadership(&mut self, target: NodeId) -> Result<(), String> {
+        if self.role != Role::Leader {
+            return Err("not leader".to_owned());
+        }
+        if !self.effective_config.all_voters().contains(&target) {
+            return Err(format!(
+                "target node {} is not a voter in the effective config",
+                target.0
+            ));
+        }
+        if target == self.config.id {
+            return Ok(());
+        }
+        // Voluntary step-down: keep current term so peers do not treat this as a
+        // higher-term discovery; clear leader identity and pending reads.
+        self.step_down(self.current_term);
+        Ok(())
+    }
+
     /// Snapshot of the node's observable state.
     pub fn status(&self) -> RaftStatus {
         RaftStatus {
@@ -1237,5 +1266,76 @@ mod tests {
             ready.contains(&read_id),
             "single-node ReadIndex must become ready immediately"
         );
+    }
+
+    #[test]
+    fn transfer_leadership_to_self_is_noop_success() {
+        let mut node = make_node(1, vec![]);
+        let mut out = Vec::new();
+        for _ in 0..20 {
+            out.extend(node.tick());
+            if node.is_leader() {
+                break;
+            }
+        }
+        assert!(node.is_leader());
+        assert!(node.transfer_leadership(NodeId(1)).is_ok());
+        assert!(
+            node.is_leader(),
+            "self-transfer must leave leadership intact"
+        );
+    }
+
+    #[test]
+    fn transfer_leadership_when_not_leader_errors() {
+        let mut node = make_node(1, vec![2, 3]);
+        assert!(!node.is_leader());
+        let err = node
+            .transfer_leadership(NodeId(2))
+            .expect_err("follower cannot transfer");
+        assert_eq!(err, "not leader");
+    }
+
+    #[test]
+    fn transfer_leadership_steps_down_to_follower() {
+        let mut node = make_node(1, vec![2, 3]);
+        let mut out = Vec::new();
+        node.start_election(&mut out);
+        node.handle(Envelope::new(
+            NodeId(2),
+            NodeId(1),
+            Message::VoteResponse(VoteResponse {
+                term: Term(1),
+                vote_granted: true,
+            }),
+        ));
+        assert!(node.is_leader());
+
+        node.transfer_leadership(NodeId(2))
+            .expect("transfer to peer");
+        assert!(!node.is_leader());
+        assert_eq!(node.status().role, Role::Follower);
+        assert_eq!(node.status().leader_id, None);
+    }
+
+    #[test]
+    fn transfer_leadership_rejects_non_voter() {
+        let mut node = make_node(1, vec![2, 3]);
+        let mut out = Vec::new();
+        node.start_election(&mut out);
+        node.handle(Envelope::new(
+            NodeId(2),
+            NodeId(1),
+            Message::VoteResponse(VoteResponse {
+                term: Term(1),
+                vote_granted: true,
+            }),
+        ));
+        assert!(node.is_leader());
+        let err = node
+            .transfer_leadership(NodeId(99))
+            .expect_err("unknown target");
+        assert!(err.contains("not a voter"), "{err}");
+        assert!(node.is_leader(), "failed transfer must not step down");
     }
 }
