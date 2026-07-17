@@ -32,9 +32,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
-use kaya_core::{DurabilityConfig, DurabilityMode, EngineConfig};
+use kaya_core::{DurabilityConfig, DurabilityMode, EngineConfig, Result as KayaResult};
 use kaya_engine::Engine;
-use kaya_io::FileDisk;
+use kaya_io::{DirEntry, Disk, EncryptedDisk, FileDisk, RelativePath};
 use kaya_net::{start_raft_listener, NodeRoster};
 use kaya_raft::{
     multi_raft_group_dir, GroupId, LogIndex, MultiRaftHost, NodeId, RaftConfig, RaftNode,
@@ -129,6 +129,9 @@ pub struct ClusterConfig {
     /// (see `docs/runbooks/decommission-node.md`). New range hosting via
     /// SPLIT_RANGE is rejected on a draining node.
     pub drain: bool,
+    /// Optional AES-256-GCM encryption-at-rest key (32 bytes). When set, the
+    /// engine opens over [`EncryptedDisk`] wrapping [`FileDisk`].
+    pub encryption_key: Option<[u8; 32]>,
 }
 
 impl ClusterConfig {
@@ -179,7 +182,15 @@ impl ClusterConfig {
             use_hlc: false,
             range_table: StaticRangeTable::single_group(GroupId::ZERO),
             drain: false,
+            encryption_key: None,
         }
+    }
+
+    /// Enable AES-256-GCM encryption-at-rest for engine files (WAL/SST/manifest
+    /// via the Disk layer). Key must be exactly 32 bytes.
+    pub fn with_encryption_key(mut self, key: [u8; 32]) -> Self {
+        self.encryption_key = Some(key);
+        self
     }
 
     /// Drop inbound client/raft TCP when the flag is true (in-process partition nemesis).
@@ -313,7 +324,85 @@ impl ClusterNode {
 /// Always a MultiRaftHost (at least group 0).
 pub(crate) type SharedRaftHost = Arc<Mutex<MultiRaftHost>>;
 pub(crate) type SharedPersisters = Arc<Mutex<HashMap<u64, RaftPersister>>>;
-pub(crate) type SharedEngine = Arc<tokio::sync::Mutex<Engine<FileDisk>>>;
+/// Engine disk backend: plain [`FileDisk`] or AES-GCM [`EncryptedDisk`].
+pub(crate) enum EngineDisk {
+    Plain(FileDisk),
+    Encrypted(EncryptedDisk<FileDisk>),
+}
+
+impl Disk for EngineDisk {
+    async fn read_at(&self, path: &RelativePath, offset: u64, buf: &mut [u8]) -> KayaResult<usize> {
+        match self {
+            Self::Plain(d) => d.read_at(path, offset, buf).await,
+            Self::Encrypted(d) => d.read_at(path, offset, buf).await,
+        }
+    }
+
+    async fn write_at(&self, path: &RelativePath, offset: u64, buf: &[u8]) -> KayaResult<usize> {
+        match self {
+            Self::Plain(d) => d.write_at(path, offset, buf).await,
+            Self::Encrypted(d) => d.write_at(path, offset, buf).await,
+        }
+    }
+
+    async fn append(&self, path: &RelativePath, buf: &[u8]) -> KayaResult<u64> {
+        match self {
+            Self::Plain(d) => d.append(path, buf).await,
+            Self::Encrypted(d) => d.append(path, buf).await,
+        }
+    }
+
+    async fn fsync_file(&self, path: &RelativePath) -> KayaResult<()> {
+        match self {
+            Self::Plain(d) => d.fsync_file(path).await,
+            Self::Encrypted(d) => d.fsync_file(path).await,
+        }
+    }
+
+    async fn fsync_dir(&self, path: &RelativePath) -> KayaResult<()> {
+        match self {
+            Self::Plain(d) => d.fsync_dir(path).await,
+            Self::Encrypted(d) => d.fsync_dir(path).await,
+        }
+    }
+
+    async fn truncate(&self, path: &RelativePath, len: u64) -> KayaResult<()> {
+        match self {
+            Self::Plain(d) => d.truncate(path, len).await,
+            Self::Encrypted(d) => d.truncate(path, len).await,
+        }
+    }
+
+    async fn rename(&self, from: &RelativePath, to: &RelativePath) -> KayaResult<()> {
+        match self {
+            Self::Plain(d) => d.rename(from, to).await,
+            Self::Encrypted(d) => d.rename(from, to).await,
+        }
+    }
+
+    async fn remove_file(&self, path: &RelativePath) -> KayaResult<()> {
+        match self {
+            Self::Plain(d) => d.remove_file(path).await,
+            Self::Encrypted(d) => d.remove_file(path).await,
+        }
+    }
+
+    async fn list_dir(&self, path: &RelativePath) -> KayaResult<Vec<DirEntry>> {
+        match self {
+            Self::Plain(d) => d.list_dir(path).await,
+            Self::Encrypted(d) => d.list_dir(path).await,
+        }
+    }
+
+    async fn file_len(&self, path: &RelativePath) -> KayaResult<u64> {
+        match self {
+            Self::Plain(d) => d.file_len(path).await,
+            Self::Encrypted(d) => d.file_len(path).await,
+        }
+    }
+}
+
+pub(crate) type SharedEngine = Arc<tokio::sync::Mutex<Engine<EngineDisk>>>;
 // (group_id, LogIndex) → oneshot channel for the client waiting on that proposal.
 pub(crate) type PendingKey = (u64, LogIndex);
 pub(crate) type PendingMap = HashMap<PendingKey, tokio::sync::oneshot::Sender<Result<(), String>>>;
@@ -371,7 +460,11 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         crate::otel_spans::install_default_durability_spans();
     }
 
-    let disk = Arc::new(FileDisk::new(engine_cfg.data_dir.clone()));
+    let file_disk = FileDisk::new(engine_cfg.data_dir.clone());
+    let disk = Arc::new(match config.encryption_key {
+        Some(key) => EngineDisk::Encrypted(EncryptedDisk::new(file_disk, key)),
+        None => EngineDisk::Plain(file_disk),
+    });
     let mut engine = Engine::open(engine_cfg, disk)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;

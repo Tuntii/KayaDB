@@ -205,6 +205,10 @@ fn run() -> Result<(), String> {
     let client_token =
         take_value(&mut args, "--client-token").or_else(|| env::var("KAYA_CLIENT_TOKEN").ok());
 
+    // --encryption-key-file <path> / KAYA_ENCRYPTION_KEY_FILE — 32 raw bytes AES-256 key.
+    let encryption_key_file = take_value(&mut args, "--encryption-key-file")
+        .or_else(|| env::var("KAYA_ENCRYPTION_KEY_FILE").ok());
+
     let tls_cert = take_value(&mut args, "--tls-cert").or_else(|| env::var("KAYA_TLS_CERT").ok());
     let tls_key = take_value(&mut args, "--tls-key").or_else(|| env::var("KAYA_TLS_KEY").ok());
     let tls_ca = take_value(&mut args, "--tls-ca").or_else(|| env::var("KAYA_TLS_CA").ok());
@@ -231,6 +235,11 @@ fn run() -> Result<(), String> {
         if !tok.trim().is_empty() {
             config = config.with_client_token(tok);
         }
+    }
+    if let Some(path) = encryption_key_file {
+        let key = kaya_io::load_key_file(&path)
+            .map_err(|e| format!("--encryption-key-file {path}: {e}"))?;
+        config = config.with_encryption_key(key);
     }
 
     let audit_log = audit_log_flag

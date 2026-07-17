@@ -82,6 +82,7 @@ For local demos, bind to `127.0.0.1`. For multi-host experiments, bind to a priv
 | Concurrent client connections | 1024 max | `--max-client-connections` / `KAYA_MAX_CLIENT_CONNECTIONS` | Accept-loop semaphore; excess connections wait in TCP backlog (no unbounded task spawn) | ✅ `crates/kaya-server/src/cluster/client_ops.rs` |
 | Scan result / byte caps | 100 000 entries / 64 MiB | `EngineConfig.limits.max_scan_results` / `max_scan_bytes` | Unbounded SCAN cannot exhaust memory; merge window bounded; oversized prefixes → `STATUS_INVALID_ARGUMENT` | ✅ `crates/kaya-engine/src/memtable.rs` |
 | Data-dir exclusive lock | on | `EngineConfig.disable_locking` | `KAYA_LOCK` file (share-mode 0 on Windows, `flock` on Unix) prevents two processes corrupting one data dir | ✅ `crates/kaya-engine/src/lib.rs` |
+| Encryption at rest (engine Disk) | off | `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE` (32 raw bytes) | Engine files sealed with AES-256-GCM via `EncryptedDisk` | ✅ (M24) `kaya-io` + server open path |
 
 `kayadb-server` calls security checks before binding listeners. See `crates/kaya-server/src/security.rs` and `cluster.rs` (snapshot load + compaction, TLS listener setup).
 
@@ -294,7 +295,8 @@ ufw allow from 10.0.0.2 to any port 8379
    chmod 700 /var/lib/kaya-data
    ```
 3. **Data At Rest Encryption:**
-   * Since KayaDB stores SSTables as raw binary files on disk, use filesystem-level encryption (like DM-Crypt/LUKS on Linux or BitLocker on Windows) if storage hardware theft is a threat model.
+   * **M24 engine-level AES-256-GCM:** pass `--encryption-key-file <path>` (or `KAYA_ENCRYPTION_KEY_FILE`) where the file is exactly **32 raw bytes**. The server wraps the engine `Disk` with `EncryptedDisk` so WAL/SST/manifest bytes are sealed as `KAYAENC1 | plain_len | nonce | ciphertext+tag`. v1 uses the same key as KEK and DEK; key rotation is a follow-on.
+   * Still recommended for full-volume protection (Raft peer state and non-engine files): filesystem-level encryption (DM-Crypt/LUKS, BitLocker, or encrypted block volumes).
 
 ---
 
@@ -352,7 +354,7 @@ M15 closes the data-path authZ and structured audit gaps from M13. M13 delivered
 |---|---|---|---|
 | Full authZ for all client ops (GET/PUT/DELETE/SCAN/STATS) | ✅ Implemented when `--client-token` set | Configure `--client-token` / `KAYA_CLIENT_TOKEN`; combine with firewall + mTLS; HEALTH (op 5) remains open for probes | `CLIENT\x00` framing in `crates/kaya-net/src/codec.rs`; enforcement in `crates/kaya-server/src/cluster/client_ops.rs` (opcodes 1–4, 6) |
 | Structured audit logging (local JSONL) | ✅ Implemented | Enable `--audit-log` (default on when any token configured); rotate/archive `{data_dir}/audit.jsonl` | `crates/kaya-server/src/audit.rs` |
-| Data at rest encryption | Accepted risk | LUKS/DM-Crypt, BitLocker, or encrypted block volumes on the data directory | Section 4 above; no engine-level encryption |
+| Data at rest encryption | ✅ Optional engine-level AES-GCM | Set `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE` (32-byte key); combine with volume encryption for Raft/non-Disk files; key rotation deferred | `EncryptedDisk` in `crates/kaya-io/src/encrypted.rs`; server open path in `cluster/mod.rs` |
 | Multi-tenant isolation | Accepted risk | One cluster per tenant; network segmentation; separate credentials per deployment | No tenant IDs in engine or protocol |
 | Client cert enforcement on every connection | Accepted risk (partial impl.) | Enable native TLS with CA (`require_client_cert: true` when `--tls-ca` set); or ghostunnel `--allow-cn` | `crates/kaya-server/src/main.rs`, `crates/kaya-net/src/transport.rs` |
 | Compliance-grade audit export to SIEM | ✅ Optional built-in UDP syslog sink | Set `--audit-syslog <host:port>` / `KAYA_AUDIT_SYSLOG` (RFC 5424 over UDP, requires `--audit-log`); for TCP/TLS transport or delivery guarantees, front with a local syslog agent (rsyslog/vector) | `SyslogSink` in `crates/kaya-server/src/audit.rs`; UDP best-effort, no on-wire encryption |
