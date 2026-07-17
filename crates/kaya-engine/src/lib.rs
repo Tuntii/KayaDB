@@ -331,6 +331,8 @@ impl<D: Disk> Engine<D> {
     }
 
     /// When use_hlc, tick the local HLC and ensure the next WAL sequence equals the packed ts.
+    ///
+    /// v1: no `max_offset_ms` uncertainty wait — see `kaya_core::hlc` module docs.
     pub(crate) async fn prepare_hlc_write_sequence(&mut self) {
         if !self.config.use_hlc {
             return;

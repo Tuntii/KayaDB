@@ -370,3 +370,26 @@ only under `\x00txn/intent/…`).
 | TXN-2PC-2 | After `Committed` ACK, all participant intents are cleared and user keys are recoverable |
 | TXN-2PC-3 | After `Aborted`, no user-key mutation from that txn remains |
 | TXN-2PC-4 | Types 1–4 decode/encode unchanged after adding types 5–7 |
+
+### 17.6 Client transparency
+
+The client `TXN_BEGIN` / `TXN_OP` / `TXN_COMMIT` / `TXN_ROLLBACK` opcodes are
+unchanged. When staged mutations map to more than one Raft group, the server
+coordinator runs 2PC; single-group commits still use type-4 `TxnCommit`. No
+client API or wire break for cross-range transactions.
+
+### 17.7 HLC commit timestamps and uncertainty (minimal)
+
+Multi-group ClusterNode auto-enables `EngineConfig.use_hlc`. Commit sequences
+are HLC-packed as `(physical_ms << 16) | logical` (see `multi-raft-spec.md` §8
+and `kaya_core::Hlc`).
+
+**Uncertainty interval (v1):** there is no `max_offset_ms` wait or clamp on the
+client or coordinator. Nodes trust the HLC merge rule
+(`max(local, wall, remote)`). A full Cockroach-style uncertainty interval
+(wait out max clock offset, or retry reads when a version falls inside the
+uncertainty window) is deferred; operators should keep NTP skew small relative
+to the intended SI freshness window. When implemented, the clamp would live on
+the engine HLC tick path (`prepare_hlc_write_sequence`) and/or the read path.
+
+Formal sketch: `spec/specs/txn/TwoPhaseCommit.tla` (TLC-checkable small model).

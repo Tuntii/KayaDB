@@ -1677,6 +1677,145 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
+    /// Multi-range bank transfers via the high-level client (2PC is transparent).
+    ///
+    /// Accounts on left range `[a,m)` and right range `[m,z)`; SI transfers that
+    /// touch both sides must preserve the constant-sum invariant.
+    #[serial]
+    #[tokio::test]
+    async fn test_multi_range_bank_sum_invariant() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_bank_2pc_{}", test_id));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let r = get_free_port().await;
+        let c = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{}", r).parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{}", c).parse().unwrap();
+
+        // Left [a, m) → group 1; right [m, z) → group 2
+        let ranges = vec![
+            StaticRange::new(b"a".to_vec(), b"m".to_vec(), GroupId(1)),
+            StaticRange::new(b"m".to_vec(), b"z".to_vec(), GroupId(2)),
+        ];
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![])
+            .with_static_ranges(ranges);
+
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "leader not ready for multi-range bank");
+
+        // Keys chosen so left/right land in different groups.
+        // left: apple, banana  (both < m); right: mango, melon (both >= m)
+        let left_a = b"apple".as_slice();
+        let left_b = b"banana".as_slice();
+        let right_a = b"mango".as_slice();
+        let right_b = b"melon".as_slice();
+        let initial: i64 = 100;
+        let accounts: [&[u8]; 4] = [left_a, left_b, right_a, right_b];
+        let expected_total = initial * accounts.len() as i64;
+
+        let mut client = kaya_client::KayaClient::connect(client_addr)
+            .await
+            .expect("connect client");
+        client.set_max_redirects(5);
+
+        let bal = |n: i64| n.to_string().into_bytes();
+        let parse = |v: &[u8]| -> i64 {
+            std::str::from_utf8(v)
+                .unwrap()
+                .parse()
+                .expect("balance parse")
+        };
+
+        for key in &accounts {
+            client
+                .put(key, &bal(initial))
+                .await
+                .unwrap_or_else(|e| panic!("seed {}: {e}", String::from_utf8_lossy(key)));
+        }
+
+        // Helper: SI transfer amount from `from` to `to` (may span ranges → 2PC).
+        async fn transfer(
+            client: &mut kaya_client::KayaClient,
+            from: &[u8],
+            to: &[u8],
+            amount: i64,
+        ) {
+            let mut txn = client.begin_txn().await.expect("begin_txn");
+            let from_bal = parse_bal(txn.get(from).await.expect("get from").as_deref());
+            let to_bal = parse_bal(txn.get(to).await.expect("get to").as_deref());
+            assert!(from_bal >= amount, "insufficient funds for transfer");
+            txn.put(from, &encode_bal(from_bal - amount))
+                .await
+                .expect("put debit");
+            txn.put(to, &encode_bal(to_bal + amount))
+                .await
+                .expect("put credit");
+            let ts = txn.commit().await.expect("commit transfer");
+            assert!(ts > 0, "commit_ts must be positive");
+        }
+
+        fn encode_bal(n: i64) -> Vec<u8> {
+            n.to_string().into_bytes()
+        }
+        fn parse_bal(v: Option<&[u8]>) -> i64 {
+            let v = v.expect("account missing");
+            std::str::from_utf8(v)
+                .unwrap()
+                .parse()
+                .expect("balance parse")
+        }
+
+        // Cross-range: apple (left) → mango (right)
+        transfer(&mut client, left_a, right_a, 30).await;
+        // Cross-range reverse: melon (right) → banana (left)
+        transfer(&mut client, right_b, left_b, 20).await;
+        // Same-range left: apple → banana
+        transfer(&mut client, left_a, left_b, 10).await;
+        // Same-range right: mango → melon
+        transfer(&mut client, right_a, right_b, 5).await;
+        // Cross-range again: banana → melon
+        transfer(&mut client, left_b, right_b, 15).await;
+
+        let mut balances = Vec::with_capacity(accounts.len());
+        for key in &accounts {
+            let v = client
+                .get(key)
+                .await
+                .unwrap_or_else(|e| panic!("get {}: {e}", String::from_utf8_lossy(key)))
+                .unwrap_or_else(|| panic!("missing {}", String::from_utf8_lossy(key)));
+            balances.push(parse(&v));
+        }
+        let sum: i64 = balances.iter().sum();
+        assert_eq!(
+            sum, expected_total,
+            "bank sum invariant violated: sum={sum} expected={expected_total} balances={balances:?}"
+        );
+        // Expected after transfers:
+        // apple:  100-30-10 = 60
+        // banana: 100+20+10-15 = 115
+        // mango:  100+30-5 = 125
+        // melon:  100-20+5+15 = 100
+        assert_eq!(balances, vec![60, 115, 125, 100]);
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
     /// Single-node multi-raft: two static ranges, puts route to independent groups.
     #[serial]
     #[tokio::test]

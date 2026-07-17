@@ -92,13 +92,11 @@ impl RangeCache {
             self.meta_epoch = meta_epoch;
         }
         for nr in ranges {
-            self.ranges.retain(|r| {
-                r.range_id != nr.range_id && !ranges_overlap(r, &nr)
-            });
+            self.ranges
+                .retain(|r| r.range_id != nr.range_id && !ranges_overlap(r, &nr));
             self.ranges.push(nr);
         }
-        self.ranges
-            .sort_by(|a, b| a.start_key.cmp(&b.start_key));
+        self.ranges.sort_by(|a, b| a.start_key.cmp(&b.start_key));
     }
 }
 
@@ -134,6 +132,10 @@ fn ranges_overlap(a: &CachedRange, b: &CachedRange) -> bool {
 /// leader; [`commit`](Transaction::commit) materializes them or
 /// [`rollback`](Transaction::rollback) discards them. A local write buffer
 /// provides client-side read-your-writes for keys written in this txn.
+///
+/// Cross-range (multi-group) commits are handled entirely by the server via
+/// 2PC when staged keys map to more than one Raft group. The client protocol
+/// is unchanged: same `TXN_BEGIN` / `TXN_OP` / `TXN_COMMIT` opcodes.
 pub struct Transaction<'a> {
     client: &'a mut KayaClient,
     txn_id: u64,
@@ -274,13 +276,15 @@ impl KayaClient {
                 meta_epoch,
                 ranges: ranges
                     .into_iter()
-                    .map(|(range_id, epoch, group_id, start_key, end_key)| CachedRange {
-                        range_id,
-                        epoch,
-                        group_id,
-                        start_key,
-                        end_key,
-                    })
+                    .map(
+                        |(range_id, epoch, group_id, start_key, end_key)| CachedRange {
+                            range_id,
+                            epoch,
+                            group_id,
+                            start_key,
+                            end_key,
+                        },
+                    )
                     .collect(),
             };
             self.range_cache = Some(cache.clone());
@@ -333,13 +337,15 @@ impl KayaClient {
         };
         let cached: Vec<CachedRange> = ranges
             .into_iter()
-            .map(|(range_id, epoch, group_id, start_key, end_key)| CachedRange {
-                range_id,
-                epoch,
-                group_id,
-                start_key,
-                end_key,
-            })
+            .map(
+                |(range_id, epoch, group_id, start_key, end_key)| CachedRange {
+                    range_id,
+                    epoch,
+                    group_id,
+                    start_key,
+                    end_key,
+                },
+            )
             .collect();
         match &mut self.range_cache {
             Some(cache) => cache.apply_descriptors(meta_epoch, cached),
@@ -828,6 +834,10 @@ impl Transaction<'_> {
 
     /// Commit staged intents. Returns the commit timestamp on success.
     ///
+    /// Range-transparent: single-group commits use ordinary `TxnCommit`; when
+    /// keys span multiple Raft groups the server runs 2PC. No client API or
+    /// wire difference.
+    ///
     /// Write-write conflicts map to [`KayaError::TxnConflict`].
     pub async fn commit(self) -> Result<u64> {
         let payload = encode_txn_id_payload(self.txn_id);
@@ -1025,10 +1035,7 @@ mod tests {
         assert_eq!(cache.ranges.len(), 1);
 
         // Second moved half with higher meta epoch replaces by range_id.
-        let body2 = encode_list_ranges_response(
-            4,
-            &[(2, 2, 9, b"k".to_vec(), b"z".to_vec())],
-        );
+        let body2 = encode_list_ranges_response(4, &[(2, 2, 9, b"k".to_vec(), b"z".to_vec())]);
         assert!(client.apply_range_moved_body(&body2));
         let cache = client.range_cache().unwrap();
         assert_eq!(cache.meta_epoch, 4);
