@@ -502,7 +502,13 @@ async fn admin_roundtrip(
             Ok(Ok((status, _body))) if status == STATUS_OK => return Ok(()),
             Ok(Ok((status, body))) => {
                 let msg = String::from_utf8_lossy(&body);
-                if status == kaya_net::STATUS_INVALID_ARGUMENT && msg.contains("already a voter") {
+                // Idempotent membership ops: re-ADD of an already-joined node is
+                // expected when the AddMember nemesis fires every interval (T6).
+                if status == kaya_net::STATUS_INVALID_ARGUMENT
+                    && (msg.contains("already a voter")
+                        || msg.contains("already a cluster member"))
+                {
+                    eprintln!("[ClusterController] {label} already applied (idempotent ok): {msg}");
                     return Ok(());
                 }
                 if status == STATUS_NOT_LEADER {
