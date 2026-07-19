@@ -295,6 +295,7 @@ impl TestRunner {
                 scenario.workload.clients
             );
             // Full buffer under multi-client WGL must show concurrent multi-client work.
+            // Soft-fail (not Err) so full_gate retries can re-run under quieter chaos.
             // (Under heavy kill, history may end short of max_ops; linearizability still runs.)
             if scenario.workload.clients > 1
                 && scenario
@@ -302,17 +303,30 @@ impl TestRunner {
                     .verify_max_ops
                     .is_some_and(|max| history.len() >= max)
             {
-                if distinct_clients < 2 {
-                    return Err(
+                let audit_msg = if distinct_clients < 2 {
+                    Some(
                         "WGL register scenarios require ops from at least two clients on shared key=register"
-                            .into(),
-                    );
-                }
-                if overlapping == 0 {
-                    return Err(
+                            .to_string(),
+                    )
+                } else if overlapping == 0 {
+                    Some(
                         "WGL register scenarios require overlapping multi-client intervals on shared key=register"
-                            .into(),
-                    );
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
+                if let Some(msg) = audit_msg {
+                    eprintln!("[Runner] WGL audit soft-fail (retryable): {msg}");
+                    return Ok(TestResult {
+                        passed: false,
+                        violations: vec![msg],
+                        stats: history.stats(),
+                        trace: None,
+                        partition_attempted: partition_tracker.attempted(),
+                        partition_applied: partition_tracker.applied(),
+                        partition_failed: partition_tracker.failed(),
+                    });
                 }
             }
         }

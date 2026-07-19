@@ -420,8 +420,10 @@ async fn run_register_op<R: Rng>(
     } else if !wgl || history.len() < verify_max_ops.unwrap_or(usize::MAX) {
         // Stagger concurrent clients so localhost sub-ms put+get RTTs still open
         // overlapping multi-client intervals for the WGL checker (jepsen-design W1).
+        // Wider window under kill/membership chaos (T6) so clients recover into
+        // overlapping open intervals rather than serial post-election bursts.
         if wgl {
-            sleep(Duration::from_millis(rng.gen_range(12..48))).await;
+            sleep(Duration::from_millis(rng.gen_range(40..160))).await;
         }
         let value: [u8; 8] = rng.gen();
         let op = Op::Put {

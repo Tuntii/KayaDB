@@ -143,7 +143,10 @@ impl History {
             })
     }
 
-    /// Count pairs of operations with overlapping wall-clock intervals.
+    /// Count pairs of ops from *different* clients with overlapping wall-clock intervals.
+    ///
+    /// Same-client pairs are ignored: the WGL audit needs multi-client concurrency, not
+    /// a single client with long retries under kill.
     pub fn overlapping_interval_pairs(&self) -> usize {
         let ops = self.operations.lock().unwrap();
         if ops.len() < 2 {
@@ -154,20 +157,20 @@ impl History {
             .map(|op| op.start_time)
             .min()
             .unwrap_or(self.start_time);
-        let intervals: Vec<(u64, u64)> = ops
+        let intervals: Vec<(usize, u64, u64)> = ops
             .iter()
             .map(|op| {
                 let start = op.start_time.duration_since(base).as_nanos() as u64;
                 let end = (op.end_time.duration_since(base).as_nanos() as u64).max(start + 1);
-                (start, end)
+                (op.client_id, start, end)
             })
             .collect();
         let mut count = 0usize;
         for i in 0..intervals.len() {
             for j in (i + 1)..intervals.len() {
-                let (s1, e1) = intervals[i];
-                let (s2, e2) = intervals[j];
-                if s1 < e2 && s2 < e1 {
+                let (c1, s1, e1) = intervals[i];
+                let (c2, s2, e2) = intervals[j];
+                if c1 != c2 && s1 < e2 && s2 < e1 {
                     count += 1;
                 }
             }
