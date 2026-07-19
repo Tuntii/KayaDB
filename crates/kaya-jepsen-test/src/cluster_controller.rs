@@ -505,8 +505,7 @@ async fn admin_roundtrip(
                 // Idempotent membership ops: re-ADD of an already-joined node is
                 // expected when the AddMember nemesis fires every interval (T6).
                 if status == kaya_net::STATUS_INVALID_ARGUMENT
-                    && (msg.contains("already a voter")
-                        || msg.contains("already a cluster member"))
+                    && (msg.contains("already a voter") || msg.contains("already a cluster member"))
                 {
                     eprintln!("[ClusterController] {label} already applied (idempotent ok): {msg}");
                     return Ok(());
