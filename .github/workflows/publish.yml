@@ -38,6 +38,7 @@ env:
     kaya-engine
     kaya-net
     kaya-client
+    kaya-ebpf
     kayactl
 
 jobs:

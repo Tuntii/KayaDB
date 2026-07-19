@@ -11,6 +11,8 @@ ORDER=(
   kaya-engine
   kaya-net
   kaya-client
+  # Optional kayactl/kaya-server dep; must land on crates.io before kayactl packages.
+  kaya-ebpf
   kayactl
 )
 
