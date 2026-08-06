@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Jepsen T6 nightly:** re-`ADD_MEMBER` of an already-joined node is treated as idempotent; WGL multi-client overlap audit soft-fails so full_gate can retry under kill/membership chaos
+- **crates.io publish order:** publish `kaya-ebpf` (and `kaya-server`) before `kayactl` so optional/path deps resolve on the registry
+
+### Changed
+- **Release hygiene:** align `workspace.dependencies` path crate versions with `workspace.package` (`0.1.113`); refresh README/docs install pins and release pages to the current line
+
 ---
 
 ## [0.1.113] - 2026-07-17

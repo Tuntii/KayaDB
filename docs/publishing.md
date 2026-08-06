@@ -85,7 +85,7 @@ Workspace crates publish in dependency order via `scripts/smart_publish.ps1`. Se
 .\scripts\smart_publish.ps1 -DryRun -SkipVersionUpdate
 ```
 
-**Current workspace version:** `0.1.46` (see [releases](releases.md)).
+**Current workspace version:** `0.1.113` (see [releases](releases.md)). Publish order includes `kaya-ebpf` and `kaya-server` before `kayactl`.
 
 ---
 

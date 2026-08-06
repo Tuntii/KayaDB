@@ -9,7 +9,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](Cargo.toml)
 [![crates.io: kaya-engine](https://img.shields.io/crates/v/kaya-engine.svg?label=kaya-engine)](https://crates.io/crates/kaya-engine)
 [![crates.io: kayactl](https://img.shields.io/crates/v/kayactl.svg?label=kayactl)](https://crates.io/crates/kayactl)
-[![Status](https://img.shields.io/badge/status-M15%20complete-brightgreen.svg)](https://tuntii.github.io/KayaDB/#/ROADMAP.md)
+[![Status](https://img.shields.io/badge/status-v0.1.113%20·%20v0.2.0%20candidate-brightgreen.svg)](https://tuntii.github.io/KayaDB/#/ROADMAP.md)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://tuntii.github.io/KayaDB/)
 
 **A correctness-first, embeddable distributed key-value database built in Rust.**
@@ -68,8 +68,8 @@ cargo install kayactl
 cargo install kaya-server --bin kayadb-server
 ```
 
-Pre-built binaries: [GitHub Releases](https://github.com/Tuntii/KayaDB/releases) (`v0.1.46` and later).  
-Rust library: `kaya-engine = "0.1.46"` — see [installation guide](docs/installation.md).
+Pre-built binaries: [GitHub Releases](https://github.com/Tuntii/KayaDB/releases) (`v0.1.113` and later).  
+Rust library: `kaya-engine = "0.1.113"` — see [installation guide](docs/installation.md).
 
 ---
 
@@ -83,14 +83,14 @@ Rust library: `kaya-engine = "0.1.46"` — see [installation guide](docs/install
 | Deterministic disk faults | ✅ Implemented | `SimDisk`, `FaultSchedule`, replayable operation ordering |
 | Simulator | ✅ Implemented | Seeded workloads, trace replay, reference-model checks |
 | Fuzz targets | ✅ Implemented | WAL, SSTable, manifest, server command frame decoders |
-| Raft state machine | ✅ Prototype | Election, AppendEntries, commit index, simulation coverage |
-| TCP cluster mode | ✅ Prototype | Joint-consensus membership, leader-routed client operations |
-| Async Rust client | ✅ Implemented | `kaya-client` with leader redirection support |
-| Operator CLI | ✅ Implemented | Local mode, server mode, inspect, stats, `add-node`/`remove-node` |
-| Production hardening | ✅ M13 | Native TLS (`tls` feature), operator token, mTLS sidecar runbooks, chaos validation |
-| Storage algorithms | ✅ M14+ | Compaction, bloom, WAL batching, io_uring; block cache + LZ4 (SSTable v3) |
+| Raft state machine | ✅ Implemented | Election, AppendEntries, snapshots, joint-consensus membership |
+| TCP cluster mode | ✅ Implemented | Multi-raft ranges, leader-routed ops, TLS + token auth |
+| Async Rust client | ✅ Implemented | `kaya-client` with redirect, TXN, range, CDC, retries |
+| Operator CLI | ✅ Implemented | Local/server mode, inspect, range, index, backup, membership |
+| Production hardening | ✅ M13–M24 | TLS, tokens, ACL, encryption-at-rest, runbooks, chaos gates |
+| Distributed TXN KV | ✅ M16–M25 | MVCC, SI, 2PC, indexes, CDC, range split/merge (v0.2.0 candidate) |
 
-> KayaDB completed M13 productization (2026-06-21) and **M14 correctness+algorithm** (v0.1.44, 2026-06-24): LSM policy upgrades, Jepsen full gate T1–T7, and Linux `io_uring` Disk prototype. It remains a correctness-first distributed KV engine with documented day-2 runbooks — not a fully hardened multi-tenant SaaS database. See [security and deployment notes](docs/security.md) and accepted risks (§7) before any production-like deployment.
+> **v0.1.113** closes the **M16–M25 production path** (range-sharded multi-raft KV, SI + sequential cross-range 2PC, encryption, ACL, Go/Python/TS clients). It is a **v0.2.0 candidate**, not an unqualified production-SLA claim — residual risks (live range migrate, Raft-replicated range meta, grand Jepsen matrix, key rotation) are listed in [ROADMAP.md](ROADMAP.md). See [security](docs/security.md) §7 before any production-like deployment.
 
 ---
 
@@ -288,7 +288,7 @@ Detailed numbers and methodology live in [BENCHMARKS.md](BENCHMARKS.md).
 
 See the **[full status and roadmap](ROADMAP.md)** and the tracked **[productization north star](docs/productization.md)** (M13 exit gates — prototype → deployable product).
 
-**M15** (v0.1.46) closes remaining parallel tracks: client token auth for data ops, structured audit logging, protocol conformance vectors, Go client, Prometheus `/metrics`, Docker/K8s deployment, HELLO handshake, and `kayactl watch`. **M14** adds compaction policy, bloom filters, WAL batching, Jepsen full gate T1–T7, and Linux `io_uring` Disk prototype. Remaining deployment hardening (data-at-rest, multi-tenant, SIEM audit export) is documented as accepted risk in [security.md §7](docs/security.md#7-accepted-risks-and-future-hardening-m15-exit). See [ROADMAP.md](ROADMAP.md) for parallel tracks.
+**Current line:** `v0.1.113` (M16–M25 production path; **v0.2.0 candidate**). Earlier milestones: M13 productization, M14 algorithms + Jepsen full gate, M15 auth/ops/clients/deploy. Honest residuals and next cut priorities: [ROADMAP.md](ROADMAP.md). Accepted risks: [security.md §7](docs/security.md#7-accepted-risks-and-future-hardening-m15-exit).
 
 For the complete picture, use the **[official documentation](https://tuntii.github.io/KayaDB/)** or [docs/README.md](docs/README.md).
 

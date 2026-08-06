@@ -14,9 +14,10 @@ kaya-lsm = { path = "crates/kaya-lsm" }
 kaya-engine = { path = "crates/kaya-engine" }
 kaya-net = { path = "crates/kaya-net" }
 kaya-client = { path = "crates/kaya-client" }
-# publish = false workspace crate; kayactl optional dep still resolves for packaging
 kaya-ebpf = { path = "crates/kaya-ebpf" }
+kaya-server = { path = "crates/kaya-server" }
 EOF
 
 cargo package --no-verify -p kaya-engine
+cargo package --no-verify -p kaya-server
 cargo package --no-verify -p kayactl
