@@ -70,7 +70,7 @@ jobs:
       - name: Linux partition proof (iptables applied>0)
         run: cargo test -p kaya-jepsen-test --test partition_nemesis -- --ignored --nocapture --test-threads=1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: jepsen-traces
