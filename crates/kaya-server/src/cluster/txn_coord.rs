@@ -11,15 +11,18 @@
 //!
 //! # Crash recovery
 //!
-//! On startup, [`recover_incomplete_2pc`] scans `\x00txn/rec/*`:
+//! On startup (and on every [`kaya_engine::Engine::open`]), incomplete 2PC
+//! records are recovered:
 //! - `Preparing` / `Prepared` → abort (fail-closed; no durable global decision)
 //! - `Committing` → finish commit (decision was durable; never abort)
 //! - `Committed` / `Aborted` → leave untouched
+//!
+//! Server startup still calls [`recover_incomplete_2pc`] for logging; engine open
+//! already applied the same logic so the second call is idempotent.
 
 use std::collections::HashMap;
 use std::future::Future;
 
-use kaya_engine::{ScanOptions, Txn2pcState, TXN_REC_PREFIX};
 use kaya_io::Disk;
 use kaya_raft::{GroupId, RaftCommand};
 
@@ -129,67 +132,20 @@ where
     Ok(())
 }
 
-/// Parse `txn_id` from a `\x00txn/rec/{txn_id_be8}` key.
-pub fn parse_rec_txn_id(key: &[u8]) -> Option<u64> {
-    if key.len() != TXN_REC_PREFIX.len() + 8 {
-        return None;
-    }
-    if !key.starts_with(TXN_REC_PREFIX) {
-        return None;
-    }
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&key[TXN_REC_PREFIX.len()..]);
-    Some(u64::from_be_bytes(buf))
-}
-
 /// Crash recovery for incomplete 2PC participant records.
 ///
-/// - `Preparing` / `Prepared` → abort (no durable commit decision)
-/// - `Committing` → finish commit (load remaining intents, materialize, clear,
-///   mark `Committed`)
-/// - `Committed` / `Aborted` → no-op
+/// Delegates to [`kaya_engine::Engine::recover_incomplete_2pc`] (also run on
+/// every engine open). Returns `(aborted, finished_commits)`.
 ///
-/// Returns `(aborted, finished_commits)`.
-///
-/// Called once at node startup before the Raft event loop runs.
+/// Called at node startup for operator logging before the Raft event loop runs.
 pub async fn recover_incomplete_2pc<D: Disk>(
     engine: &mut kaya_engine::Engine<D>,
 ) -> Result<(u32, u32), String> {
-    let rows = engine
-        .scan_prefix(TXN_REC_PREFIX, ScanOptions::default())
+    let stats = engine
+        .recover_incomplete_2pc()
         .await
         .map_err(|e| e.to_string())?;
-
-    let mut aborted = 0u32;
-    let mut finished = 0u32;
-    for kv in rows {
-        let Some(txn_id) = parse_rec_txn_id(&kv.key) else {
-            continue;
-        };
-        if kv.value.is_empty() {
-            continue;
-        }
-        let state = Txn2pcState::from_byte(kv.value[0]).map_err(|e| e.to_string())?;
-        match state {
-            Txn2pcState::Preparing | Txn2pcState::Prepared => {
-                engine
-                    .apply_txn_abort_2pc(txn_id)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                aborted = aborted.saturating_add(1);
-            }
-            Txn2pcState::Committing => {
-                // Decision was durable: finish materialization, never abort.
-                engine
-                    .apply_txn_commit_2pc(txn_id)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                finished = finished.saturating_add(1);
-            }
-            Txn2pcState::Committed | Txn2pcState::Aborted => {}
-        }
-    }
-    Ok((aborted, finished))
+    Ok((stats.aborted, stats.finished_commits))
 }
 
 #[cfg(test)]
@@ -208,8 +164,11 @@ mod tests {
     #[test]
     fn parse_rec_key_roundtrip() {
         let k = kaya_engine::encode_rec_key(0x0102_0304_0506_0708);
-        assert_eq!(parse_rec_txn_id(&k), Some(0x0102_0304_0506_0708));
-        assert_eq!(parse_rec_txn_id(b"nope"), None);
+        assert_eq!(
+            kaya_engine::parse_rec_txn_id(&k),
+            Some(0x0102_0304_0506_0708)
+        );
+        assert_eq!(kaya_engine::parse_rec_txn_id(b"nope"), None);
     }
 
     #[tokio::test]
@@ -263,7 +222,7 @@ mod tests {
         use std::sync::Arc;
 
         use kaya_core::EngineConfig;
-        use kaya_engine::{Engine, ReadOptions};
+        use kaya_engine::{Engine, ReadOptions, Txn2pcState};
         use kaya_io::SimDisk;
 
         let disk = Arc::new(SimDisk::new());
@@ -299,6 +258,35 @@ mod tests {
         assert_eq!(
             engine.get(b"fin", ReadOptions::default()).await.unwrap(),
             Some(b"2".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_finishes_committing_via_wrapper() {
+        use std::sync::Arc;
+
+        use kaya_core::EngineConfig;
+        use kaya_engine::{Engine, ReadOptions, Txn2pcState};
+        use kaya_io::SimDisk;
+
+        let disk = Arc::new(SimDisk::new());
+        let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+        engine
+            .apply_txn_prepare(3, &[(b"x".to_vec(), Some(b"v".to_vec()))])
+            .await
+            .unwrap();
+        // Engine-level tests cover Committing reopen; here ensure the server
+        // wrapper aborts Prepared via the same recover_incomplete_2pc path.
+        let (aborted, finished) = recover_incomplete_2pc(&mut engine).await.unwrap();
+        assert_eq!(aborted, 1);
+        assert_eq!(finished, 0);
+        assert_eq!(
+            engine.read_txn2pc_state(3).unwrap(),
+            Some(Txn2pcState::Aborted)
+        );
+        assert_eq!(
+            engine.get(b"x", ReadOptions::default()).await.unwrap(),
+            None
         );
     }
 

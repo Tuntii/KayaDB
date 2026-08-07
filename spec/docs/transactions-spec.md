@@ -360,10 +360,12 @@ only under `\x00txn/intent/…`).
 3. Propose `TxnPrepare` on each participant group (sequential propose; wait applied).
 4. If all prepared: propose `TxnCommit2pc` on all; else `TxnAbort2pc` on
    prepared participants.
-5. Crash recovery on startup:
+5. Crash recovery on every `Engine::open` (and again at server startup for logging;
+   second pass is idempotent):
    - `Preparing` / `Prepared` → abort (fail-closed; no durable commit decision)
    - `Committing` → finish commit (never abort)
    - `Committed` / `Aborted` → leave untouched
+   - Counts exposed on `RecoveryReport.txn2pc_aborted` / `txn2pc_finished_commits`
 
 **Operational note:** cross-group 2PC requires this node to be leader of **all**
 participant groups for the sequential propose path (shared-engine single-node

@@ -108,6 +108,28 @@ pub fn user_key_from_intent_key(txn_id: u64, intent_key: &[u8]) -> Option<&[u8]>
     intent_key.strip_prefix(prefix.as_slice())
 }
 
+/// Parse `txn_id` from a `\x00txn/rec/{txn_id_be8}` key.
+pub fn parse_rec_txn_id(key: &[u8]) -> Option<u64> {
+    if key.len() != TXN_REC_PREFIX.len() + 8 {
+        return None;
+    }
+    if !key.starts_with(TXN_REC_PREFIX) {
+        return None;
+    }
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&key[TXN_REC_PREFIX.len()..]);
+    Some(u64::from_be_bytes(buf))
+}
+
+/// Counts returned by [`Engine::recover_incomplete_2pc`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Txn2pcRecoveryStats {
+    /// Records that were `Preparing` / `Prepared` and aborted fail-closed.
+    pub aborted: u32,
+    /// Records that were `Committing` and finished to `Committed`.
+    pub finished_commits: u32,
+}
+
 /// Encode an intent value: put or delete tombstone.
 pub fn encode_intent_value(value: Option<&[u8]>) -> Bytes {
     match value {
@@ -271,6 +293,42 @@ impl<D: Disk> Engine<D> {
             Some(_) => Err(KayaError::corruption("empty 2PC rec value")),
             None => Ok(None),
         }
+    }
+
+    /// Crash recovery for incomplete 2PC participant records (run on open).
+    ///
+    /// - `Preparing` / `Prepared` → abort (fail-closed; no durable commit decision)
+    /// - `Committing` → finish commit (decision was durable; never abort)
+    /// - `Committed` / `Aborted` → leave untouched
+    ///
+    /// Safe to call multiple times (idempotent).
+    pub async fn recover_incomplete_2pc(&mut self) -> Result<Txn2pcRecoveryStats> {
+        // Use the internal scan so open-time recovery does not pollute user-facing
+        // scan latency histograms (see read_path_latency_histograms_are_populated).
+        let rows = self.scan_prefix_inner(TXN_REC_PREFIX, ScanOptions::default())?;
+
+        let mut stats = Txn2pcRecoveryStats::default();
+        for kv in rows {
+            let Some(txn_id) = parse_rec_txn_id(&kv.key) else {
+                continue;
+            };
+            if kv.value.is_empty() {
+                continue;
+            }
+            let state = Txn2pcState::from_byte(kv.value[0])?;
+            match state {
+                Txn2pcState::Preparing | Txn2pcState::Prepared => {
+                    self.apply_txn_abort_2pc(txn_id).await?;
+                    stats.aborted = stats.aborted.saturating_add(1);
+                }
+                Txn2pcState::Committing => {
+                    self.apply_txn_commit_2pc(txn_id).await?;
+                    stats.finished_commits = stats.finished_commits.saturating_add(1);
+                }
+                Txn2pcState::Committed | Txn2pcState::Aborted => {}
+            }
+        }
+        Ok(stats)
     }
 
     fn load_durable_intents(&mut self, txn_id: u64) -> Result<Vec<(Bytes, Option<Bytes>)>> {
@@ -513,7 +571,9 @@ mod tests {
     }
 
     #[test]
-    fn prepare_survives_reopen() {
+    fn prepare_without_commit_aborts_on_reopen() {
+        // Incomplete 2PC (Prepared, no durable commit decision) is fail-closed
+        // on Engine::open — intents and partial prepares must not leak.
         block_on(async {
             let disk = Arc::new(SimDisk::new());
             {
@@ -524,25 +584,30 @@ mod tests {
                     .apply_txn_prepare(11, &[(b"x".to_vec(), Some(b"durable".to_vec()))])
                     .await
                     .unwrap();
+                assert_eq!(
+                    engine.read_txn2pc_state(11).unwrap(),
+                    Some(Txn2pcState::Prepared)
+                );
             }
             let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            assert!(
+                engine.last_recovery().txn2pc_aborted >= 1,
+                "Prepared must abort on open"
+            );
             assert_eq!(
                 engine.read_txn2pc_state(11).unwrap(),
-                Some(Txn2pcState::Prepared)
+                Some(Txn2pcState::Aborted)
             );
-            let raw = engine
-                .get(&encode_intent_key(11, b"x"), ReadOptions::default())
-                .await
-                .unwrap()
-                .unwrap();
             assert_eq!(
-                decode_intent_value(&raw).unwrap(),
-                Some(b"durable".to_vec())
+                engine
+                    .get(&encode_intent_key(11, b"x"), ReadOptions::default())
+                    .await
+                    .unwrap(),
+                None
             );
-            engine.apply_txn_commit_2pc(11).await.unwrap();
             assert_eq!(
                 engine.get(b"x", ReadOptions::default()).await.unwrap(),
-                Some(b"durable".to_vec())
+                None
             );
         });
     }
@@ -639,5 +704,177 @@ mod tests {
                 "unexpected err: {err}"
             );
         });
+    }
+
+    #[test]
+    fn open_aborts_preparing_and_prepared_clears_intents() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            {
+                let mut engine = Engine::open(EngineConfig::default(), disk.clone())
+                    .await
+                    .unwrap();
+                // Mid-prepare: Preparing + one intent (never flipped to Prepared).
+                engine
+                    .write_put(
+                        encode_rec_key(100),
+                        vec![Txn2pcState::Preparing.as_byte()],
+                        WriteOptions::default(),
+                    )
+                    .await
+                    .unwrap();
+                engine
+                    .write_put(
+                        encode_intent_key(100, b"orphan"),
+                        encode_intent_value(Some(b"x")),
+                        WriteOptions::default(),
+                    )
+                    .await
+                    .unwrap();
+                engine
+                    .apply_txn_prepare(101, &[(b"prep".to_vec(), Some(b"y".to_vec()))])
+                    .await
+                    .unwrap();
+            }
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            assert!(engine.last_recovery().txn2pc_aborted >= 2);
+            assert_eq!(
+                engine.read_txn2pc_state(100).unwrap(),
+                Some(Txn2pcState::Aborted)
+            );
+            assert_eq!(
+                engine.read_txn2pc_state(101).unwrap(),
+                Some(Txn2pcState::Aborted)
+            );
+            assert_eq!(
+                engine
+                    .get(&encode_intent_key(100, b"orphan"), ReadOptions::default())
+                    .await
+                    .unwrap(),
+                None
+            );
+            assert_eq!(
+                engine.get(b"prep", ReadOptions::default()).await.unwrap(),
+                None
+            );
+            assert_eq!(
+                engine.get(b"orphan", ReadOptions::default()).await.unwrap(),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn open_finishes_committing_across_reopen() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            {
+                let mut engine = Engine::open(EngineConfig::default(), disk.clone())
+                    .await
+                    .unwrap();
+                engine
+                    .apply_txn_prepare(
+                        200,
+                        &[
+                            (b"a".to_vec(), Some(b"1".to_vec())),
+                            (b"b".to_vec(), Some(b"2".to_vec())),
+                        ],
+                    )
+                    .await
+                    .unwrap();
+                engine
+                    .write_put(
+                        encode_rec_key(200),
+                        vec![Txn2pcState::Committing.as_byte()],
+                        WriteOptions::default(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let mut engine = Engine::open(EngineConfig::default(), disk.clone())
+                .await
+                .unwrap();
+            assert_eq!(engine.last_recovery().txn2pc_finished_commits, 1);
+            assert_eq!(
+                engine.read_txn2pc_state(200).unwrap(),
+                Some(Txn2pcState::Committed)
+            );
+            assert_eq!(
+                engine.get(b"a", ReadOptions::default()).await.unwrap(),
+                Some(b"1".to_vec())
+            );
+            assert_eq!(
+                engine.get(b"b", ReadOptions::default()).await.unwrap(),
+                Some(b"2".to_vec())
+            );
+            // Idempotent second open.
+            let engine2 = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            assert_eq!(engine2.last_recovery().txn2pc_finished_commits, 0);
+        });
+    }
+
+    #[test]
+    fn open_finishes_committing_after_partial_materialization() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            {
+                let mut engine = Engine::open(EngineConfig::default(), disk.clone())
+                    .await
+                    .unwrap();
+                engine
+                    .apply_txn_prepare(
+                        300,
+                        &[
+                            (b"u1".to_vec(), Some(b"one".to_vec())),
+                            (b"u2".to_vec(), Some(b"two".to_vec())),
+                        ],
+                    )
+                    .await
+                    .unwrap();
+                // Crash after decision + partial user-key write (u1 only).
+                engine
+                    .write_put(
+                        encode_rec_key(300),
+                        vec![Txn2pcState::Committing.as_byte()],
+                        WriteOptions::default(),
+                    )
+                    .await
+                    .unwrap();
+                engine
+                    .put(b"u1".to_vec(), b"one".to_vec(), strict_opts())
+                    .await
+                    .unwrap();
+                // Intent for u1 still present (clear not done); u2 intent remains.
+            }
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            assert_eq!(engine.last_recovery().txn2pc_finished_commits, 1);
+            assert_eq!(
+                engine.get(b"u1", ReadOptions::default()).await.unwrap(),
+                Some(b"one".to_vec())
+            );
+            assert_eq!(
+                engine.get(b"u2", ReadOptions::default()).await.unwrap(),
+                Some(b"two".to_vec())
+            );
+            assert_eq!(
+                engine.read_txn2pc_state(300).unwrap(),
+                Some(Txn2pcState::Committed)
+            );
+            assert_eq!(
+                engine
+                    .get(&encode_intent_key(300, b"u1"), ReadOptions::default())
+                    .await
+                    .unwrap(),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn parse_rec_txn_id_roundtrip() {
+        let k = encode_rec_key(0x0102_0304_0506_0708);
+        assert_eq!(parse_rec_txn_id(&k), Some(0x0102_0304_0506_0708));
+        assert_eq!(parse_rec_txn_id(b"nope"), None);
+        assert_eq!(parse_rec_txn_id(TXN_REC_PREFIX), None);
     }
 }

@@ -32,8 +32,8 @@ pub use stats::{CompactionResult, EngineStats, FlushResult, WriteResult};
 pub use txn::{Intent, TxnId};
 pub use txn2pc::{
     decode_intent_value, encode_intent_key, encode_intent_scan_prefix, encode_intent_value,
-    encode_rec_key, is_txn_system_key, user_key_from_intent_key, Txn2pcState, TXN_INTENT_PREFIX,
-    TXN_REC_PREFIX, TXN_SYS_PREFIX,
+    encode_rec_key, is_txn_system_key, parse_rec_txn_id, user_key_from_intent_key,
+    Txn2pcRecoveryStats, Txn2pcState, TXN_INTENT_PREFIX, TXN_REC_PREFIX, TXN_SYS_PREFIX,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -97,6 +97,10 @@ pub struct RecoveryReport {
     pub warnings: Vec<RecoveryWarning>,
     pub wal: WalRecoveryReport,
     pub records_replayed: usize,
+    /// 2PC records aborted fail-closed (`Preparing` / `Prepared`) during open.
+    pub txn2pc_aborted: u32,
+    /// 2PC `Committing` records finished to `Committed` during open.
+    pub txn2pc_finished_commits: u32,
 }
 
 #[derive(Debug)]
@@ -270,6 +274,8 @@ impl<D: Disk> Engine<D> {
             warnings,
             wal: wal_report,
             records_replayed: wal_records_replayed,
+            txn2pc_aborted: 0,
+            txn2pc_finished_commits: 0,
         };
 
         let mut engine = Self {
@@ -297,6 +303,10 @@ impl<D: Disk> Engine<D> {
         engine.load_index_metadata()?;
         // Load durable CDC log + consumer cursors when enabled.
         engine.load_cdc_state().await?;
+        // 2PC crash recovery: abort Preparing/Prepared; finish Committing.
+        let txn2pc = engine.recover_incomplete_2pc().await?;
+        engine.last_recovery.txn2pc_aborted = txn2pc.aborted;
+        engine.last_recovery.txn2pc_finished_commits = txn2pc.finished_commits;
         Ok(engine)
     }
 
