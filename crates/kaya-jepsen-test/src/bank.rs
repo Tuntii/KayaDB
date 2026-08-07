@@ -15,15 +15,43 @@ pub const BANK_NUM_ACCOUNTS: usize = 10;
 pub const BANK_INITIAL_BALANCE: i64 = 100;
 /// Key prefix for account keys: `acct:{i}`.
 pub const BANK_KEY_PREFIX: &str = "acct:";
+/// Split key for multi-range layout (`[a,m)` left, `[m,z)` right).
+pub const BANK_MR_SPLIT_KEY: &[u8] = b"m";
+
+/// Key layout for bank accounts (single range vs multi-range 2PC stress).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BankLayout {
+    /// Single-group keys `acct:0..N-1` (default M17 bank).
+    #[default]
+    Single,
+    /// Multi-range keys: left `a0..` in `[a,m)`, right `m0..` in `[m,z)`.
+    /// Cross-range SI transfers exercise sequential 2PC when groups differ.
+    MultiRange,
+}
 
 /// Expected constant total after seeding with defaults.
 pub fn bank_expected_total(num_accounts: usize, initial: i64) -> i64 {
     (num_accounts as i64).saturating_mul(initial)
 }
 
-/// Wire key for account `i`.
+/// Wire key for account `i` (single-range layout).
 pub fn bank_account_key(i: usize) -> Vec<u8> {
-    format!("{BANK_KEY_PREFIX}{i}").into_bytes()
+    bank_account_key_for(BankLayout::Single, i)
+}
+
+/// Wire key for account `i` under the given layout.
+pub fn bank_account_key_for(layout: BankLayout, i: usize) -> Vec<u8> {
+    match layout {
+        BankLayout::Single => format!("{BANK_KEY_PREFIX}{i}").into_bytes(),
+        BankLayout::MultiRange => {
+            let half = BANK_NUM_ACCOUNTS / 2;
+            if i < half {
+                format!("a{i}").into_bytes()
+            } else {
+                format!("m{}", i - half).into_bytes()
+            }
+        }
+    }
 }
 
 /// Encode balance as decimal ASCII (no leading zeros except for 0).
@@ -137,19 +165,29 @@ pub fn check_transfer_history(
     Ok(model)
 }
 
-/// Seed accounts `acct:0..n-1` with `initial` via plain puts (leader path).
+/// Seed accounts with `initial` via plain puts (leader path).
 pub async fn seed_bank_accounts(
     client: &mut KayaClient,
     num_accounts: usize,
     initial: i64,
 ) -> Result<(), String> {
+    seed_bank_accounts_layout(client, num_accounts, initial, BankLayout::Single).await
+}
+
+/// Seed accounts under a specific key layout.
+pub async fn seed_bank_accounts_layout(
+    client: &mut KayaClient,
+    num_accounts: usize,
+    initial: i64,
+    layout: BankLayout,
+) -> Result<(), String> {
     let value = encode_balance(initial);
     for i in 0..num_accounts {
-        let key = bank_account_key(i);
+        let key = bank_account_key_for(layout, i);
         client
             .put(&key, &value)
             .await
-            .map_err(|e| format!("seed acct:{i}: {e}"))?;
+            .map_err(|e| format!("seed {}: {e}", String::from_utf8_lossy(&key)))?;
     }
     Ok(())
 }
@@ -159,15 +197,25 @@ pub async fn read_bank_balances(
     client: &mut KayaClient,
     num_accounts: usize,
 ) -> Result<Vec<i64>, String> {
+    read_bank_balances_layout(client, num_accounts, BankLayout::Single).await
+}
+
+/// Read all account balances under a specific key layout.
+pub async fn read_bank_balances_layout(
+    client: &mut KayaClient,
+    num_accounts: usize,
+    layout: BankLayout,
+) -> Result<Vec<i64>, String> {
     let mut out = Vec::with_capacity(num_accounts);
     for i in 0..num_accounts {
-        let key = bank_account_key(i);
+        let key = bank_account_key_for(layout, i);
+        let label = String::from_utf8_lossy(&key);
         match client.get(&key).await {
             Ok(Some(v)) => {
-                out.push(parse_balance(&v).map_err(|e| format!("acct:{i}: {e}"))?);
+                out.push(parse_balance(&v).map_err(|e| format!("{label}: {e}"))?);
             }
-            Ok(None) => return Err(format!("missing account key acct:{i}")),
-            Err(e) => return Err(format!("get acct:{i}: {e}")),
+            Ok(None) => return Err(format!("missing account key {label}")),
+            Err(e) => return Err(format!("get {label}: {e}")),
         }
     }
     Ok(out)
@@ -184,11 +232,22 @@ pub async fn bank_transfer(
     to: usize,
     amount: i64,
 ) -> Result<bool, KayaError> {
+    bank_transfer_layout(client, from, to, amount, BankLayout::Single).await
+}
+
+/// SI transfer under a specific bank key layout (multi-range → possible 2PC).
+pub async fn bank_transfer_layout(
+    client: &mut KayaClient,
+    from: usize,
+    to: usize,
+    amount: i64,
+    layout: BankLayout,
+) -> Result<bool, KayaError> {
     if from == to || amount <= 0 {
         return Ok(false);
     }
-    let from_key = bank_account_key(from);
-    let to_key = bank_account_key(to);
+    let from_key = bank_account_key_for(layout, from);
+    let to_key = bank_account_key_for(layout, to);
 
     let mut txn = client.begin_txn().await?;
     let from_bal = match txn.get(&from_key).await? {
@@ -229,7 +288,30 @@ pub async fn verify_bank_sum_live(
     expected_total: i64,
     op_timeout: Duration,
 ) -> Result<(), String> {
-    let balances = match timeout(op_timeout, read_bank_balances(client, num_accounts)).await {
+    verify_bank_sum_live_layout(
+        client,
+        num_accounts,
+        expected_total,
+        op_timeout,
+        BankLayout::Single,
+    )
+    .await
+}
+
+/// Sum invariant check under a specific bank key layout.
+pub async fn verify_bank_sum_live_layout(
+    client: &mut KayaClient,
+    num_accounts: usize,
+    expected_total: i64,
+    op_timeout: Duration,
+    layout: BankLayout,
+) -> Result<(), String> {
+    let balances = match timeout(
+        op_timeout,
+        read_bank_balances_layout(client, num_accounts, layout),
+    )
+    .await
+    {
         Ok(Ok(b)) => b,
         Ok(Err(e)) => return Err(e),
         Err(_) => return Err("timed out reading bank balances".into()),

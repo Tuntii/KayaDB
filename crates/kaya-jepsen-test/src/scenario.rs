@@ -1,5 +1,6 @@
 //! Scenario registry for Jepsen-style chaos tests.
 
+use crate::bank::BankLayout;
 use crate::nemesis::{MemberSpec, NemesisConfig, NemesisType};
 use crate::workload::{WorkloadConfig, WorkloadType, WGL_VERIFY_MAX_OPS};
 use std::time::Duration;
@@ -32,6 +33,8 @@ pub enum Topology {
     ThreeNode,
     /// Three-node cluster with a fourth node joining via membership change.
     FourNodeJoin,
+    /// Three-node multi-raft with static ranges `[a,m)→g1`, `[m,z)→g2`.
+    ThreeNodeMultiRange,
 }
 
 /// A declarative chaos test scenario.
@@ -62,6 +65,7 @@ fn workload(workload_type: WorkloadType, clients: usize, duration_secs: u64) -> 
         duration: Duration::from_secs(duration_secs),
         rate_limit: 0,
         verify_max_ops: None,
+        bank_layout: BankLayout::Single,
     }
 }
 
@@ -77,6 +81,7 @@ fn concurrent_workload(
         duration: Duration::from_secs(duration_secs),
         rate_limit: 0,
         verify_max_ops: Some(WGL_VERIFY_MAX_OPS),
+        bank_layout: BankLayout::Single,
     }
 }
 
@@ -266,6 +271,7 @@ pub fn bank_scenario() -> Scenario {
             duration: Duration::from_secs(60),
             rate_limit: 0,
             verify_max_ops: None,
+            bank_layout: BankLayout::Single,
         },
         hooks: vec![],
         duration_secs: 60,
@@ -283,7 +289,46 @@ pub fn bank_scenario() -> Scenario {
     }
 }
 
-/// All registered scenarios (smoke + rich + T1–T7 + bank).
+/// Multi-range bank under split + merge + kill + partition (grand matrix).
+///
+/// Static ranges `[a,m)→g1` / `[m,z)→g2` with multi-range account keys so SI
+/// transfers frequently cross groups (sequential 2PC). Range ops soft-fail when
+/// the meta table is already split/merged; kill/partition stress leadership.
+/// Live MOVE_RANGE rebalance is out of scope (advisory plan only product-side).
+pub fn multi_range_bank_scenario() -> Scenario {
+    Scenario {
+        id: "bank-mr",
+        workload: WorkloadConfig {
+            workload_type: WorkloadType::Bank,
+            clients: 5,
+            duration: Duration::from_secs(90),
+            rate_limit: 0,
+            verify_max_ops: None,
+            bank_layout: BankLayout::MultiRange,
+        },
+        hooks: vec![],
+        duration_secs: 90,
+        verify: VerifyMode::BankSum,
+        topology: Topology::ThreeNodeMultiRange,
+        nemesis: Some(NemesisConfig {
+            nemesis_type: NemesisType::Composite(vec![
+                NemesisType::SplitRange {
+                    split_key: b"c".to_vec(),
+                },
+                NemesisType::MergeRange {
+                    left_start: b"a".to_vec(),
+                },
+                NemesisType::KillNode,
+                NemesisType::Partition,
+            ]),
+            interval: Duration::from_secs(12),
+            duration: Duration::from_secs(6),
+            probability: 1.0,
+        }),
+    }
+}
+
+/// All registered scenarios (smoke + rich + T1–T7 + bank + multi-range bank).
 pub fn scenario_registry() -> Vec<Scenario> {
     vec![
         smoke_scenario(),
@@ -296,6 +341,7 @@ pub fn scenario_registry() -> Vec<Scenario> {
         t6_scenario(),
         t7_scenario(),
         bank_scenario(),
+        multi_range_bank_scenario(),
     ]
 }
 
@@ -309,12 +355,22 @@ mod tests {
     #[test]
     fn registry_contains_smoke_rich_t1_through_t7_and_bank() {
         let registry = scenario_registry();
-        assert_eq!(registry.len(), 10);
+        assert_eq!(registry.len(), 11);
         assert_eq!(registry[0].id, "smoke");
         assert_eq!(registry[1].id, "rich");
         assert_eq!(registry[2].id, "t1");
         assert_eq!(registry[8].id, "t7");
         assert_eq!(registry[9].id, "bank");
+        assert_eq!(registry[10].id, "bank-mr");
+    }
+
+    #[test]
+    fn multi_range_bank_uses_multi_range_layout_and_topology() {
+        let s = multi_range_bank_scenario();
+        assert_eq!(s.topology, Topology::ThreeNodeMultiRange);
+        assert_eq!(s.workload.bank_layout, BankLayout::MultiRange);
+        assert_eq!(s.verify, VerifyMode::BankSum);
+        assert!(scenario_uses_partition(s.nemesis.as_ref()));
     }
 
     #[test]

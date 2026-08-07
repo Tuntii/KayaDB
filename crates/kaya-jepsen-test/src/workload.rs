@@ -1,8 +1,8 @@
 //! Concurrent client workload generators.
 
 use crate::bank::{
-    bank_account_key, bank_expected_total, bank_transfer, seed_bank_accounts, BANK_INITIAL_BALANCE,
-    BANK_NUM_ACCOUNTS,
+    bank_account_key_for, bank_expected_total, bank_transfer_layout, seed_bank_accounts_layout,
+    BankLayout, BANK_INITIAL_BALANCE, BANK_NUM_ACCOUNTS,
 };
 use crate::history::{History, OperationResult};
 use kaya_client::KayaClient;
@@ -38,6 +38,8 @@ pub struct WorkloadConfig {
     pub rate_limit: u32,
     /// Cap recorded ops for WGL concurrent verify (workload still runs for chaos).
     pub verify_max_ops: Option<usize>,
+    /// Bank account key layout (single vs multi-range 2PC).
+    pub bank_layout: BankLayout,
 }
 
 impl Default for WorkloadConfig {
@@ -48,6 +50,7 @@ impl Default for WorkloadConfig {
             duration: Duration::from_secs(60),
             rate_limit: 0,
             verify_max_ops: None,
+            bank_layout: BankLayout::Single,
         }
     }
 }
@@ -144,6 +147,7 @@ impl Workload {
             let duration = self.config.duration;
             let rate_limit = self.config.rate_limit;
             let verify_max_ops = self.config.verify_max_ops;
+            let bank_layout = self.config.bank_layout;
 
             let handle = tokio::spawn(async move {
                 run_client(
@@ -154,6 +158,7 @@ impl Workload {
                     duration,
                     rate_limit,
                     verify_max_ops,
+                    bank_layout,
                 )
                 .await;
             });
@@ -174,6 +179,7 @@ async fn run_client(
     duration: Duration,
     rate_limit: u32,
     verify_max_ops: Option<usize>,
+    bank_layout: BankLayout,
 ) {
     let mut rng = StdRng::from_entropy();
     let start = std::time::Instant::now();
@@ -257,6 +263,7 @@ async fn run_client(
                     &mut rng,
                     verify_max_ops,
                     op_start,
+                    bank_layout,
                 )
                 .await;
             }
@@ -708,6 +715,7 @@ async fn run_bank_op<R: Rng>(
     rng: &mut R,
     verify_max_ops: Option<usize>,
     op_start: Instant,
+    bank_layout: BankLayout,
 ) {
     let from = rng.gen_range(0..BANK_NUM_ACCOUNTS);
     let mut to = rng.gen_range(0..BANK_NUM_ACCOUNTS);
@@ -715,7 +723,7 @@ async fn run_bank_op<R: Rng>(
         to = (from + 1) % BANK_NUM_ACCOUNTS;
     }
     let amount: i64 = rng.gen_range(1..=20);
-    let from_key = bank_account_key(from);
+    let from_key = bank_account_key_for(bank_layout, from);
     // Record as Put on debit key; verification uses sum invariant, not WGL.
     let meta = format!("xfer:{from}->{to}:{amount}").into_bytes();
     let op = Op::Put {
@@ -723,7 +731,12 @@ async fn run_bank_op<R: Rng>(
         value: meta,
     };
 
-    match timeout(CLIENT_OP_TIMEOUT, bank_transfer(client, from, to, amount)).await {
+    match timeout(
+        CLIENT_OP_TIMEOUT,
+        bank_transfer_layout(client, from, to, amount, bank_layout),
+    )
+    .await
+    {
         Ok(Ok(true)) => {
             record_completed(
                 history,
@@ -774,20 +787,29 @@ async fn run_bank_op<R: Rng>(
 
 /// Seed bank accounts on a live leader (read-back checks the initial sum).
 pub async fn seed_bank_on_cluster(nodes: &[SocketAddr]) -> Result<(), String> {
+    seed_bank_on_cluster_layout(nodes, BankLayout::Single).await
+}
+
+/// Seed bank accounts under a key layout (multi-range for 2PC stress).
+pub async fn seed_bank_on_cluster_layout(
+    nodes: &[SocketAddr],
+    layout: BankLayout,
+) -> Result<(), String> {
     let Some(mut client) = connect_leader(nodes).await else {
         return Err("no leader available to seed bank accounts".into());
     };
-    seed_bank_accounts(&mut client, BANK_NUM_ACCOUNTS, BANK_INITIAL_BALANCE).await?;
+    seed_bank_accounts_layout(&mut client, BANK_NUM_ACCOUNTS, BANK_INITIAL_BALANCE, layout).await?;
     let expected = bank_expected_total(BANK_NUM_ACCOUNTS, BANK_INITIAL_BALANCE);
     let mut total = 0i64;
     for i in 0..BANK_NUM_ACCOUNTS {
-        let key = bank_account_key(i);
+        let key = bank_account_key_for(layout, i);
+        let label = String::from_utf8_lossy(&key);
         match client.get(&key).await {
             Ok(Some(v)) => {
                 total += crate::bank::parse_balance(&v)?;
             }
-            Ok(None) => return Err(format!("seed missing acct:{i}")),
-            Err(e) => return Err(format!("seed readback acct:{i}: {e}")),
+            Ok(None) => return Err(format!("seed missing {label}")),
+            Err(e) => return Err(format!("seed readback {label}: {e}")),
         }
     }
     if total != expected {

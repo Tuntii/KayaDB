@@ -11,12 +11,23 @@ use std::time::Duration;
 
 use crate::nemesis::MemberSpec;
 use kaya_net::{
-    encode_member_payload, encode_remove_member_payload, roundtrip, STATUS_NOT_LEADER, STATUS_OK,
+    encode_member_payload, encode_merge_range_request, encode_remove_member_payload,
+    encode_split_range_request, roundtrip, MERGE_RANGE_OPCODE, SPLIT_RANGE_OPCODE,
+    STATUS_NOT_LEADER, STATUS_OK,
 };
+use kaya_raft::{GroupId, StaticRange};
 use kaya_server::{ClusterConfig, ClusterNode};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
+
+/// Static multi-raft ranges for multi-range bank / grand matrix: `[a,m)→1`, `[m,z)→2`.
+pub fn multi_range_static_ranges() -> Vec<StaticRange> {
+    vec![
+        StaticRange::new(b"a".to_vec(), b"m".to_vec(), GroupId(1)),
+        StaticRange::new(b"m".to_vec(), b"z".to_vec(), GroupId(2)),
+    ]
+}
 
 /// A cluster member managed by [`ClusterController`].
 pub struct ManagedNode {
@@ -41,11 +52,25 @@ pub struct ClusterController {
     nodes: Vec<ManagedNode>,
     /// Last node killed via [`Self::kill_node`] (used by T7 follower restart).
     last_killed: Option<u64>,
+    /// Static multi-raft ranges re-applied on restart (None = single-group default).
+    static_ranges: Option<Vec<StaticRange>>,
 }
 
 impl ClusterController {
     /// Spawn a fresh three-node cluster under `base_dir` with dynamic ports.
     pub async fn spawn_three_node(base_dir: PathBuf) -> Result<Self, String> {
+        Self::spawn_three_node_with_ranges(base_dir, None).await
+    }
+
+    /// Three-node multi-raft with static `[a,m)/[m,z)` ranges (multi-range bank).
+    pub async fn spawn_three_node_multi_range(base_dir: PathBuf) -> Result<Self, String> {
+        Self::spawn_three_node_with_ranges(base_dir, Some(multi_range_static_ranges())).await
+    }
+
+    async fn spawn_three_node_with_ranges(
+        base_dir: PathBuf,
+        ranges: Option<Vec<StaticRange>>,
+    ) -> Result<Self, String> {
         std::fs::create_dir_all(&base_dir).map_err(|e| e.to_string())?;
 
         let mut raft_addrs = Vec::with_capacity(3);
@@ -72,8 +97,11 @@ impl ClusterController {
                 .collect();
 
             let network_partitioned = Arc::new(AtomicBool::new(false));
-            let config = ClusterConfig::new(id, &data_dir, raft_addr, client_addr, peers)
+            let mut config = ClusterConfig::new(id, &data_dir, raft_addr, client_addr, peers)
                 .with_network_partitioned(network_partitioned.clone());
+            if let Some(ref ranges) = ranges {
+                config = config.with_static_ranges(ranges.clone());
+            }
             let handle = spawn_node(config);
 
             nodes.push(ManagedNode {
@@ -90,7 +118,30 @@ impl ClusterController {
             base_dir,
             nodes,
             last_killed: None,
+            static_ranges: ranges,
         })
+    }
+
+    /// SPLIT_RANGE (opcode 16) on the leader (soft-fail at caller).
+    pub async fn split_range(&self, leader: SocketAddr, split_key: &[u8]) -> Result<(), String> {
+        eprintln!(
+            "[ClusterController] SPLIT_RANGE key={:?} via {}",
+            String::from_utf8_lossy(split_key),
+            leader
+        );
+        let payload = encode_split_range_request(split_key);
+        admin_roundtrip(leader, SPLIT_RANGE_OPCODE, &payload, "SPLIT_RANGE").await
+    }
+
+    /// MERGE_RANGE (opcode 17) on the leader (soft-fail at caller).
+    pub async fn merge_range(&self, leader: SocketAddr, left_start: &[u8]) -> Result<(), String> {
+        eprintln!(
+            "[ClusterController] MERGE_RANGE left={:?} via {}",
+            String::from_utf8_lossy(left_start),
+            leader
+        );
+        let payload = encode_merge_range_request(left_start);
+        admin_roundtrip(leader, MERGE_RANGE_OPCODE, &payload, "MERGE_RANGE").await
     }
 
     /// Spawn a join-cluster node that discovers the roster via seed peers.
@@ -218,6 +269,7 @@ impl ClusterController {
             .filter(|n| n.id != id)
             .map(|n| (n.id, n.raft_addr, n.client_addr))
             .collect();
+        let ranges = self.static_ranges.clone();
 
         let node = self.node_mut(id)?;
         if let Some(handle) = node.handle.take() {
@@ -225,9 +277,12 @@ impl ClusterController {
         }
 
         node.network_partitioned.store(false, Ordering::SeqCst);
-        let config =
+        let mut config =
             ClusterConfig::new(id, &node.data_dir, node.raft_addr, node.client_addr, peers)
                 .with_network_partitioned(node.network_partitioned.clone());
+        if let Some(ranges) = ranges {
+            config = config.with_static_ranges(ranges);
+        }
         node.handle = Some(spawn_node(config));
         Ok(())
     }

@@ -58,6 +58,10 @@ pub enum NemesisType {
     AddMember(MemberSpec),
     /// Remove a cluster member via leader roundtrip
     RemoveMember(u64),
+    /// Split the range containing `split_key` (admin on group-0 leader)
+    SplitRange { split_key: Vec<u8> },
+    /// Merge the range starting at `left_start` with its right neighbor
+    MergeRange { left_start: Vec<u8> },
     /// Run multiple nemesis types sequentially each cycle
     Composite(Vec<NemesisType>),
     /// Inject logical clock skew (harness sleep simulating fast/slow node)
@@ -77,6 +81,8 @@ pub enum NemesisAction {
     HealPartition(u64),
     AddMember(MemberSpec),
     RemoveMember(u64),
+    SplitRange { split_key: Vec<u8> },
+    MergeRange { left_start: Vec<u8> },
     KillFollower,
     RestartFollower,
     Sleep(Duration),
@@ -214,6 +220,18 @@ impl Nemesis {
             NemesisType::RemoveMember(node_id) => {
                 Self::remove_member_roundtrip(&[], *node_id).await;
             }
+            NemesisType::SplitRange { split_key } => {
+                eprintln!(
+                    "[Nemesis] SplitRange (script path unsupported) key={:?}",
+                    String::from_utf8_lossy(split_key)
+                );
+            }
+            NemesisType::MergeRange { left_start } => {
+                eprintln!(
+                    "[Nemesis] MergeRange (script path unsupported) left={:?}",
+                    String::from_utf8_lossy(left_start)
+                );
+            }
             NemesisType::ClockSkew { node_id, skew_ms } => {
                 eprintln!("[Nemesis] ClockSkew node {node_id} skew_ms={skew_ms}");
                 sleep(Duration::from_millis(*skew_ms / 2)).await;
@@ -301,6 +319,16 @@ impl Nemesis {
             }
             NemesisType::RemoveMember(node_id) => {
                 let _ = cmd_tx.send(NemesisAction::RemoveMember(*node_id));
+            }
+            NemesisType::SplitRange { split_key } => {
+                let _ = cmd_tx.send(NemesisAction::SplitRange {
+                    split_key: split_key.clone(),
+                });
+            }
+            NemesisType::MergeRange { left_start } => {
+                let _ = cmd_tx.send(NemesisAction::MergeRange {
+                    left_start: left_start.clone(),
+                });
             }
             NemesisType::ClockSkew { node_id, skew_ms } => {
                 let _ = cmd_tx.send(NemesisAction::ClockSkew {

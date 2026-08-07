@@ -1,7 +1,7 @@
 # KayaDB Jepsen-Style Test Design
 
-**Status:** Draft  
-**Last updated:** 2026-06-18
+**Status:** Living  
+**Last updated:** 2026-08-06
 
 This document defines the workloads, nemeses, and test scenarios for Jepsen-style correctness testing of KayaDB clusters.
 
@@ -374,7 +374,7 @@ Chaos gates live in `.github/workflows/jepsen.yml`. `cargo test --workspace` in 
 | Job | Workflow | Trigger | What runs | Budget |
 |-----|----------|---------|-----------|--------|
 | **smoke** | `jepsen.yml` | Every PR + push to `main` | `cargo test -p kaya-jepsen-test` lib + `cluster_controller_smoke` + `--test smoke` — 30s Register + kill-node, **sequential** verify | ≤ 5 min |
-| **full-suite** | `jepsen.yml` | Nightly cron (`0 3 * * *`), `workflow_dispatch` (suite=full), release tags `v*` | `cargo test -p kaya-jepsen-test --test full_gate` + `partition_nemesis` — T1–T7, **WGL concurrent** verify | ≤ 45 min |
+| **full-suite** | `jepsen.yml` | Nightly cron (`0 3 * * *`), `workflow_dispatch` (suite=full), release tags `v*` | `full_gate` T1–T7 (WGL) + `grand_matrix` multi-range bank-mr (split/merge/kill/partition, sum) + `partition_nemesis` | ≤ 55 min |
 
 **Manual dispatch:** use **Actions → Jepsen → Run workflow** with `suite=smoke` or `suite=full`.
 
@@ -404,6 +404,7 @@ KayaDB's approach: build a lightweight Rust-native test harness instead of using
 - `crates/kaya-jepsen-test/src/cluster_controller.rs` - In-process cluster spawn, dynamic ports, port-aware partition
 - `crates/kaya-jepsen-test/tests/smoke.rs` - PR `chaos-smoke` gate
 - `crates/kaya-jepsen-test/tests/full_gate.rs` - Nightly T1–T7 WGL gate (`#[ignore]` locally)
+- `crates/kaya-jepsen-test/tests/grand_matrix.rs` - Multi-range bank-mr under split/merge/kill/partition
 - `.github/workflows/jepsen.yml` - PR smoke + nightly full-suite
 - `.github/workflows/ci.yml` - workspace unit tests (excludes `kaya-jepsen-test` integration)
-- `ROADMAP.md` - M12 harness complete; M13 chaos gates (T6/T7) + durable Raft on `feat/validation-first-consensus`
+- `ROADMAP.md` - correctness residuals; grand matrix is nightly CI

@@ -1,14 +1,15 @@
 //! Test orchestration and verification.
 
 use crate::bank::{
-    bank_expected_total, verify_bank_sum_live, BANK_INITIAL_BALANCE, BANK_NUM_ACCOUNTS,
+    bank_expected_total, verify_bank_sum_live_layout, BankLayout, BANK_INITIAL_BALANCE,
+    BANK_NUM_ACCOUNTS,
 };
 use crate::cluster_controller::{ClusterController, LeaderInfo};
 use crate::history::History;
 use crate::nemesis::{MemberSpec, Nemesis, NemesisAction, NemesisConfig, NemesisType};
 use crate::partition::PartitionTracker;
 use crate::scenario::{Scenario, Topology, VerifyMode, WorkloadHook};
-use crate::workload::{seed_bank_on_cluster, Workload, WorkloadConfig, WorkloadType};
+use crate::workload::{seed_bank_on_cluster_layout, Workload, WorkloadConfig, WorkloadType};
 use kaya_client::KayaClient;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -197,12 +198,13 @@ impl TestRunner {
         if scenario.workload.workload_type == WorkloadType::Bank
             || scenario.verify == VerifyMode::BankSum
         {
-            eprintln!("[Runner] Seeding bank accounts...");
+            let layout = scenario.workload.bank_layout;
+            eprintln!("[Runner] Seeding bank accounts (layout={layout:?})...");
             // Retry seed while leadership stabilizes.
             let mut seeded = false;
             let mut last_err = String::new();
             for _ in 0..10 {
-                match seed_bank_on_cluster(&endpoints).await {
+                match seed_bank_on_cluster_layout(&endpoints, layout).await {
                     Ok(()) => {
                         seeded = true;
                         break;
@@ -217,7 +219,7 @@ impl TestRunner {
                 return Err(format!("bank seed failed: {last_err}"));
             }
             eprintln!(
-                "[Runner] Bank seeded: {} accounts x {} = {}",
+                "[Runner] Bank seeded: {} accounts x {} = {} layout={layout:?}",
                 BANK_NUM_ACCOUNTS,
                 BANK_INITIAL_BALANCE,
                 bank_expected_total(BANK_NUM_ACCOUNTS, BANK_INITIAL_BALANCE)
@@ -334,7 +336,13 @@ impl TestRunner {
         eprintln!("[Runner] {}", partition_tracker.summary());
 
         if scenario.verify == VerifyMode::BankSum {
-            return Self::verify_bank_sum(&endpoints, &history, &partition_tracker).await;
+            return Self::verify_bank_sum(
+                &endpoints,
+                &history,
+                &partition_tracker,
+                scenario.workload.bank_layout,
+            )
+            .await;
         }
 
         Self::verify_history(&history, scenario.verify, &partition_tracker)
@@ -410,10 +418,11 @@ impl TestRunner {
         endpoints: &[SocketAddr],
         history: &History,
         partition_tracker: &PartitionTracker,
+        layout: BankLayout,
     ) -> Result<TestResult, String> {
         let expected = bank_expected_total(BANK_NUM_ACCOUNTS, BANK_INITIAL_BALANCE);
         eprintln!(
-            "Verifying bank sum invariant (expected total={expected}, ops={})...",
+            "Verifying bank sum invariant (expected total={expected}, ops={}, layout={layout:?})...",
             history.len()
         );
         let stats = history.stats();
@@ -432,11 +441,12 @@ impl TestRunner {
                 match timeout(Duration::from_secs(3), KayaClient::connect(*addr)).await {
                     Ok(Ok(mut client)) => {
                         client.set_max_redirects(16);
-                        match verify_bank_sum_live(
+                        match verify_bank_sum_live_layout(
                             &mut client,
                             BANK_NUM_ACCOUNTS,
                             expected,
                             Duration::from_secs(5),
+                            layout,
                         )
                         .await
                         {
@@ -567,6 +577,31 @@ async fn apply_nemesis_action(
         NemesisAction::RemoveMember(node_id) => {
             let leader = cluster.wait_for_leader(Duration::from_secs(10)).await?;
             cluster.remove_member(leader.client_addr, node_id).await?;
+        }
+        NemesisAction::SplitRange { split_key } => {
+            // Soft-fail: already-split meta or non-leader of group 0 is expected under chaos.
+            match cluster.wait_for_leader(Duration::from_secs(10)).await {
+                Ok(leader) => match cluster.split_range(leader.client_addr, &split_key).await {
+                    Ok(()) => eprintln!(
+                        "[Runner] SPLIT_RANGE ok key={:?}",
+                        String::from_utf8_lossy(&split_key)
+                    ),
+                    Err(e) => eprintln!("[Runner] SPLIT_RANGE non-fatal: {e}"),
+                },
+                Err(e) => eprintln!("[Runner] SPLIT_RANGE skipped (no leader): {e}"),
+            }
+        }
+        NemesisAction::MergeRange { left_start } => {
+            match cluster.wait_for_leader(Duration::from_secs(10)).await {
+                Ok(leader) => match cluster.merge_range(leader.client_addr, &left_start).await {
+                    Ok(()) => eprintln!(
+                        "[Runner] MERGE_RANGE ok left={:?}",
+                        String::from_utf8_lossy(&left_start)
+                    ),
+                    Err(e) => eprintln!("[Runner] MERGE_RANGE non-fatal: {e}"),
+                },
+                Err(e) => eprintln!("[Runner] MERGE_RANGE skipped (no leader): {e}"),
+            }
         }
         NemesisAction::KillFollower => {
             let follower_id = cluster.find_follower_id().await?;

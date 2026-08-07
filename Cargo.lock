@@ -933,6 +933,7 @@ dependencies = [
  "kaya-client",
  "kaya-core",
  "kaya-net",
+ "kaya-raft",
  "kaya-server",
  "kaya-sim",
  "rand",

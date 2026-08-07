@@ -1,19 +1,29 @@
 //! Registry integrity checks for smoke + rich + T1–T7 scenarios.
 
 use kaya_jepsen_test::{
-    bank_scenario, register_key, rich_nemesis_scenario, scenario_registry, smoke_scenario,
-    t1_scenario, t2_scenario, t3_scenario, t4_scenario, t5_scenario, t6_scenario, t7_scenario,
-    NemesisType, VerifyMode, WorkloadType, WGL_VERIFY_MAX_OPS,
+    bank_scenario, multi_range_bank_scenario, register_key, rich_nemesis_scenario,
+    scenario_registry, smoke_scenario, t1_scenario, t2_scenario, t3_scenario, t4_scenario,
+    t5_scenario, t6_scenario, t7_scenario, BankLayout, NemesisType, Topology, VerifyMode,
+    WorkloadType, WGL_VERIFY_MAX_OPS,
 };
 
 #[test]
-fn registry_has_ten_entries_in_order() {
+fn registry_has_eleven_entries_in_order() {
     let registry = scenario_registry();
     let ids: Vec<_> = registry.iter().map(|s| s.id).collect();
     assert_eq!(
         ids,
-        vec!["smoke", "rich", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "bank"]
+        vec!["smoke", "rich", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "bank", "bank-mr"]
     );
+}
+
+#[test]
+fn multi_range_bank_registered() {
+    let s = multi_range_bank_scenario();
+    assert_eq!(s.id, "bank-mr");
+    assert_eq!(s.topology, Topology::ThreeNodeMultiRange);
+    assert_eq!(s.workload.bank_layout, BankLayout::MultiRange);
+    assert_eq!(s.verify, VerifyMode::BankSum);
 }
 
 #[test]
