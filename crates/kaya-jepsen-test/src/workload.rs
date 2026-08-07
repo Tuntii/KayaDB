@@ -150,7 +150,7 @@ impl Workload {
             let bank_layout = self.config.bank_layout;
 
             let handle = tokio::spawn(async move {
-                run_client(
+                run_client(ClientRun {
                     client_id,
                     nodes,
                     history,
@@ -159,7 +159,7 @@ impl Workload {
                     rate_limit,
                     verify_max_ops,
                     bank_layout,
-                )
+                })
                 .await;
             });
             handles.push(handle);
@@ -171,7 +171,7 @@ impl Workload {
     }
 }
 
-async fn run_client(
+struct ClientRun {
     client_id: usize,
     nodes: Vec<SocketAddr>,
     history: Arc<History>,
@@ -180,7 +180,19 @@ async fn run_client(
     rate_limit: u32,
     verify_max_ops: Option<usize>,
     bank_layout: BankLayout,
-) {
+}
+
+async fn run_client(run: ClientRun) {
+    let ClientRun {
+        client_id,
+        nodes,
+        history,
+        workload_type,
+        duration,
+        rate_limit,
+        verify_max_ops,
+        bank_layout,
+    } = run;
     let mut rng = StdRng::from_entropy();
     let start = std::time::Instant::now();
 
