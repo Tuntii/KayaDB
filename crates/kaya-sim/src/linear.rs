@@ -9,10 +9,14 @@
 // checks that at least one matches.  For sequential histories (one
 // outstanding op at a time) `check_sequential` is sufficient and fast.
 //
+// When concurrent check fails, `minimal_counterexample` greedily shrinks the
+// history to a small non-linearizable subset for operator diagnosis.
+//
 // This module is the foundation for future Jepsen-style test drivers
 // (spec/docs/testing-and-invariants-spec.md §2).
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -49,6 +53,75 @@ pub struct HistoryEntry {
     pub client_id: Option<u32>,
     pub op: Op,
     pub result: OpResult,
+}
+
+/// Compact non-linearizable subset of a concurrent history (WGL residual).
+///
+/// Produced when the full history has no valid linearization; the subset is
+/// greedily minimal (no single op can be dropped while remaining illegal).
+#[derive(Debug, Clone)]
+pub struct MinimalCounterexample {
+    /// Indices into the original history (stable order).
+    pub original_indices: Vec<usize>,
+    /// The ops that form the counterexample (same order as `original_indices`).
+    pub ops: Vec<HistoryEntry>,
+    /// Why this subset fails (last WGL failure strings).
+    pub why: Vec<String>,
+}
+
+impl MinimalCounterexample {
+    /// Human-readable multi-line report for logs / CI.
+    pub fn report(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "minimal counterexample: {} op(s) (indices {:?})",
+            self.ops.len(),
+            self.original_indices
+        ));
+        for (i, (orig, e)) in self
+            .original_indices
+            .iter()
+            .zip(self.ops.iter())
+            .enumerate()
+        {
+            lines.push(format!(
+                "  [{i}] orig={orig} client={} [{},{}) {} → {}",
+                e.client_id
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                e.start_tick,
+                e.end_tick,
+                format_op(&e.op),
+                format_result(&e.result),
+            ));
+        }
+        // Real-time precedence edges within the subset.
+        let mut edges = Vec::new();
+        for (i, a) in self.ops.iter().enumerate() {
+            for (j, b) in self.ops.iter().enumerate() {
+                if i != j && a.end_tick < b.start_tick {
+                    edges.push(format!("{i}≺{j}"));
+                }
+            }
+        }
+        if edges.is_empty() {
+            lines.push("  real-time order: (none — all intervals overlap)".into());
+        } else {
+            lines.push(format!("  real-time order: {}", edges.join(", ")));
+        }
+        if !self.why.is_empty() {
+            lines.push(format!("  reason: {}", self.why.join("; ")));
+        } else {
+            lines.push("  reason: no linearization extends the real-time order".into());
+        }
+        lines.join("\n")
+    }
+}
+
+impl fmt::Display for MinimalCounterexample {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.report())
+    }
 }
 
 // ── LinearizabilityChecker ────────────────────────────────────────────────────
@@ -351,6 +424,80 @@ impl LinearizabilityChecker {
         }
     }
 
+    /// Like [`check_concurrent`], but on failure also returns a greedily-minimal
+    /// non-linearizable subset for diagnosis.
+    pub fn check_concurrent_detailed(
+        &self,
+    ) -> Result<(), (Vec<String>, Option<MinimalCounterexample>)> {
+        match self.check_concurrent() {
+            Ok(()) => Ok(()),
+            Err(violations) => {
+                let cex = self.minimal_counterexample();
+                Err((violations, cex))
+            }
+        }
+    }
+
+    /// If the history is non-linearizable under WGL, return a greedily minimal
+    /// non-linearizable subset (no single remaining op can be dropped while still
+    /// illegal). Returns `None` when the full history is linearizable.
+    ///
+    /// Multi-key histories are first partitioned by key (and scans separately),
+    /// matching Jepsen's per-key WGL checks, so shrink stays inside the failing
+    /// partition and does not invent unrelated single-op failures on other keys.
+    ///
+    /// Complexity is acceptable under the WGL op cap (≤14).
+    pub fn minimal_counterexample(&self) -> Option<MinimalCounterexample> {
+        if self.check_concurrent().is_ok() {
+            return None;
+        }
+
+        // Build per-key / scan partitions of original indices.
+        let mut by_key: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
+        let mut scan_idxs: Vec<usize> = Vec::new();
+        for (i, e) in self.history.iter().enumerate() {
+            match &e.op {
+                Op::Put { key, .. } | Op::Get { key } | Op::Delete { key } => {
+                    by_key.entry(key.clone()).or_default().push(i);
+                }
+                Op::Scan { .. } => scan_idxs.push(i),
+            }
+        }
+
+        let mut best: Option<MinimalCounterexample> = None;
+
+        for (_key, idxs) in by_key {
+            if let Some(cex) = shrink_indices_to_minimal(&self.history, &idxs) {
+                best = Some(pick_smaller(best, cex));
+            }
+        }
+        if !scan_idxs.is_empty() {
+            if let Some(cex) = shrink_indices_to_minimal(&self.history, &scan_idxs) {
+                best = Some(pick_smaller(best, cex));
+            }
+        }
+
+        // Fallback: whole-history shrink (single partition / mixed).
+        if best.is_none() {
+            let all: Vec<usize> = (0..self.history.len()).collect();
+            best = shrink_indices_to_minimal(&self.history, &all);
+        }
+        best
+    }
+
+    /// Build a checker from an explicit entry list (preserves ticks/clients).
+    fn from_entries(entries: Vec<HistoryEntry>) -> Self {
+        let next_tick = entries
+            .iter()
+            .map(|e| e.end_tick.saturating_add(1))
+            .max()
+            .unwrap_or(0);
+        Self {
+            history: entries,
+            next_tick,
+        }
+    }
+
     /// Convert the recorded history into a JSONL trace string compatible with simulation replayer.
     pub fn to_trace_string(&self, seed: u64) -> String {
         let mut lines = Vec::new();
@@ -493,6 +640,96 @@ fn hex_enc(b: &[u8]) -> String {
 
 fn option_hex(b: Option<&[u8]>) -> String {
     b.map_or_else(|| "None".to_owned(), hex_enc)
+}
+
+fn keep_entries(history: &[HistoryEntry], indices: &[usize]) -> Vec<HistoryEntry> {
+    indices.iter().map(|&i| history[i].clone()).collect()
+}
+
+/// Greedy minimal non-linearizable subset of `seed` indices into `history`.
+fn shrink_indices_to_minimal(
+    history: &[HistoryEntry],
+    seed: &[usize],
+) -> Option<MinimalCounterexample> {
+    if seed.is_empty() {
+        return None;
+    }
+    let sub0 = LinearizabilityChecker::from_entries(keep_entries(history, seed));
+    if sub0.check_concurrent().is_ok() {
+        return None;
+    }
+    let mut keep = seed.to_vec();
+    let mut why = sub0.check_concurrent().err().unwrap_or_default();
+
+    let mut changed = true;
+    while changed && keep.len() > 1 {
+        changed = false;
+        for pos in 0..keep.len() {
+            let mut candidate = keep.clone();
+            candidate.remove(pos);
+            let sub = LinearizabilityChecker::from_entries(keep_entries(history, &candidate));
+            if let Err(e) = sub.check_concurrent() {
+                why = e;
+                keep = candidate;
+                changed = true;
+                break;
+            }
+        }
+    }
+    // Reverse pass for removal-order sensitivity.
+    loop {
+        let before = keep.len();
+        for pos in (0..keep.len()).rev() {
+            if keep.len() <= 1 {
+                break;
+            }
+            let mut candidate = keep.clone();
+            candidate.remove(pos);
+            let sub = LinearizabilityChecker::from_entries(keep_entries(history, &candidate));
+            if let Err(e) = sub.check_concurrent() {
+                why = e;
+                keep = candidate;
+            }
+        }
+        if keep.len() == before {
+            break;
+        }
+    }
+
+    Some(MinimalCounterexample {
+        original_indices: keep.clone(),
+        ops: keep_entries(history, &keep),
+        why,
+    })
+}
+
+fn pick_smaller(
+    best: Option<MinimalCounterexample>,
+    cand: MinimalCounterexample,
+) -> MinimalCounterexample {
+    match best {
+        None => cand,
+        Some(b) if cand.ops.len() < b.ops.len() => cand,
+        Some(b) => b,
+    }
+}
+
+fn format_op(op: &Op) -> String {
+    match op {
+        Op::Put { key, value } => format!("PUT key={} val={}", hex_enc(key), hex_enc(value)),
+        Op::Delete { key } => format!("DELETE key={}", hex_enc(key)),
+        Op::Get { key } => format!("GET key={}", hex_enc(key)),
+        Op::Scan { prefix } => format!("SCAN prefix={}", hex_enc(prefix)),
+    }
+}
+
+fn format_result(r: &OpResult) -> String {
+    match r {
+        OpResult::Ok => "Ok".into(),
+        OpResult::Value(v) => format!("Value({})", option_hex(v.as_deref())),
+        OpResult::Scan(items) => format!("Scan({} pairs)", items.len()),
+        OpResult::Error(e) => format!("Error({e})"),
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -641,53 +878,148 @@ mod tests {
             OpResult::Value(Some(b"2".to_vec())),
         );
         assert!(checker.check_concurrent().is_ok());
+        assert!(checker.minimal_counterexample().is_none());
     }
 
-    // fn concurrent_stale_read_is_violation() {
-    //     let mut checker = LinearizabilityChecker::new();
-    //     checker.record_interval(
-    //         0,
-    //         2,
-    //         Some(1),
-    //         Op::Put {
-    //             key: b"k".to_vec(),
-    //             value: b"v2".to_vec(),
-    //         },
-    //         OpResult::Ok,
-    //     );
-    //     checker.record_interval(
-    //         1,
-    //         3,
-    //         Some(2),
-    //         Op::Get { key: b"k".to_vec() },
-    //         OpResult::Value(Some(b"v1".to_vec())),
-    //     );
-    //     assert!(checker.check_concurrent().is_err());
-    // }
+    #[test]
+    fn concurrent_stale_read_after_completed_write_is_violation() {
+        let mut checker = LinearizabilityChecker::new();
+        // Write v2 completes, then write v1 completes, then get sees nothing impossible:
+        // Put v1 [0,1], Put v2 [2,3], Get → v1 [4,5] is illegal (must see v2).
+        checker.record_interval(
+            0,
+            1,
+            Some(1),
+            Op::Put {
+                key: b"k".to_vec(),
+                value: b"v1".to_vec(),
+            },
+            OpResult::Ok,
+        );
+        checker.record_interval(
+            2,
+            3,
+            Some(2),
+            Op::Put {
+                key: b"k".to_vec(),
+                value: b"v2".to_vec(),
+            },
+            OpResult::Ok,
+        );
+        checker.record_interval(
+            4,
+            5,
+            Some(3),
+            Op::Get { key: b"k".to_vec() },
+            OpResult::Value(Some(b"v1".to_vec())),
+        );
+        assert!(checker.check_concurrent().is_err());
+    }
 
-    // fn scan_missing_entry_is_violation() {
-    //     let mut checker = LinearizabilityChecker::new();
-    //     checker.record_next(
-    //         Op::Put {
-    //             key: b"pfx:a".to_vec(),
-    //             value: b"1".to_vec(),
-    //         },
-    //         OpResult::Ok,
-    //     );
-    //     checker.record_next(
-    //         Op::Put {
-    //             key: b"pfx:b".to_vec(),
-    //             value: b"2".to_vec(),
-    //         },
-    //         OpResult::Ok,
-    //     );
-    //     // Scan misses pfx:b — violation.
-    //     checker.record_next(
-    //         Op::Scan {
-    //             prefix: b"pfx:".to_vec(),
-    //         },
-    //         OpResult::Scan(vec![(b"pfx:a".to_vec(), b"1".to_vec())]),
-    //     );
-    //     assert!(checker.check_sequential().is_err());
-    // }
+    #[test]
+    fn minimal_counterexample_shrinks_irrelevant_ops() {
+        let mut checker = LinearizabilityChecker::new();
+        // Noise: unrelated key.
+        checker.record_interval(
+            0,
+            1,
+            Some(9),
+            Op::Put {
+                key: b"noise".to_vec(),
+                value: b"n".to_vec(),
+            },
+            OpResult::Ok,
+        );
+        // Core illegal triple on k.
+        checker.record_interval(
+            2,
+            3,
+            Some(1),
+            Op::Put {
+                key: b"k".to_vec(),
+                value: b"v1".to_vec(),
+            },
+            OpResult::Ok,
+        );
+        checker.record_interval(
+            4,
+            5,
+            Some(2),
+            Op::Put {
+                key: b"k".to_vec(),
+                value: b"v2".to_vec(),
+            },
+            OpResult::Ok,
+        );
+        checker.record_interval(
+            6,
+            7,
+            Some(3),
+            Op::Get { key: b"k".to_vec() },
+            OpResult::Value(Some(b"v1".to_vec())),
+        );
+        // More noise after.
+        checker.record_interval(
+            8,
+            9,
+            Some(9),
+            Op::Get {
+                key: b"noise".to_vec(),
+            },
+            OpResult::Value(Some(b"n".to_vec())),
+        );
+
+        let cex = checker
+            .minimal_counterexample()
+            .expect("history is non-linearizable");
+        assert!(
+            cex.ops.len() <= 3,
+            "should drop noise ops, got {}:\n{}",
+            cex.ops.len(),
+            cex.report()
+        );
+        // Core ops only involve key k.
+        for e in &cex.ops {
+            match &e.op {
+                Op::Put { key, .. } | Op::Get { key } => assert_eq!(key, b"k"),
+                other => panic!("unexpected op in cex: {other:?}"),
+            }
+        }
+        let report = cex.report();
+        assert!(report.contains("minimal counterexample"));
+        assert!(report.contains("PUT") || report.contains("GET"));
+
+        let detailed = checker.check_concurrent_detailed();
+        assert!(detailed.is_err());
+        let (violations, cex2) = detailed.unwrap_err();
+        assert!(!violations.is_empty());
+        assert!(cex2.is_some());
+    }
+
+    #[test]
+    fn scan_missing_entry_is_violation() {
+        let mut checker = LinearizabilityChecker::new();
+        checker.record_next(
+            Op::Put {
+                key: b"pfx:a".to_vec(),
+                value: b"1".to_vec(),
+            },
+            OpResult::Ok,
+        );
+        checker.record_next(
+            Op::Put {
+                key: b"pfx:b".to_vec(),
+                value: b"2".to_vec(),
+            },
+            OpResult::Ok,
+        );
+        // Scan misses pfx:b — violation.
+        checker.record_next(
+            Op::Scan {
+                prefix: b"pfx:".to_vec(),
+            },
+            OpResult::Scan(vec![(b"pfx:a".to_vec(), b"1".to_vec())]),
+        );
+        assert!(checker.check_sequential().is_err());
+    }
 }

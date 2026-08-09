@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Jepsen multi-range bank grand matrix (`bank-mr`):** three-node multi-raft static ranges `[a,m)/[m,z)`, multi-range account keys, SI transfers (cross-group 2PC when leadership allows), composite SplitRange + MergeRange + KillNode + Partition nemesis, constant-sum verify; nightly `grand_matrix` gate in `jepsen.yml`
 - **2PC recovery on every `Engine::open`:** scan `\x00txn/rec/*` — abort `Preparing`/`Prepared` (fail-closed), finish `Committing` → `Committed`; stats on `RecoveryReport` (`txn2pc_aborted`, `txn2pc_finished_commits`); crash tests for mid-prepare, mid-commit, partial materialization
+- **WGL minimal counterexample:** `LinearizabilityChecker::minimal_counterexample` / `check_concurrent_detailed` greedily shrink a failing concurrent history (per-key partition) to a compact non-linearizable subset with real-time edges + reason; Jepsen `History::check_concurrent` appends the report to violations
 
 ### Fixed
 - **Jepsen T6 nightly:** re-`ADD_MEMBER` of an already-joined node is treated as idempotent; WGL multi-client overlap audit soft-fails so full_gate can retry under kill/membership chaos

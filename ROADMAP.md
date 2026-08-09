@@ -116,7 +116,7 @@ The M16–M25 arc has closed its **documented production path**: operators can r
 | Sequential 2PC; this node must lead all participant groups | No parallel prepare/commit stretch; no durable global decision log. **Open-time recovery hardened:** every `Engine::open` aborts `Preparing`/`Prepared` and finishes `Committing`. Cross-group 2PC still requires this node to be leader of every participant group |
 | No HLC uncertainty-interval wait/clamp | Clock skew under multi-node wall clocks is not fully mitigated |
 | Jepsen grand matrix residual | Multi-range bank `bank-mr` is **nightly CI** (split+merge+kill+partition, sum invariant); live MOVE_RANGE rebalance still not product-side, so rebalance chaos is advisory-only |
-| Linearizability minimal counterexample | WGL reports violations; compact minimal counterexample printer still open |
+| Linearizability minimal counterexample | **Shipped:** WGL `minimal_counterexample` + Jepsen violation report; residual is richer MUSes / interactive explorer |
 | Encryption key rotation / multi-tenancy | Single KEK=DEK key; no online rotation; ACL is prefix-token isolation only |
 | Observability gaps | Kernel+userspace fsync attribution, io_uring completion tracing, stap/perf privileged CI, Dashboard v2, scheduled profiling CI |
 | Orphan Raft groups after merge | Group reclaim after `merge_with_next` is follow-on |

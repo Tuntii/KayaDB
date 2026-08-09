@@ -11,7 +11,7 @@ pub use clock_skew::advance_node_clock;
 pub use cluster::{ClusterSim, ClusterSimReport, SimNetwork, SimNetworkConfig};
 pub use control::NodeController;
 pub use kaya_raft::RaftApplyCommand;
-pub use linear::{HistoryEntry, LinearizabilityChecker, Op, OpResult};
+pub use linear::{HistoryEntry, LinearizabilityChecker, MinimalCounterexample, Op, OpResult};
 pub use model::RefModel;
 
 pub use kaya_io::{FaultKind, FaultRule, FaultSchedule, SimDisk, SimSeed};

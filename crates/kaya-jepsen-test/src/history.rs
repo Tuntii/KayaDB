@@ -256,19 +256,38 @@ impl History {
 
         let mut violations = Vec::new();
         for (key, checker) in key_partitions {
-            if let Err(mut v) = checker.check_concurrent() {
-                for item in &mut v {
-                    *item = format!("key {:?}: {item}", String::from_utf8_lossy(&key));
+            match checker.check_concurrent_detailed() {
+                Ok(()) => {}
+                Err((mut v, cex)) => {
+                    for item in &mut v {
+                        *item = format!("key {:?}: {item}", String::from_utf8_lossy(&key));
+                    }
+                    violations.append(&mut v);
+                    if let Some(cex) = cex {
+                        violations.push(format!(
+                            "key {:?} minimal counterexample:\n{}",
+                            String::from_utf8_lossy(&key),
+                            cex.report()
+                        ));
+                    }
                 }
-                violations.append(&mut v);
             }
         }
         if scan_ops > 0 {
-            if let Err(mut v) = scan_checker.check_concurrent() {
-                for item in &mut v {
-                    *item = format!("scan ops: {item}");
+            match scan_checker.check_concurrent_detailed() {
+                Ok(()) => {}
+                Err((mut v, cex)) => {
+                    for item in &mut v {
+                        *item = format!("scan ops: {item}");
+                    }
+                    violations.append(&mut v);
+                    if let Some(cex) = cex {
+                        violations.push(format!(
+                            "scan ops minimal counterexample:\n{}",
+                            cex.report()
+                        ));
+                    }
                 }
-                violations.append(&mut v);
             }
         }
 
