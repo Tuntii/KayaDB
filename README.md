@@ -90,7 +90,7 @@ Rust library: `kaya-engine = "0.1.113"` — see [installation guide](docs/instal
 | Production hardening | ✅ M13–M24 | TLS, tokens, ACL, encryption-at-rest, runbooks, chaos gates |
 | Distributed TXN KV | ✅ M16–M25 | MVCC, SI, 2PC, indexes, CDC, range split/merge (v0.2.0 candidate) |
 
-> **v0.1.113** closes the **M16–M25 production path** (range-sharded multi-raft KV, SI + sequential cross-range 2PC, encryption, ACL, Go/Python/TS clients). It is a **v0.2.0 candidate**, not an unqualified production-SLA claim — residual risks (live range migrate, Raft-replicated range meta, grand Jepsen matrix, key rotation) are listed in [ROADMAP.md](ROADMAP.md). See [security](docs/security.md) §7 before any production-like deployment.
+> **v0.1.113** closes the **M16–M25 production path** (range-sharded multi-raft KV, SI + sequential cross-range 2PC, encryption, ACL, Go/Python/TS clients). It is a **v0.2.0 candidate**, not an unqualified production-SLA claim — residual risks (live range migrate, key rotation) are listed in [ROADMAP.md](ROADMAP.md). Range meta is Raft-replicated + disk-backed (#25). See [security](docs/security.md) §7 before any production-like deployment.
 
 ---
 

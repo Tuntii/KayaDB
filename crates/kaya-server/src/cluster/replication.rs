@@ -3,11 +3,13 @@
 use std::net::SocketAddr;
 
 use kaya_engine::WriteOptions;
-use kaya_raft::{ConfigChangePhase, NodeId, RaftApplyCommand};
+use kaya_raft::{ConfigChangePhase, NodeId, RaftApplyCommand, StaticRangeTable};
 
 use crate::command::RaftCommand;
 use crate::membership::{apply_config_change_to_roster, decode_config_change, SharedRoster};
+use crate::range_meta::{decode_range_meta, persist_range_table};
 
+use super::client_ops::{ensure_group_hosted, SharedRangeTable, SplitRuntime};
 use super::snapshot::{apply_installed_raft_snapshot, maybe_compact_raft_log};
 use super::{SharedApplyIndexes, SharedEngine, SharedPending, SharedPendingReads, SharedRaftHost};
 
@@ -17,6 +19,8 @@ pub(crate) async fn drain_and_apply(
     host: &SharedRaftHost,
     engine: &SharedEngine,
     roster: &SharedRoster,
+    range_table: &SharedRangeTable,
+    split_rt: &SplitRuntime,
     data_dir: &std::path::Path,
     apply_indexes: &SharedApplyIndexes,
     pending: &SharedPending,
@@ -60,6 +64,26 @@ pub(crate) async fn drain_and_apply(
                     gid.0,
                     members.len()
                 );
+            }
+        }
+
+        // Range meta (#25): CAS-apply snapshot, persist, host groups.
+        if let Some((base_epoch, snapshot)) = decode_range_meta(&command) {
+            match apply_range_meta_entry(data_dir, range_table, split_rt, base_epoch, &snapshot)
+                .await
+            {
+                Ok(()) => {
+                    eprintln!(
+                        "[node {}] range meta applied (group {}): base_epoch={base_epoch}",
+                        self_id.0, gid.0
+                    );
+                }
+                Err(e) => {
+                    if let Some(tx) = pending.lock().unwrap().remove(&(gid.0, idx)) {
+                        let _ = tx.send(Err(e));
+                    }
+                    continue;
+                }
             }
         }
 
@@ -120,6 +144,45 @@ pub(crate) async fn drain_and_apply(
     maybe_compact_raft_log(host, engine, roster, data_dir).await;
 }
 
+/// Apply a committed RangeMeta snapshot with optimistic concurrency on meta_epoch.
+async fn apply_range_meta_entry(
+    data_dir: &std::path::Path,
+    range_table: &SharedRangeTable,
+    split_rt: &SplitRuntime,
+    base_epoch: u64,
+    snapshot: &[u8],
+) -> Result<(), String> {
+    let new_table = StaticRangeTable::decode(snapshot)?;
+    let group_ids = new_table.group_ids();
+
+    {
+        let mut guard = range_table.write().await;
+        let current = guard.meta_epoch();
+        if current != base_epoch {
+            // Idempotent re-apply after durable restore, or concurrent stale proposal.
+            if guard.encode() == snapshot {
+                return Ok(());
+            }
+            return Err(format!(
+                "range meta CAS failed: base_epoch={base_epoch} current={current}"
+            ));
+        }
+        // Disk first: a crash after this reopen restores the new layout.
+        persist_range_table(data_dir, &new_table)?;
+        guard.restore(new_table);
+    }
+
+    for gid in group_ids {
+        if let Err(e) = ensure_group_hosted(split_rt, gid) {
+            eprintln!(
+                "warning: failed to host group {} after range meta apply: {e}",
+                gid.0
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Decode and execute a single [`RaftCommand`] against the engine.
 /// Returns the engine LSN when the command performed a durable write.
 async fn apply_command(
@@ -142,6 +205,7 @@ async fn apply_command(
             .map(|r| Some(r.lsn))
             .map_err(|e| e.to_string()),
         Ok(RaftCommand::ConfigChange { .. }) => Ok(None),
+        Ok(RaftCommand::RangeMeta { .. }) => Ok(None), // handled above
         Ok(RaftCommand::TxnCommit { mutations, .. }) => {
             if mutations.is_empty() {
                 return Ok(None);

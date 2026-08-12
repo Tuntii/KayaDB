@@ -779,6 +779,7 @@ async fn apply_command_to_engine(
             .map(|r| Some(r.lsn))
             .map_err(|e| e.to_string()),
         RaftCommand::ConfigChange { .. } => Ok(None),
+        RaftCommand::RangeMeta { .. } => Ok(None),
         RaftCommand::TxnCommit { mutations, .. } => {
             if mutations.is_empty() {
                 return Ok(None);

@@ -116,7 +116,8 @@ impl RefModel {
             // work is fully modelled (M23 task 10+).
             RaftCommand::TxnPrepare { .. }
             | RaftCommand::TxnCommit2pc { .. }
-            | RaftCommand::TxnAbort2pc { .. } => Ok(()),
+            | RaftCommand::TxnAbort2pc { .. }
+            | RaftCommand::RangeMeta { .. } => Ok(()),
         }
     }
 

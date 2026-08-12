@@ -48,6 +48,7 @@ use crate::apply_index::RaftApplyIndex;
 use crate::audit::AuditLog;
 use crate::membership::{load_persisted_roster, persist_roster, shared_roster, SharedRoster};
 use crate::raft_persister::RaftPersister;
+use crate::range_meta::load_persisted_range_table;
 
 #[cfg(feature = "ebpf")]
 use kaya_ebpf::{
@@ -436,9 +437,20 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     #[cfg(not(feature = "ebpf"))]
     let durability_mode = DurabilityMode::Relaxed;
 
+    // Durable range layout (#25): prefer last committed snapshot over config default.
+    let mut boot_range_table = config.range_table.clone();
+    if let Some(persisted) = load_persisted_range_table(&config.data_dir) {
+        eprintln!(
+            "[node {}] restored range table from disk (meta_epoch={}, ranges={})",
+            config.node_id.0,
+            persisted.meta_epoch(),
+            persisted.ranges().len()
+        );
+        boot_range_table = persisted;
+    }
+
     let multi_group = {
-        let ids: std::collections::BTreeSet<u64> = config
-            .range_table
+        let ids: std::collections::BTreeSet<u64> = boot_range_table
             .ranges()
             .iter()
             .map(|r| r.group_id.0)
@@ -501,8 +513,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         .filter(|&id| id != config.node_id)
         .collect();
 
-    let mut group_ids: std::collections::BTreeSet<u64> = config
-        .range_table
+    let mut group_ids: std::collections::BTreeSet<u64> = boot_range_table
         .ranges()
         .iter()
         .map(|r| r.group_id.0)
@@ -510,7 +521,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     if group_ids.is_empty() {
         group_ids.insert(0);
     }
-    // Always host group 0 for membership / legacy clients.
+    // Always host group 0 for membership / legacy clients / range meta.
     group_ids.insert(0);
 
     let mut host = MultiRaftHost::new();
@@ -563,7 +574,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     let shared_persisters: SharedPersisters = Arc::new(Mutex::new(persister_map));
     let apply_indexes: SharedApplyIndexes = Arc::new(Mutex::new(apply_map));
     let shared_range_table: client_ops::SharedRangeTable =
-        Arc::new(tokio::sync::RwLock::new(config.range_table.clone()));
+        Arc::new(tokio::sync::RwLock::new(boot_range_table));
     let split_rt = client_ops::SplitRuntime {
         raft: shared_raft.clone(),
         persisters: shared_persisters.clone(),
@@ -800,8 +811,8 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         rtx,
         next_id,
         ros.clone(),
-        shared_range_table,
-        split_rt,
+        shared_range_table.clone(),
+        split_rt.clone(),
         self_id,
         self_raft,
         self_client,
@@ -830,6 +841,8 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         shared_persisters,
         shared_engine,
         shared_roster,
+        shared_range_table.clone(),
+        split_rt.clone(),
         config.data_dir.clone(),
         apply_indexes,
         incoming_rx,

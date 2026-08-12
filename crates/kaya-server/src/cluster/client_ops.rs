@@ -57,6 +57,7 @@ use crate::operator_auth::{
     decode_admin_payload, ADD_MEMBER_OPCODE, ADMIN_AUTH_PREFIX, PROMOTE_LEARNER_OPCODE,
     REMOVE_MEMBER_OPCODE,
 };
+use crate::range_meta::encode_range_meta_command;
 
 use super::balancer::{plan_range_count, RebalancePlan};
 
@@ -372,7 +373,8 @@ fn range_moved_for_key(
 }
 
 /// Ensure a Raft group exists on this host (create empty node + persist paths).
-fn ensure_group_hosted(rt: &SplitRuntime, group_id: GroupId) -> Result<(), String> {
+/// Host a Raft group on this process if not already present (split apply + startup).
+pub(crate) fn ensure_group_hosted(rt: &SplitRuntime, group_id: GroupId) -> Result<(), String> {
     {
         let host = rt.raft.lock().unwrap();
         if host.get(group_id).is_some() {
@@ -1122,7 +1124,7 @@ async fn dispatch(
             )
         }
 
-        // SPLIT_RANGE (16) — split range at key; host new group; bump meta epoch.
+        // SPLIT_RANGE (16) — propose RangeMeta on group 0; apply hosts + persists.
         SPLIT_RANGE_OPCODE => match decode_split_range_request(&payload) {
             Ok(split_key) => {
                 // When PrefixAcl is configured, require a known client token so
@@ -1145,46 +1147,73 @@ async fn dispatch(
                     let hint = get_leader_hint(raft, &roster_snapshot);
                     return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
                 }
-                // Hold the table write lock across peek + host + split_at so two
-                // concurrent splits cannot host the same peek id while split_at
-                // allocates a different one.
-                let mut t = range_table.write().await;
-                let new_gid = t.peek_next_group_id();
-                if let Err(e) = ensure_group_hosted(split_rt, new_gid) {
-                    return outcome(STATUS_ERROR, encode_error_payload(&e), client_auth, None);
-                }
-                match t.split_at(&split_key) {
-                    Ok((left, right, gid)) => {
-                        debug_assert_eq!(gid, new_gid);
-                        let wire = vec![
-                            (
-                                left.range_id,
-                                left.epoch,
-                                left.group_id.0,
-                                left.start_key,
-                                left.end_key,
-                            ),
-                            (
-                                right.range_id,
-                                right.epoch,
-                                right.group_id.0,
-                                right.start_key,
-                                right.end_key,
-                            ),
-                        ];
-                        outcome(
-                            STATUS_OK,
-                            encode_list_ranges_response(t.meta_epoch(), &wire),
-                            client_auth,
-                            Some(split_key.len()),
-                        )
+                // Clone + mutate a snapshot; do not hold the write lock across
+                // propose (apply needs that lock). Concurrent splits share
+                // base_epoch; the loser CAS-fails on apply.
+                let prepared = {
+                    let t = range_table.read().await;
+                    let mut next = t.clone();
+                    let base_epoch = t.meta_epoch();
+                    let new_gid = next.peek_next_group_id();
+                    match next.split_at(&split_key) {
+                        Ok((left, right, gid)) => {
+                            debug_assert_eq!(gid, new_gid);
+                            let wire = vec![
+                                (
+                                    left.range_id,
+                                    left.epoch,
+                                    left.group_id.0,
+                                    left.start_key,
+                                    left.end_key,
+                                ),
+                                (
+                                    right.range_id,
+                                    right.epoch,
+                                    right.group_id.0,
+                                    right.start_key,
+                                    right.end_key,
+                                ),
+                            ];
+                            let cmd = encode_range_meta_command(base_epoch, &next);
+                            Ok((cmd, new_gid, wire, next.meta_epoch()))
+                        }
+                        Err(e) => Err(e),
                     }
+                };
+                match prepared {
                     Err(e) => outcome(
                         STATUS_INVALID_ARGUMENT,
                         encode_error_payload(&e),
                         client_auth,
                         None,
                     ),
+                    Ok((cmd, new_gid, wire, epoch)) => {
+                        if let Err(e) = ensure_group_hosted(split_rt, new_gid) {
+                            return outcome(
+                                STATUS_ERROR,
+                                encode_error_payload(&e),
+                                client_auth,
+                                None,
+                            );
+                        }
+                        let (status, body) = propose_and_wait(
+                            raft,
+                            &roster_snapshot,
+                            propose_tx,
+                            GroupId::ZERO,
+                            cmd,
+                        )
+                        .await;
+                        if status != STATUS_OK {
+                            return outcome(status, body, client_auth, Some(split_key.len()));
+                        }
+                        outcome(
+                            STATUS_OK,
+                            encode_list_ranges_response(epoch, &wire),
+                            client_auth,
+                            Some(split_key.len()),
+                        )
+                    }
                 }
             }
             Err(e) => outcome(
@@ -1195,8 +1224,7 @@ async fn dispatch(
             ),
         },
 
-        // MERGE_RANGE (17) — merge range at left_start with its right neighbor.
-        // Orphan right-hand Raft group is left hosted and idle (reclaim is M22 follow-on).
+        // MERGE_RANGE (17) — propose RangeMeta; orphan right group stays hosted.
         MERGE_RANGE_OPCODE => match decode_merge_range_request(&payload) {
             Ok(left_start) => {
                 if let Some(acl) = &acl {
@@ -1208,29 +1236,51 @@ async fn dispatch(
                     let hint = get_leader_hint(raft, &roster_snapshot);
                     return outcome(STATUS_NOT_LEADER, hint, client_auth, None);
                 }
-                let mut t = range_table.write().await;
-                match t.merge_with_next(&left_start) {
-                    Ok(merged) => {
-                        let wire = vec![(
-                            merged.range_id,
-                            merged.epoch,
-                            merged.group_id.0,
-                            merged.start_key,
-                            merged.end_key,
-                        )];
-                        outcome(
-                            STATUS_OK,
-                            encode_list_ranges_response(t.meta_epoch(), &wire),
-                            client_auth,
-                            Some(left_start.len()),
-                        )
+                let prepared = {
+                    let t = range_table.read().await;
+                    let mut next = t.clone();
+                    let base_epoch = t.meta_epoch();
+                    match next.merge_with_next(&left_start) {
+                        Ok(merged) => {
+                            let wire = vec![(
+                                merged.range_id,
+                                merged.epoch,
+                                merged.group_id.0,
+                                merged.start_key,
+                                merged.end_key,
+                            )];
+                            let cmd = encode_range_meta_command(base_epoch, &next);
+                            Ok((cmd, wire, next.meta_epoch()))
+                        }
+                        Err(e) => Err(e),
                     }
+                };
+                match prepared {
                     Err(e) => outcome(
                         STATUS_INVALID_ARGUMENT,
                         encode_error_payload(&e),
                         client_auth,
                         None,
                     ),
+                    Ok((cmd, wire, epoch)) => {
+                        let (status, body) = propose_and_wait(
+                            raft,
+                            &roster_snapshot,
+                            propose_tx,
+                            GroupId::ZERO,
+                            cmd,
+                        )
+                        .await;
+                        if status != STATUS_OK {
+                            return outcome(status, body, client_auth, Some(left_start.len()));
+                        }
+                        outcome(
+                            STATUS_OK,
+                            encode_list_ranges_response(epoch, &wire),
+                            client_auth,
+                            Some(left_start.len()),
+                        )
+                    }
                 }
             }
             Err(e) => outcome(

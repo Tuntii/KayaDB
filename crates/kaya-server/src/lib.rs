@@ -11,6 +11,7 @@ pub mod operator_auth;
 #[cfg(feature = "otel")]
 pub mod otel_spans;
 pub mod raft_persister;
+pub mod range_meta;
 pub mod security;
 
 #[cfg(test)]

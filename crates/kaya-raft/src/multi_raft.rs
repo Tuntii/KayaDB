@@ -6,8 +6,9 @@
 //!
 //! **Production note:** `kaya-server::ClusterNode` always hosts a
 //! [`MultiRaftHost`] with at least group 0. Multi-group static ranges are
-//! configured via `ClusterConfig::with_static_ranges`. Dynamic splits and
-//! per-range Jepsen remain follow-on work.
+//! configured via `ClusterConfig::with_static_ranges`. Dynamic splits/merges
+//! are committed as `RaftCommand::RangeMeta` (group 0) and snapshotted to
+//! disk (`range-table.bin`); see issue #25.
 //!
 //! **Tracing (v1 stub):** when OTel is enabled at the server layer, attach a
 //! `kaya.raft.group_id` attribute on spans that touch multi-raft propose/handle
@@ -242,6 +243,124 @@ impl StaticRangeTable {
     pub fn peek_next_group_id(&self) -> GroupId {
         GroupId(self.next_group_id)
     }
+
+    /// Binary snapshot for disk / Raft meta replication (issue #25).
+    ///
+    /// Format (version 1):
+    /// ```text
+    /// version(u8=1) | meta_epoch(u64 LE) | next_range_id(u64) | next_group_id(u64)
+    /// | count(u32 LE) | repeated:
+    ///     range_id(u64) | epoch(u64) | group_id(u64)
+    ///     | start_len(u32) | start | end_len(u32) | end
+    /// ```
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(1u8); // version
+        out.extend_from_slice(&self.meta_epoch.to_le_bytes());
+        out.extend_from_slice(&self.next_range_id.to_le_bytes());
+        out.extend_from_slice(&self.next_group_id.to_le_bytes());
+        out.extend_from_slice(&(self.ranges.len() as u32).to_le_bytes());
+        for r in &self.ranges {
+            out.extend_from_slice(&r.range_id.to_le_bytes());
+            out.extend_from_slice(&r.epoch.to_le_bytes());
+            out.extend_from_slice(&r.group_id.0.to_le_bytes());
+            out.extend_from_slice(&(r.start_key.len() as u32).to_le_bytes());
+            out.extend_from_slice(&r.start_key);
+            out.extend_from_slice(&(r.end_key.len() as u32).to_le_bytes());
+            out.extend_from_slice(&r.end_key);
+        }
+        out
+    }
+
+    /// Decode a snapshot produced by [`Self::encode`].
+    pub fn decode(data: &[u8]) -> Result<Self, String> {
+        let mut cur = data;
+        if cur.is_empty() {
+            return Err("empty range table snapshot".into());
+        }
+        let version = cur[0];
+        cur = &cur[1..];
+        if version != 1 {
+            return Err(format!("unsupported range table version: {version}"));
+        }
+        let meta_epoch = take_u64(&mut cur, "meta_epoch")?;
+        let next_range_id = take_u64(&mut cur, "next_range_id")?;
+        let next_group_id = take_u64(&mut cur, "next_group_id")?;
+        let count = take_u32(&mut cur, "range count")? as usize;
+        let mut ranges = Vec::with_capacity(count);
+        for _ in 0..count {
+            let range_id = take_u64(&mut cur, "range_id")?;
+            let epoch = take_u64(&mut cur, "epoch")?;
+            let group_id = GroupId(take_u64(&mut cur, "group_id")?);
+            let start_key = take_bytes(&mut cur, "start_key")?;
+            let end_key = take_bytes(&mut cur, "end_key")?;
+            ranges.push(StaticRange {
+                start_key,
+                end_key,
+                group_id,
+                range_id,
+                epoch,
+            });
+        }
+        if !cur.is_empty() {
+            return Err(format!(
+                "trailing {} bytes after range table snapshot",
+                cur.len()
+            ));
+        }
+        Ok(Self {
+            ranges,
+            meta_epoch,
+            next_range_id,
+            next_group_id,
+        })
+    }
+
+    /// Replace this table with `other` (used when applying a committed meta snapshot).
+    pub fn restore(&mut self, other: Self) {
+        *self = other;
+    }
+
+    /// Group ids present in the table (sorted, unique).
+    pub fn group_ids(&self) -> Vec<GroupId> {
+        let mut ids: Vec<GroupId> = self.ranges.iter().map(|r| r.group_id).collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+}
+
+fn take_u64(cur: &mut &[u8], label: &str) -> Result<u64, String> {
+    if cur.len() < 8 {
+        return Err(format!("truncated range table ({label})"));
+    }
+    let v = u64::from_le_bytes([
+        cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
+    ]);
+    *cur = &cur[8..];
+    Ok(v)
+}
+
+fn take_u32(cur: &mut &[u8], label: &str) -> Result<u32, String> {
+    if cur.len() < 4 {
+        return Err(format!("truncated range table ({label})"));
+    }
+    let v = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]);
+    *cur = &cur[4..];
+    Ok(v)
+}
+
+fn take_bytes(cur: &mut &[u8], label: &str) -> Result<Vec<u8>, String> {
+    let len = take_u32(cur, label)? as usize;
+    if cur.len() < len {
+        return Err(format!(
+            "truncated range table ({label}): need {len}, have {}",
+            cur.len()
+        ));
+    }
+    let bytes = cur[..len].to_vec();
+    *cur = &cur[len..];
+    Ok(bytes)
 }
 
 /// Hosts multiple independent Raft nodes in one process.
@@ -570,6 +689,53 @@ mod tests {
         t.split_at(b"m").unwrap();
         // Right half has no neighbor.
         assert!(t.merge_with_next(b"m").is_err());
+    }
+
+    #[test]
+    fn range_table_encode_decode_preserves_epochs_and_counters() {
+        let mut t = StaticRangeTable::single_group(GroupId::ZERO);
+        t.split_at(b"m").unwrap();
+        t.split_at(b"t").unwrap();
+        let epoch = t.meta_epoch();
+        let peek_g = t.peek_next_group_id();
+        let encoded = t.encode();
+        let restored = StaticRangeTable::decode(&encoded).unwrap();
+        assert_eq!(restored.meta_epoch(), epoch);
+        assert_eq!(restored.peek_next_group_id(), peek_g);
+        assert_eq!(restored.ranges(), t.ranges());
+        assert_eq!(restored.lookup(b"a"), Some(GroupId::ZERO));
+        assert_eq!(restored.lookup(b"m"), Some(GroupId(1)));
+        assert_eq!(restored.lookup(b"t"), Some(GroupId(2)));
+        // Round-trip again after restore (bytes + further split allocation).
+        assert_eq!(
+            StaticRangeTable::decode(&restored.encode())
+                .unwrap()
+                .ranges(),
+            t.ranges()
+        );
+        // Counters preserved: next split allocates the same group id as pre-encode.
+        let mut again = restored;
+        let (_, right, gid) = again.split_at(b"z").unwrap();
+        assert_eq!(gid, peek_g);
+        assert_eq!(right.group_id, peek_g);
+    }
+
+    #[test]
+    fn range_table_decode_rejects_bad_version() {
+        let err = StaticRangeTable::decode(&[99u8]).unwrap_err();
+        assert!(err.contains("version"), "err={err}");
+    }
+
+    #[test]
+    fn from_ranges_does_not_match_encode_restore_semantics() {
+        // from_ranges resets meta_epoch to 1 — durable restore must use decode.
+        let mut t = StaticRangeTable::single_group(GroupId::ZERO);
+        t.split_at(b"m").unwrap();
+        assert!(t.meta_epoch() > 1);
+        let via_from = StaticRangeTable::from_ranges(t.ranges().to_vec());
+        assert_eq!(via_from.meta_epoch(), 1);
+        let via_decode = StaticRangeTable::decode(&t.encode()).unwrap();
+        assert_eq!(via_decode.meta_epoch(), t.meta_epoch());
     }
 
     #[test]

@@ -23,7 +23,7 @@ KayaDB uses [Semantic Versioning](https://semver.org/) while in `0.1.x` pre-1.0 
 - **Cross-shard TXN:** sequential 2PC over multi-raft groups; SI single-group atomic commit
 - **Hardening:** AES-GCM encryption-at-rest, per-prefix ACL, Dashboard v1
 - **Ecosystem:** Go TXN + retries, TypeScript client, Python client, conformance v3, deployment guide v2
-- **Honest residuals:** no live `MOVE_RANGE`, process-local range meta, no key rotation — see [ROADMAP](ROADMAP.md) north-star re-eval
+- **Honest residuals:** no live `MOVE_RANGE`, no key rotation — range meta is now Raft-replicated + disk-backed (#25). See [ROADMAP](ROADMAP.md) north-star re-eval
 
 ### Install this version
 

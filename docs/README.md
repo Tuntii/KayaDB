@@ -26,7 +26,7 @@ Core properties:
 - **Raft cluster** with leader redirection, dynamic membership, and day-2 runbooks
 - **Correctness culture** — simulation, Jepsen-style harness, fuzz targets, chaos-matrix CI
 
-KayaDB completed **M13–M25** (productization through distributed transactional KV). **v0.1.113** is a **v0.2.0 candidate** with documented residuals (live range migrate, Raft-replicated range meta, key rotation, grand Jepsen matrix). Not a fully hardened multi-tenant SaaS database. Read [security](security.md) before any production-like deployment.
+KayaDB completed **M13–M25** (productization through distributed transactional KV). **v0.1.113** is a **v0.2.0 candidate** with documented residuals (live range migrate, key rotation). Range meta is Raft-replicated + disk-backed (#25). Not a fully hardened multi-tenant SaaS database. Read [security](security.md) before any production-like deployment.
 
 ---
 

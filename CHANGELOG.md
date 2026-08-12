@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Durable range meta (#25):** `StaticRangeTable` encode/decode preserves `meta_epoch` / id counters; `RaftCommand::RangeMeta` (type 8) on group 0 with CAS on `base_epoch`; SPLIT/MERGE commit via that entry; `{data_dir}/range-table.bin` + startup restore so restart keeps the last committed layout; IT `test_range_split_survives_restart`
 - **Jepsen multi-range bank grand matrix (`bank-mr`):** three-node multi-raft static ranges `[a,m)/[m,z)`, multi-range account keys, SI transfers (cross-group 2PC when leadership allows), composite SplitRange + MergeRange + KillNode + Partition nemesis, constant-sum verify; nightly `grand_matrix` gate in `jepsen.yml`
 - **2PC recovery on every `Engine::open`:** scan `\x00txn/rec/*` — abort `Preparing`/`Prepared` (fail-closed), finish `Committing` → `Committed`; stats on `RecoveryReport` (`txn2pc_aborted`, `txn2pc_finished_commits`); crash tests for mid-prepare, mid-commit, partial materialization
 - **WGL minimal counterexample:** `LinearizabilityChecker::minimal_counterexample` / `check_concurrent_detailed` greedily shrink a failing concurrent history (per-key partition) to a compact non-linearizable subset with real-time edges + reason; Jepsen `History::check_concurrent` appends the report to violations

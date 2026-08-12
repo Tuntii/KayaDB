@@ -1,8 +1,8 @@
 # Range Metadata, Routing, Splits & Merges (M21/M22)
 
-**Status:** Production path v1.0 (M21 split + M22 merge/placement; 2026-07-17)  
-**Scope:** Meta range table with epochs, dynamic split/merge, client cache, RANGE_MOVED; advisory rebalance; no live migrate  
-**Milestone:** M21 (split), M22 (merge, transfer, learners, advisory balancer, drain, dashboard v1)
+**Status:** Production path v1.1 (M21/M22 + durable meta #25; 2026-08-13)  
+**Scope:** Meta range table with epochs, dynamic split/merge, client cache, RANGE_MOVED; advisory rebalance; Raft-replicated durable meta; no live migrate  
+**Milestone:** M21 (split), M22 (merge, transfer, learners, advisory balancer, drain, dashboard v1), #25 (durable RangeMeta)
 
 ---
 
@@ -54,6 +54,11 @@ Lookup: linear scan; key `k` matches first range with `start ≤ k < end`
    - Left: `[R.start, split_key)` → keep `R.group_id`, `range_id`, `epoch+1`
    - Right: `[split_key, R.end)` → `new_group_id`, new `range_id`, `epoch=1`
 4. Bump `meta_epoch`.
+5. **Commit** the full table snapshot as `RaftCommand::RangeMeta` on group 0
+   (`base_epoch` = pre-split `meta_epoch`). Apply is CAS: replace only if
+   current `meta_epoch == base_epoch`, persist `{data_dir}/range-table.bin`,
+   then host every group in the snapshot. Concurrent splits with the same
+   `base_epoch` lose on CAS.
 
 ---
 
@@ -68,6 +73,24 @@ Lookup: linear scan; key `k` matches first range with `start ≤ k < end`
 4. Drop `R` from the table; bump `meta_epoch`.
 5. Do **not** tear down the Raft group that owned `R` in this path — the orphan
    group may stay hosted and idle. Reclaim / unhost is follow-on work.
+6. Commit the merged table the same way as split (`RangeMeta` + disk file).
+
+---
+
+## 3c. Recovery (#25)
+
+On `ClusterNode` start:
+
+1. Load `{data_dir}/range-table.bin` if present (overrides configured defaults).
+   Decode preserves `meta_epoch`, `next_range_id`, `next_group_id` — do **not**
+   rebuild via `from_ranges` (that resets `meta_epoch` to 1).
+2. Host every group referenced by the restored table (plus group 0).
+3. Replay unapplied Raft log entries. A `RangeMeta` whose `base_epoch` does not
+   match is ignored if the on-disk snapshot already matches the payload
+   (idempotent re-apply after crash between persist and apply-index).
+
+Clients with a stale cached `meta_epoch` still get `RANGE_MOVED` (11) and
+refresh via `LIST_RANGES`.
 
 ---
 
@@ -156,6 +179,9 @@ raw bytes; otherwise UTF-8.
 | Advisory REBALANCE_PLAN (20) | Yes (range-count; no live migrate) |
 | Drain mode + decommission runbook | Yes |
 | Dashboard v1 (read-only HTTP) | Yes (`/health`, `/v1/ranges`, `/v1/raft`) |
+| Durable meta (RangeMeta + disk) | Yes (`range-table.bin`, IT restart) |
+| Restart restores last committed layout | Yes (`test_range_split_survives_restart`) |
+| Range table inside Raft snapshot payload | No (follow-on; joiner after compact uses disk file) |
 | Auto size-threshold split | No (manual + API first) |
 | Live range migrate / MOVE_RANGE | No (follow-on) |
 | Orphan group reclaim after merge | No (follow-on) |

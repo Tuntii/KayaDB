@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use crate::membership::SharedRoster;
 use crate::raft_persister::RaftPersister;
 
-use super::client_ops::{ProposeReq, ReadIndexReq};
+use super::client_ops::{ProposeReq, ReadIndexReq, SharedRangeTable, SplitRuntime};
 use super::replication::drain_and_apply;
 use super::{SharedApplyIndexes, SharedEngine, SharedPending, SharedPendingReads, SharedRaftHost};
 
@@ -47,6 +47,8 @@ pub(crate) async fn raft_event_loop(
     persisters: std::sync::Arc<std::sync::Mutex<HashMap<u64, RaftPersister>>>,
     engine: SharedEngine,
     roster: SharedRoster,
+    range_table: SharedRangeTable,
+    split_rt: SplitRuntime,
     data_dir: PathBuf,
     apply_indexes: SharedApplyIndexes,
     mut incoming_rx: mpsc::Receiver<kaya_raft::Envelope>,
@@ -84,6 +86,8 @@ pub(crate) async fn raft_event_loop(
                     &host,
                     &engine,
                     &roster,
+                    &range_table,
+                    &split_rt,
                     &data_dir,
                     &apply_indexes,
                     &pending,
@@ -108,6 +112,8 @@ pub(crate) async fn raft_event_loop(
                     &host,
                     &engine,
                     &roster,
+                    &range_table,
+                    &split_rt,
                     &data_dir,
                     &apply_indexes,
                     &pending,
@@ -135,6 +141,8 @@ pub(crate) async fn raft_event_loop(
                             &host,
                             &engine,
                             &roster,
+                            &range_table,
+                            &split_rt,
                             &data_dir,
                             &apply_indexes,
                             &pending,
@@ -165,6 +173,8 @@ pub(crate) async fn raft_event_loop(
                             &host,
                             &engine,
                             &roster,
+                            &range_table,
+                            &split_rt,
                             &data_dir,
                             &apply_indexes,
                             &pending,

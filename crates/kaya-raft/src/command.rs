@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! type      : u8       (1 = Put, 2 = Delete, 3 = ConfigChange, 4 = TxnCommit,
-//!                       5 = TxnPrepare, 6 = TxnCommit2pc, 7 = TxnAbort2pc)
+//!                       5 = TxnPrepare, 6 = TxnCommit2pc, 7 = TxnAbort2pc,
+//!                       8 = RangeMeta)
 //! key_len   : u32 LE
 //! key       : bytes
 //! [Put only]
@@ -23,6 +24,10 @@
 //!   key_len u32 | key | has_value u8 (0/1) | [value_len u32 | value if has_value]
 //! [TxnCommit2pc / TxnAbort2pc]
 //! txn_id    : u64 LE
+//! [RangeMeta]
+//! base_epoch : u64 LE   // CAS: must equal current table meta_epoch on apply
+//! snap_len   : u32 LE
+//! snapshot   : bytes    // StaticRangeTable::encode
 //! ```
 
 /// Phase of a membership configuration change (joint consensus).
@@ -133,6 +138,18 @@ pub enum RaftCommand {
     TxnAbort2pc {
         txn_id: u64,
     },
+    /// Durable range meta snapshot (type byte 8).
+    ///
+    /// Committed on group 0. Apply replaces the in-memory
+    /// [`crate::StaticRangeTable`] when `base_epoch` matches the current
+    /// `meta_epoch` (CAS), then persists the snapshot to disk. Payload is
+    /// [`crate::StaticRangeTable::encode`].
+    RangeMeta {
+        /// Expected current `meta_epoch` before this snapshot (optimistic concurrency).
+        base_epoch: u64,
+        /// Encoded [`crate::StaticRangeTable`] after the split/merge.
+        snapshot: Vec<u8>,
+    },
 }
 
 impl RaftCommand {
@@ -186,6 +203,15 @@ impl RaftCommand {
             RaftCommand::TxnAbort2pc { txn_id } => {
                 out.push(7u8);
                 out.extend_from_slice(&txn_id.to_le_bytes());
+            }
+            RaftCommand::RangeMeta {
+                base_epoch,
+                snapshot,
+            } => {
+                out.push(8u8);
+                out.extend_from_slice(&base_epoch.to_le_bytes());
+                out.extend_from_slice(&(snapshot.len() as u32).to_le_bytes());
+                out.extend_from_slice(snapshot);
             }
         }
         out
@@ -257,6 +283,14 @@ impl RaftCommand {
             7 => {
                 let txn_id = next_u64(&mut cur)?;
                 Ok(RaftCommand::TxnAbort2pc { txn_id })
+            }
+            8 => {
+                let base_epoch = next_u64(&mut cur)?;
+                let snapshot = next_bytes(&mut cur)?;
+                Ok(RaftCommand::RangeMeta {
+                    base_epoch,
+                    snapshot,
+                })
             }
             t => Err(format!("unknown RaftCommand type: {t}")),
         }
@@ -563,6 +597,28 @@ mod tests {
         let encoded = cmd.encode();
         assert_eq!(encoded[0], 7u8, "TxnAbort2pc type byte must be 7");
         assert_eq!(RaftCommand::decode(&encoded).unwrap(), cmd);
+    }
+
+    #[test]
+    fn round_trip_range_meta() {
+        let snap = crate::StaticRangeTable::single_group(crate::GroupId::ZERO).encode();
+        let cmd = RaftCommand::RangeMeta {
+            base_epoch: 1,
+            snapshot: snap.clone(),
+        };
+        let encoded = cmd.encode();
+        assert_eq!(encoded[0], 8u8, "RangeMeta type byte must be 8");
+        assert_eq!(RaftCommand::decode(&encoded).unwrap(), cmd);
+        match RaftCommand::decode(&encoded).unwrap() {
+            RaftCommand::RangeMeta {
+                base_epoch,
+                snapshot,
+            } => {
+                assert_eq!(base_epoch, 1);
+                assert_eq!(snapshot, snap);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]
