@@ -22,17 +22,18 @@ use kaya_engine::CdcOp;
 use kaya_net::{
     decode_cdc_checkpoint_request, decode_cdc_poll_request, decode_hello_request,
     decode_key_payload, decode_member_payload, decode_merge_range_request,
-    decode_promote_learner_payload, decode_put_payload, decode_remove_member_payload,
-    decode_scan_payload, decode_split_range_request, decode_transfer_leader_request,
-    decode_txn_id_payload, decode_txn_op_payload, encode_cdc_poll_response, encode_error_payload,
-    encode_hello_response, encode_list_ranges_response, encode_range_moved_payload,
-    encode_rebalance_plan_response, encode_scan_response, encode_txn_begin_response,
-    encode_txn_commit_response, encode_value_payload, read_client_frame, send_envelopes,
-    write_client_response, NodeRoster, CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE, CDC_EVENT_PUT,
-    CDC_POLL_OPCODE, LIST_RANGES_OPCODE, MERGE_RANGE_OPCODE, PROTO_VERSION, REBALANCE_PLAN_OPCODE,
-    SPLIT_RANGE_OPCODE, STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER,
-    STATUS_OK, STATUS_RANGE_MOVED, STATUS_TXN_CONFLICT, TRANSFER_LEADER_OPCODE, TXN_BEGIN_OPCODE,
-    TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
+    decode_meta_epoch_payload, decode_promote_learner_payload, decode_put_payload,
+    decode_remove_member_payload, decode_scan_payload, decode_split_range_request,
+    decode_transfer_leader_request, decode_txn_id_payload, decode_txn_op_payload,
+    encode_cdc_poll_response, encode_error_payload, encode_hello_response,
+    encode_list_ranges_response, encode_range_moved_payload, encode_rebalance_plan_response,
+    encode_scan_response, encode_txn_begin_response, encode_txn_commit_response,
+    encode_value_payload, read_client_frame, send_envelopes, write_client_response, NodeRoster,
+    CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE, CDC_EVENT_PUT, CDC_POLL_OPCODE, LIST_RANGES_OPCODE,
+    MERGE_RANGE_OPCODE, PROTO_VERSION, REBALANCE_PLAN_OPCODE, SPLIT_RANGE_OPCODE, STATUS_ERROR,
+    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK, STATUS_RANGE_MOVED,
+    STATUS_TXN_CONFLICT, TRANSFER_LEADER_OPCODE, TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE,
+    TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
 };
 use kaya_raft::{
     multi_raft_group_dir, ClusterMember, GroupId, NodeId, RaftConfig, RaftNode, StaticRangeTable,
@@ -338,6 +339,23 @@ async fn build_rebalance_plan(
 
 fn lookup_group(range_table: &StaticRangeTable, key: &[u8]) -> GroupId {
     range_table.lookup(key).unwrap_or(GroupId::ZERO)
+}
+
+fn encode_list_ranges_from_table(t: &StaticRangeTable) -> Vec<u8> {
+    let wire: Vec<_> = t
+        .ranges()
+        .iter()
+        .map(|r| {
+            (
+                r.range_id,
+                r.epoch,
+                r.group_id.0,
+                r.start_key.clone(),
+                r.end_key.clone(),
+            )
+        })
+        .collect();
+    encode_list_ranges_response(t.meta_epoch(), &wire)
 }
 
 fn is_leader_of(raft: &SharedRaftHost, group_id: GroupId) -> bool {
@@ -677,6 +695,33 @@ async fn dispatch(
     } else {
         (payload, None)
     };
+
+    // Optional client range-cache epoch (MEPO). Stale caches get RANGE_MOVED
+    // plus a full list-ranges body so the client can refresh.
+    let (payload, client_meta_epoch) = match decode_meta_epoch_payload(&payload) {
+        Ok(v) => v,
+        Err(e) => {
+            return outcome(
+                STATUS_INVALID_ARGUMENT,
+                encode_error_payload(&e),
+                client_auth,
+                None,
+            );
+        }
+    };
+    if matches!(opcode, 1..=4) {
+        if let Some(client_epoch) = client_meta_epoch {
+            let t = range_table.read().await;
+            if client_epoch < t.meta_epoch() {
+                return outcome(
+                    STATUS_RANGE_MOVED,
+                    encode_list_ranges_from_table(&t),
+                    client_auth,
+                    None,
+                );
+            }
+        }
+    }
 
     let roster_snapshot = roster.read().await.clone();
     match opcode {
@@ -1103,22 +1148,9 @@ async fn dispatch(
         // LIST_RANGES (15) — meta table snapshot for client range cache.
         LIST_RANGES_OPCODE => {
             let t = range_table.read().await;
-            let wire: Vec<_> = t
-                .ranges()
-                .iter()
-                .map(|r| {
-                    (
-                        r.range_id,
-                        r.epoch,
-                        r.group_id.0,
-                        r.start_key.clone(),
-                        r.end_key.clone(),
-                    )
-                })
-                .collect();
             outcome(
                 STATUS_OK,
-                encode_list_ranges_response(t.meta_epoch(), &wire),
+                encode_list_ranges_from_table(&t),
                 client_auth,
                 None,
             )

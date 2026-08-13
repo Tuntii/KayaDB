@@ -1555,6 +1555,270 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
+    /// #25: stale client meta_epoch on PUT gets RANGE_MOVED + a refresh body.
+    #[serial]
+    #[tokio::test]
+    async fn test_stale_meta_epoch_returns_range_moved() {
+        use kaya_net::{
+            decode_list_ranges_response, encode_meta_epoch_payload, encode_split_range_request,
+            LIST_RANGES_OPCODE, SPLIT_RANGE_OPCODE, STATUS_RANGE_MOVED,
+        };
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_range_stale_epoch_{test_id}"));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let r = get_free_port().await;
+        let c = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{r}").parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{c}").parse().unwrap();
+
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![]);
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "node should elect");
+
+        let (status, body) = roundtrip(client_addr, LIST_RANGES_OPCODE, &[])
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK);
+        let (epoch_before, _) = decode_list_ranges_response(&body).unwrap();
+
+        let (status, _) = roundtrip(
+            client_addr,
+            SPLIT_RANGE_OPCODE,
+            &encode_split_range_request(b"m"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, STATUS_OK);
+
+        let stale = encode_meta_epoch_payload(&encode_put_payload(b"a", b"v"), epoch_before);
+        let (status, body) = roundtrip(client_addr, 1, &stale).await.unwrap();
+        assert_eq!(status, STATUS_RANGE_MOVED, "stale epoch must RANGE_MOVED");
+        let (epoch_after, ranges) = decode_list_ranges_response(&body).unwrap();
+        assert!(epoch_after > epoch_before);
+        assert_eq!(ranges.len(), 2);
+
+        // Current epoch is accepted (key still on group 0 so no new-group election wait).
+        let fresh = encode_meta_epoch_payload(&encode_put_payload(b"a", b"v"), epoch_after);
+        let (status, _) = roundtrip(client_addr, 1, &fresh).await.unwrap();
+        assert_eq!(status, STATUS_OK);
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// #25: all three voters restore the last committed layout after restart.
+    #[serial]
+    #[tokio::test]
+    async fn test_range_split_survives_all_nodes_restart() {
+        use kaya_net::{
+            decode_list_ranges_response, encode_split_range_request, LIST_RANGES_OPCODE,
+            SPLIT_RANGE_OPCODE,
+        };
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir1 = std::env::temp_dir().join(format!("kayadb_range_all_n1_{test_id}"));
+        let data_dir2 = std::env::temp_dir().join(format!("kayadb_range_all_n2_{test_id}"));
+        let data_dir3 = std::env::temp_dir().join(format!("kayadb_range_all_n3_{test_id}"));
+        let _ = std::fs::remove_dir_all(&data_dir1);
+        let _ = std::fs::remove_dir_all(&data_dir2);
+        let _ = std::fs::remove_dir_all(&data_dir3);
+
+        let r1 = get_free_port().await;
+        let c1 = get_free_port().await;
+        let r2 = get_free_port().await;
+        let c2 = get_free_port().await;
+        let r3 = get_free_port().await;
+        let c3 = get_free_port().await;
+        let raft1: SocketAddr = format!("127.0.0.1:{r1}").parse().unwrap();
+        let client1: SocketAddr = format!("127.0.0.1:{c1}").parse().unwrap();
+        let raft2: SocketAddr = format!("127.0.0.1:{r2}").parse().unwrap();
+        let client2: SocketAddr = format!("127.0.0.1:{c2}").parse().unwrap();
+        let raft3: SocketAddr = format!("127.0.0.1:{r3}").parse().unwrap();
+        let client3: SocketAddr = format!("127.0.0.1:{c3}").parse().unwrap();
+
+        let cfg1 = ClusterConfig::new(
+            1,
+            &data_dir1,
+            raft1,
+            client1,
+            vec![(2, raft2, client2), (3, raft3, client3)],
+        );
+        let cfg2 = ClusterConfig::new(
+            2,
+            &data_dir2,
+            raft2,
+            client2,
+            vec![(1, raft1, client1), (3, raft3, client3)],
+        );
+        let cfg3 = ClusterConfig::new(
+            3,
+            &data_dir3,
+            raft3,
+            client3,
+            vec![(1, raft1, client1), (2, raft2, client2)],
+        );
+
+        let h1 = tokio::spawn(async move {
+            let _ = ClusterNode::new(cfg1).run().await;
+        });
+        let h2 = tokio::spawn(async move {
+            let _ = ClusterNode::new(cfg2).run().await;
+        });
+        let h3 = tokio::spawn(async move {
+            let _ = ClusterNode::new(cfg3).run().await;
+        });
+
+        let mut leader = None;
+        for _ in 0..120 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            for addr in [client1, client2, client3] {
+                if check_health(addr).await.as_deref() == Some("leader") {
+                    leader = Some(addr);
+                    break;
+                }
+            }
+            if leader.is_some() {
+                break;
+            }
+        }
+        let leader = leader.expect("leader elected");
+
+        let (status, _) = roundtrip(leader, 1, &encode_put_payload(b"a", b"v1"))
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK);
+        let (status, body) = roundtrip(
+            leader,
+            SPLIT_RANGE_OPCODE,
+            &encode_split_range_request(b"m"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, STATUS_OK, "split");
+        let (split_epoch, halves) = decode_list_ranges_response(&body).unwrap();
+        assert_eq!(halves.len(), 2);
+
+        // Wait until every voter has applied the RangeMeta.
+        let mut all_have = false;
+        for _ in 0..80 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let mut ok = 0;
+            for addr in [client1, client2, client3] {
+                if let Ok((STATUS_OK, body)) = roundtrip(addr, LIST_RANGES_OPCODE, &[]).await {
+                    if let Ok((epoch, ranges)) = decode_list_ranges_response(&body) {
+                        if ranges.len() == 2 && epoch == split_epoch {
+                            ok += 1;
+                        }
+                    }
+                }
+            }
+            if ok == 3 {
+                all_have = true;
+                break;
+            }
+        }
+        assert!(all_have, "all nodes should apply RangeMeta before restart");
+
+        h1.abort();
+        h2.abort();
+        h3.abort();
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+        for dir in [&data_dir1, &data_dir2, &data_dir3] {
+            assert!(
+                dir.join("range-table.bin").exists(),
+                "range-table.bin missing in {}",
+                dir.display()
+            );
+        }
+
+        let cfg1 = ClusterConfig::new(
+            1,
+            &data_dir1,
+            raft1,
+            client1,
+            vec![(2, raft2, client2), (3, raft3, client3)],
+        );
+        let cfg2 = ClusterConfig::new(
+            2,
+            &data_dir2,
+            raft2,
+            client2,
+            vec![(1, raft1, client1), (3, raft3, client3)],
+        );
+        let cfg3 = ClusterConfig::new(
+            3,
+            &data_dir3,
+            raft3,
+            client3,
+            vec![(1, raft1, client1), (2, raft2, client2)],
+        );
+        let h1 = tokio::spawn(async move {
+            let _ = ClusterNode::new(cfg1).run().await;
+        });
+        let h2 = tokio::spawn(async move {
+            let _ = ClusterNode::new(cfg2).run().await;
+        });
+        let h3 = tokio::spawn(async move {
+            let _ = ClusterNode::new(cfg3).run().await;
+        });
+
+        let mut leader = None;
+        for _ in 0..120 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            for addr in [client1, client2, client3] {
+                if check_health(addr).await.as_deref() == Some("leader") {
+                    leader = Some(addr);
+                    break;
+                }
+            }
+            if leader.is_some() {
+                break;
+            }
+        }
+        let leader = leader.expect("leader after restart");
+
+        for addr in [client1, client2, client3] {
+            let (status, body) = roundtrip(addr, LIST_RANGES_OPCODE, &[]).await.unwrap();
+            assert_eq!(status, STATUS_OK, "list {addr}");
+            let (epoch, ranges) = decode_list_ranges_response(&body).unwrap();
+            assert_eq!(ranges.len(), 2, "layout lost on {addr}");
+            assert_eq!(epoch, split_epoch, "epoch reset on {addr}");
+        }
+
+        let (status, body) = roundtrip(leader, 2, &encode_key_payload(b"a"))
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(decode_value_payload(&body).unwrap(), b"v1");
+
+        h1.abort();
+        h2.abort();
+        h3.abort();
+        let _ = std::fs::remove_dir_all(&data_dir1);
+        let _ = std::fs::remove_dir_all(&data_dir2);
+        let _ = std::fs::remove_dir_all(&data_dir3);
+    }
+
     #[cfg(feature = "ebpf")]
     fn prometheus_sample_value(body: &str, metric_prefix: &str) -> Option<u64> {
         body.lines()

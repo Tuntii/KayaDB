@@ -8,12 +8,12 @@ use kaya_net::{
     decode_list_ranges_response, decode_scan_response, decode_txn_begin_response,
     decode_txn_commit_response, decode_value_payload, encode_cdc_checkpoint_request,
     encode_cdc_poll_request, encode_client_auth_payload, encode_hello_request, encode_key_payload,
-    encode_put_payload, encode_scan_payload, encode_split_range_request, encode_txn_id_payload,
-    encode_txn_op_payload, request_on_stream, CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE,
-    CDC_EVENT_PUT, CDC_POLL_OPCODE, HELLO_OPCODE, LIST_RANGES_OPCODE, PROTO_VERSION,
-    SPLIT_RANGE_OPCODE, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK,
-    STATUS_RANGE_MOVED, STATUS_TXN_CONFLICT, TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE, TXN_OP_DELETE,
-    TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
+    encode_meta_epoch_payload, encode_put_payload, encode_scan_payload, encode_split_range_request,
+    encode_txn_id_payload, encode_txn_op_payload, request_on_stream, CDC_CHECKPOINT_OPCODE,
+    CDC_EVENT_DELETE, CDC_EVENT_PUT, CDC_POLL_OPCODE, HELLO_OPCODE, LIST_RANGES_OPCODE,
+    PROTO_VERSION, SPLIT_RANGE_OPCODE, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND,
+    STATUS_NOT_LEADER, STATUS_OK, STATUS_RANGE_MOVED, STATUS_TXN_CONFLICT, TXN_BEGIN_OPCODE,
+    TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
 };
 
 #[cfg(feature = "tls")]
@@ -258,11 +258,22 @@ impl KayaClient {
     }
 
     fn wire_payload(&self, opcode: u8, payload: &[u8]) -> Vec<u8> {
-        // Data-path + TXN + CDC + range opcodes may carry an optional client token prefix.
-        if matches!(opcode, 1..=4 | 6 | 9..=17) {
-            encode_client_auth_payload(payload, self.client_token.as_deref())
+        // PUT/GET/DELETE/SCAN: attach cached meta_epoch so a stale client
+        // gets RANGE_MOVED + a full table refresh instead of a silent misroute.
+        let payload = if matches!(opcode, 1..=4) {
+            if let Some(cache) = &self.range_cache {
+                encode_meta_epoch_payload(payload, cache.meta_epoch)
+            } else {
+                payload.to_vec()
+            }
         } else {
             payload.to_vec()
+        };
+        // Data-path + TXN + CDC + range opcodes may carry an optional client token prefix.
+        if matches!(opcode, 1..=4 | 6 | 9..=17) {
+            encode_client_auth_payload(&payload, self.client_token.as_deref())
+        } else {
+            payload
         }
     }
 

@@ -88,9 +88,13 @@ On `ClusterNode` start:
 3. Replay unapplied Raft log entries. A `RangeMeta` whose `base_epoch` does not
    match is ignored if the on-disk snapshot already matches the payload
    (idempotent re-apply after crash between persist and apply-index).
+4. `raft-snapshot.bin` / InstallSnapshot payload is **v2**: engine + membership
+   + `StaticRangeTable::encode`. A joiner after log compact restores the table
+   from the snapshot when its `meta_epoch` is ≥ the live table.
 
-Clients with a stale cached `meta_epoch` still get `RANGE_MOVED` (11) and
-refresh via `LIST_RANGES`.
+Clients may prefix PUT/GET/DELETE/SCAN with `MEPO | meta_epoch(u64 LE)`. If
+`client_epoch < server.meta_epoch`, the server returns `RANGE_MOVED` (11) with
+a full list-ranges body. `kaya-client` attaches the cached epoch automatically.
 
 ---
 
@@ -180,8 +184,10 @@ raw bytes; otherwise UTF-8.
 | Drain mode + decommission runbook | Yes |
 | Dashboard v1 (read-only HTTP) | Yes (`/health`, `/v1/ranges`, `/v1/raft`) |
 | Durable meta (RangeMeta + disk) | Yes (`range-table.bin`, IT restart) |
-| Restart restores last committed layout | Yes (`test_range_split_survives_restart`) |
-| Range table inside Raft snapshot payload | No (follow-on; joiner after compact uses disk file) |
+| Restart restores last committed layout | Yes (single + all-nodes ITs) |
+| Range table inside Raft snapshot payload | Yes (snapshot v2; sim catch-up) |
+| Stale client `meta_epoch` → RANGE_MOVED | Yes (`MEPO` prefix + IT) |
+| Sim crash / snapshot restore | Yes (`range_meta_replicates_and_survives_crash`) |
 | Auto size-threshold split | No (manual + API first) |
 | Live range migrate / MOVE_RANGE | No (follow-on) |
 | Orphan group reclaim after merge | No (follow-on) |

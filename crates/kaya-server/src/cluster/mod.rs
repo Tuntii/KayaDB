@@ -830,6 +830,8 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         &shared_engine,
         &shared_raft,
         &shared_roster,
+        &shared_range_table,
+        &split_rt,
         config.node_id,
         config.raft_addr,
         config.client_addr,

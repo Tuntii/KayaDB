@@ -3,24 +3,29 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use kaya_raft::{ClusterMember, ConfigChangePhase, GroupId, NodeId};
-
-use crate::membership::{
-    apply_config_change_to_roster, build_raft_snapshot_payload, parse_raft_snapshot_payload,
-    SharedRoster,
+use kaya_raft::{
+    build_snapshot_payload_v2, parse_snapshot_payload_v2, ClusterMember, ConfigChangePhase,
+    GroupId, NodeId, StaticRangeTable,
 };
 
+use crate::membership::{apply_config_change_to_roster, SharedRoster};
+use crate::range_meta::persist_range_table;
+
+use super::client_ops::{ensure_group_hosted, SharedRangeTable, SplitRuntime};
 use super::{SharedEngine, SharedRaftHost};
 
 /// Load persisted Raft snapshot once at startup (before the event loop applies entries).
 ///
 /// Engine + membership snapshots live at the data-dir root (shared across groups).
 /// Group 0's Raft node receives membership restore.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn install_persisted_snapshot_at_startup(
     data_dir: &Path,
     shared_engine: &SharedEngine,
     shared_host: &SharedRaftHost,
     shared_roster: &SharedRoster,
+    range_table: &SharedRangeTable,
+    split_rt: &SplitRuntime,
     node_id: NodeId,
     raft_addr: SocketAddr,
     client_addr: SocketAddr,
@@ -28,8 +33,8 @@ pub(crate) async fn install_persisted_snapshot_at_startup(
     let snap_path = data_dir.join("raft-snapshot.bin");
     if snap_path.exists() {
         if let Ok(raw) = std::fs::read(&snap_path) {
-            match parse_raft_snapshot_payload(&raw) {
-                Ok((eng, mems)) => {
+            match parse_snapshot_payload_v2(&raw) {
+                Ok((eng, mems, ranges)) => {
                     if !eng.is_empty() {
                         if let Err(e) = shared_engine.lock().await.install_snapshot(&eng).await {
                             eprintln!("warning: failed to install persisted engine snapshot: {e}");
@@ -54,6 +59,8 @@ pub(crate) async fn install_persisted_snapshot_at_startup(
                             }
                         }
                     }
+                    restore_range_table_from_snapshot(data_dir, range_table, split_rt, &ranges)
+                        .await;
                 }
                 Err(_) => {
                     // legacy pure engine data
@@ -67,10 +74,13 @@ pub(crate) async fn install_persisted_snapshot_at_startup(
 }
 
 /// Handle any snapshot that was just installed on us (via InstallSnapshot).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_installed_raft_snapshot(
     host: &SharedRaftHost,
     engine: &SharedEngine,
     roster: &SharedRoster,
+    range_table: &SharedRangeTable,
+    split_rt: &SplitRuntime,
     data_dir: &Path,
     self_id: NodeId,
     self_raft: SocketAddr,
@@ -91,8 +101,8 @@ pub(crate) async fn apply_installed_raft_snapshot(
     };
 
     for (_gid, _idx, _term, data) in installed {
-        match parse_raft_snapshot_payload(&data) {
-            Ok((eng, mems)) => {
+        match parse_snapshot_payload_v2(&data) {
+            Ok((eng, mems, ranges)) => {
                 if !eng.is_empty() {
                     if let Err(e) = engine.lock().await.install_snapshot(&eng).await {
                         eprintln!("error installing Raft snapshot into engine: {e}");
@@ -116,6 +126,7 @@ pub(crate) async fn apply_installed_raft_snapshot(
                         }
                     }
                 }
+                restore_range_table_from_snapshot(data_dir, range_table, split_rt, &ranges).await;
             }
             Err(e) => {
                 // Fallback: try as pure engine data (legacy)
@@ -134,6 +145,7 @@ pub(crate) async fn maybe_compact_raft_log(
     host: &SharedRaftHost,
     engine: &SharedEngine,
     roster: &SharedRoster,
+    range_table: &SharedRangeTable,
     data_dir: &Path,
 ) {
     let compaction_targets: Vec<(GroupId, _, _)> = {
@@ -234,7 +246,8 @@ pub(crate) async fn maybe_compact_raft_log(
             .collect()
     };
 
-    let snap_data = build_raft_snapshot_payload(&engine_data, &members_snapshot);
+    let range_bytes = range_table.read().await.encode();
+    let snap_data = build_snapshot_payload_v2(&engine_data, &members_snapshot, &range_bytes);
 
     for (gid, last, term) in compaction_targets {
         if let Some(n) = host.lock().unwrap().get_mut(gid) {
@@ -245,6 +258,45 @@ pub(crate) async fn maybe_compact_raft_log(
     // Persisted snapshot for fast restart (shared engine+membership at root).
     if !snap_data.is_empty() {
         persist_raft_snapshot_atomically(data_dir, &snap_data);
+    }
+}
+
+/// Install a snapshot-embedded range table when it is at least as new as the live one.
+async fn restore_range_table_from_snapshot(
+    data_dir: &Path,
+    range_table: &SharedRangeTable,
+    split_rt: &SplitRuntime,
+    snapshot: &[u8],
+) {
+    if snapshot.is_empty() {
+        return;
+    }
+    let new_table = match StaticRangeTable::decode(snapshot) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("warning: snapshot range table decode failed: {e}");
+            return;
+        }
+    };
+    let group_ids = new_table.group_ids();
+    {
+        let mut guard = range_table.write().await;
+        if new_table.meta_epoch() < guard.meta_epoch() {
+            return;
+        }
+        if let Err(e) = persist_range_table(data_dir, &new_table) {
+            eprintln!("warning: failed to persist range table from snapshot: {e}");
+            return;
+        }
+        guard.restore(new_table);
+    }
+    for gid in group_ids {
+        if let Err(e) = ensure_group_hosted(split_rt, gid) {
+            eprintln!(
+                "warning: failed to host group {} after snapshot range restore: {e}",
+                gid.0
+            );
+        }
     }
 }
 

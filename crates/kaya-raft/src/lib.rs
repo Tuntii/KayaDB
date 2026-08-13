@@ -33,11 +33,22 @@ pub use storage::{
 pub use types::{LogIndex, NodeId, RaftApplyCommand, Term};
 
 /// Build a combined snapshot payload (engine data + membership members).
-/// Used by higher layers (server, sim) so that InstallSnapshot carries
-/// the membership configuration active at the snapshot index.
+///
+/// Writes snapshot **version 2** (engine + members + optional range table).
+/// Pass an empty `range_table` via [`build_snapshot_payload`]; use
+/// [`build_snapshot_payload_v2`] to embed [`StaticRangeTable::encode`].
 pub fn build_snapshot_payload(engine_data: &[u8], members: &[ClusterMember]) -> Vec<u8> {
+    build_snapshot_payload_v2(engine_data, members, &[])
+}
+
+/// Snapshot v2: engine + membership + range-table bytes (`StaticRangeTable::encode`).
+pub fn build_snapshot_payload_v2(
+    engine_data: &[u8],
+    members: &[ClusterMember],
+    range_table: &[u8],
+) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.extend_from_slice(&1u32.to_le_bytes()); // version
+    buf.extend_from_slice(&2u32.to_le_bytes()); // version 2
     buf.extend_from_slice(&(engine_data.len() as u32).to_le_bytes());
     buf.extend_from_slice(engine_data);
     buf.extend_from_slice(&(members.len() as u32).to_le_bytes());
@@ -47,22 +58,33 @@ pub fn build_snapshot_payload(engine_data: &[u8], members: &[ClusterMember]) -> 
         push_len_prefixed(&mut buf, m.client_addr.as_bytes());
         buf.push(if m.is_learner { 1u8 } else { 0u8 });
     }
+    buf.extend_from_slice(&(range_table.len() as u32).to_le_bytes());
+    buf.extend_from_slice(range_table);
     buf
 }
 
 /// Parse combined snapshot payload. Returns (engine_data, members).
 /// Falls back to treating data as pure engine for legacy payloads.
 pub fn parse_snapshot_payload(data: &[u8]) -> Result<(Vec<u8>, Vec<ClusterMember>), String> {
+    let (engine, members, _) = parse_snapshot_payload_v2(data)?;
+    Ok((engine, members))
+}
+
+/// `(engine_data, members, range_table_bytes)` from a combined snapshot.
+pub type CombinedSnapshot = (Vec<u8>, Vec<ClusterMember>, Vec<u8>);
+
+/// Parse snapshot v1 or v2. Third tuple is range-table bytes (empty when absent).
+pub fn parse_snapshot_payload_v2(data: &[u8]) -> Result<CombinedSnapshot, String> {
     if data.is_empty() {
-        return Ok((vec![], vec![]));
+        return Ok((vec![], vec![], vec![]));
     }
     if data.len() < 4 {
-        return Ok((data.to_vec(), vec![]));
+        return Ok((data.to_vec(), vec![], vec![]));
     }
     let ver = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
     let mut cur = &data[4..];
-    if ver != 1 {
-        return Ok((data.to_vec(), vec![]));
+    if ver != 1 && ver != 2 {
+        return Ok((data.to_vec(), vec![], vec![]));
     }
     if cur.len() < 4 {
         return Err("bad engine len".into());
@@ -75,24 +97,34 @@ pub fn parse_snapshot_payload(data: &[u8]) -> Result<(Vec<u8>, Vec<ClusterMember
     let engine = cur[..elen].to_vec();
     cur = &cur[elen..];
     if cur.len() < 4 {
-        return Ok((engine, vec![]));
+        return Ok((engine, vec![], vec![]));
     }
     let mcnt = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]) as usize;
     cur = &cur[4..];
-    // Prefer new format (trailing is_learner u8); fall back to legacy (all voters).
-    let members = if let Ok(m) = decode_snapshot_members(cur, mcnt, true) {
-        m
+    let (members, rest) = if let Ok((m, r)) = decode_snapshot_members(cur, mcnt, true) {
+        (m, r)
     } else {
-        decode_snapshot_members(cur, mcnt, false).unwrap_or_default()
+        decode_snapshot_members(cur, mcnt, false).unwrap_or((vec![], cur))
     };
-    Ok((engine, members))
+    if ver == 1 {
+        return Ok((engine, members, vec![]));
+    }
+    if rest.len() < 4 {
+        return Ok((engine, members, vec![]));
+    }
+    let rlen = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+    let rest = &rest[4..];
+    if rest.len() < rlen {
+        return Err("truncated range table in snapshot".into());
+    }
+    Ok((engine, members, rest[..rlen].to_vec()))
 }
 
 fn decode_snapshot_members(
     data: &[u8],
     mcnt: usize,
     with_learner_flag: bool,
-) -> Result<Vec<ClusterMember>, String> {
+) -> Result<(Vec<ClusterMember>, &[u8]), String> {
     let mut cur = data;
     let mut members = Vec::with_capacity(mcnt);
     for _ in 0..mcnt {
@@ -122,7 +154,7 @@ fn decode_snapshot_members(
             is_learner,
         });
     }
-    Ok(members)
+    Ok((members, cur))
 }
 
 fn push_len_prefixed(buf: &mut Vec<u8>, b: &[u8]) {
@@ -142,4 +174,42 @@ fn take_len_prefixed(cur: &mut &[u8]) -> Result<String, String> {
     let s = String::from_utf8(cur[..l].to_vec()).map_err(|e| e.to_string())?;
     *cur = &cur[l..];
     Ok(s)
+}
+
+#[cfg(test)]
+mod snapshot_payload_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_v2_round_trips_range_table() {
+        let members = vec![ClusterMember::voter(NodeId(1), "r", "c")];
+        let mut table = StaticRangeTable::single_group(GroupId::ZERO);
+        table.split_at(b"m").unwrap();
+        let snap = table.encode();
+        let payload = build_snapshot_payload_v2(b"eng", &members, &snap);
+        let (eng, mems, ranges) = parse_snapshot_payload_v2(&payload).unwrap();
+        assert_eq!(eng, b"eng");
+        assert_eq!(mems, members);
+        let restored = StaticRangeTable::decode(&ranges).unwrap();
+        assert_eq!(restored.meta_epoch(), table.meta_epoch());
+        assert_eq!(restored.ranges().len(), 2);
+        // 2-tuple parser still works.
+        let (eng2, mems2) = parse_snapshot_payload(&payload).unwrap();
+        assert_eq!(eng2, eng);
+        assert_eq!(mems2, mems);
+    }
+
+    #[test]
+    fn snapshot_v1_legacy_has_empty_range_table() {
+        // Hand-build version 1 (no range section).
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(&1u32.to_le_bytes());
+        v1.extend_from_slice(&3u32.to_le_bytes());
+        v1.extend_from_slice(b"eng");
+        v1.extend_from_slice(&0u32.to_le_bytes());
+        let (eng, mems, ranges) = parse_snapshot_payload_v2(&v1).unwrap();
+        assert_eq!(eng, b"eng");
+        assert!(mems.is_empty());
+        assert!(ranges.is_empty());
+    }
 }

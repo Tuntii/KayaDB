@@ -112,7 +112,7 @@ The M16–M25 arc has closed its **documented production path**: operators can r
 | Residual risk | Why it still matters |
 |---|---|
 | No physical key migration / live `MOVE_RANGE` | Split/merge are routing-only; rebalance plan is advisory; load move is operator + follow-on |
-| Range meta table durability | **Shipped (#25):** SPLIT/MERGE commit `RaftCommand::RangeMeta` (group 0) + `{data_dir}/range-table.bin`; restart restores last committed layout. Residual: snapshot payload does not yet embed the table (new joiner after log compact still needs the disk file or a catch-up that still has the entry) |
+| Range meta table durability | **Shipped (#25):** `RangeMeta` on group 0, `{data_dir}/range-table.bin`, snapshot v2 embeds the table, stale client `MEPO` epoch gets `RANGE_MOVED`, all-node restart + sim crash/snapshot tests |
 | Sequential 2PC; this node must lead all participant groups | No parallel prepare/commit stretch; no durable global decision log. **Open-time recovery hardened:** every `Engine::open` aborts `Preparing`/`Prepared` and finishes `Committing`. Cross-group 2PC still requires this node to be leader of every participant group |
 | No HLC uncertainty-interval wait/clamp | Clock skew under multi-node wall clocks is not fully mitigated |
 | Jepsen grand matrix residual | Multi-range bank `bank-mr` is **nightly CI** (split+merge+kill+partition, sum invariant); live MOVE_RANGE rebalance still not product-side, so rebalance chaos is advisory-only |

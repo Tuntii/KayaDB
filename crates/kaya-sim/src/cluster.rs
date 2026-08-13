@@ -5,8 +5,8 @@ use kaya_core::{EngineConfig, Lsn};
 use kaya_engine::{Engine, ScanOptions, WriteOptions};
 use kaya_io::SimDisk;
 use kaya_raft::{
-    ClusterMember, Envelope, LogIndex, NodeId, RaftApplyCommand, RaftCommand, RaftConfig, RaftNode,
-    RaftStatus, Term,
+    ClusterMember, Envelope, GroupId, LogIndex, NodeId, RaftApplyCommand, RaftCommand, RaftConfig,
+    RaftNode, RaftStatus, StaticRangeTable, Term,
 };
 
 use crate::model::RefModel;
@@ -212,6 +212,10 @@ pub struct ClusterSim {
     _disks: HashMap<NodeId, Arc<SimDisk>>,
     /// In-memory Raft index ↔ engine LSN correlation (mirrors server apply index).
     apply_records: HashMap<NodeId, Vec<RaftApplyCommand>>,
+    /// Per-node range meta table (issue #25).
+    range_tables: HashMap<NodeId, StaticRangeTable>,
+    /// Last persisted range-table snapshot per node (process-restart analog).
+    range_disk: HashMap<NodeId, Vec<u8>>,
     runtime: tokio::runtime::Runtime,
     all_ids: Vec<NodeId>,
     network: SimNetwork,
@@ -260,12 +264,19 @@ impl ClusterSim {
             engines.insert(id, engine);
         }
 
+        let range_tables = all_ids
+            .iter()
+            .map(|&id| (id, StaticRangeTable::single_group(GroupId::ZERO)))
+            .collect();
+
         Self {
             nodes,
             state_machines,
             engines,
             _disks: disks,
             apply_records: HashMap::new(),
+            range_tables,
+            range_disk: HashMap::new(),
             runtime,
             all_ids,
             network: SimNetwork::new(seed, net_config),
@@ -414,7 +425,12 @@ impl ClusterSim {
             .copied()
             .collect();
         let members = Self::sim_members(&voters);
-        let combined = kaya_raft::build_snapshot_payload(&engine_data, &members);
+        let range_bytes = self
+            .range_tables
+            .get(&id)
+            .map(|t| t.encode())
+            .unwrap_or_default();
+        let combined = kaya_raft::build_snapshot_payload_v2(&engine_data, &members, &range_bytes);
         node.compact(last, status.current_term, combined);
         Some((last, status.current_term))
     }
@@ -446,7 +462,26 @@ impl ClusterSim {
             .expect("engine open for added node");
         self._disks.insert(id, disk);
         self.engines.insert(id, engine);
+        self.range_tables
+            .insert(id, StaticRangeTable::single_group(GroupId::ZERO));
         self.all_ids.push(id);
+    }
+
+    /// Live range table for `id`.
+    pub fn range_table(&self, id: NodeId) -> Option<&StaticRangeTable> {
+        self.range_tables.get(&id)
+    }
+
+    /// Wipe in-memory range table then restore from last persisted snapshot
+    /// (process-restart analog for #25).
+    pub fn crash_restart_range_meta(&mut self, id: NodeId) {
+        self.range_tables
+            .insert(id, StaticRangeTable::single_group(GroupId::ZERO));
+        if let Some(bytes) = self.range_disk.get(&id).cloned() {
+            if let Ok(t) = StaticRangeTable::decode(&bytes) {
+                self.range_tables.insert(id, t);
+            }
+        }
     }
 
     fn sim_members(voter_ids: &[NodeId]) -> Vec<ClusterMember> {
@@ -614,19 +649,26 @@ impl ClusterSim {
                 if let Some(engine) = self.engines.get_mut(&id) {
                     // Parse combined payload (if present) to restore membership config
                     // on the RaftNode after snapshot (for dynamic membership + snapshot tests).
-                    let engine_data =
-                        if let Ok((eng, mems)) = kaya_raft::parse_snapshot_payload(&data) {
-                            if !mems.is_empty() {
-                                node.restore_config_from_snapshot(mems);
+                    let engine_data = if let Ok((eng, mems, ranges)) =
+                        kaya_raft::parse_snapshot_payload_v2(&data)
+                    {
+                        if !mems.is_empty() {
+                            node.restore_config_from_snapshot(mems);
+                        }
+                        if !ranges.is_empty() {
+                            if let Ok(t) = StaticRangeTable::decode(&ranges) {
+                                self.range_disk.insert(id, t.encode());
+                                self.range_tables.insert(id, t);
                             }
-                            if !eng.is_empty() {
-                                eng
-                            } else {
-                                data
-                            }
+                        }
+                        if !eng.is_empty() {
+                            eng
                         } else {
                             data
-                        };
+                        }
+                    } else {
+                        data
+                    };
                     match self.runtime.block_on(engine.install_snapshot(&engine_data)) {
                         Ok(()) => {
                             let model = self.runtime.block_on(sync_ref_model_from_engine(engine));
@@ -647,6 +689,30 @@ impl ClusterSim {
 
             let applied = node.drain_applied();
             for (idx, term, command) in applied {
+                if let Ok(RaftCommand::RangeMeta {
+                    base_epoch,
+                    snapshot,
+                }) = RaftCommand::decode(&command)
+                {
+                    if let Ok(new_table) = StaticRangeTable::decode(&snapshot) {
+                        let current = self
+                            .range_tables
+                            .get(&id)
+                            .map(|t| t.meta_epoch())
+                            .unwrap_or(0);
+                        if current == base_epoch {
+                            self.range_disk.insert(id, new_table.encode());
+                            self.range_tables.insert(id, new_table);
+                        } else if self
+                            .range_tables
+                            .get(&id)
+                            .map(|t| t.encode() == snapshot)
+                            .unwrap_or(false)
+                        {
+                            // idempotent re-apply
+                        }
+                    }
+                }
                 if let Some(sm) = self.state_machines.get_mut(&id) {
                     if let Err(e) = sm.apply_log_entry(&command) {
                         let msg = format!("RAFT-INV-003: node {} corrupt log entry: {e}", id.0);
@@ -1333,6 +1399,76 @@ mod tests {
                 .cloned();
             assert_eq!(val.as_deref(), Some(b"ok".as_ref()));
         }
+        assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+    }
+
+    fn propose_split_at(sim: &mut ClusterSim, split_key: &[u8]) -> StaticRangeTable {
+        let leader = sim.current_leader().expect("leader");
+        let mut table = sim
+            .range_table(leader)
+            .cloned()
+            .unwrap_or_else(|| StaticRangeTable::single_group(GroupId::ZERO));
+        let base = table.meta_epoch();
+        table.split_at(split_key).expect("split");
+        let cmd = RaftCommand::RangeMeta {
+            base_epoch: base,
+            snapshot: table.encode(),
+        };
+        assert!(sim.propose(cmd.encode()).is_some());
+        table
+    }
+
+    /// #25: RangeMeta replicates to every voter; crash-restart restores from disk.
+    #[test]
+    fn range_meta_replicates_and_survives_crash() {
+        let mut sim = ClusterSim::new(3, 25, no_fault_config());
+        sim.run_ticks(60);
+        assert!(sim.current_leader().is_some());
+
+        let expected = propose_split_at(&mut sim, b"m");
+        sim.run_ticks(40);
+
+        for id in (1u64..=3).map(NodeId) {
+            let t = sim.range_table(id).expect("table");
+            assert_eq!(t.ranges().len(), 2, "node {}", id.0);
+            assert_eq!(t.meta_epoch(), expected.meta_epoch());
+            assert_eq!(t.lookup(b"a"), Some(GroupId::ZERO));
+            assert_eq!(t.lookup(b"m"), Some(GroupId(1)));
+        }
+
+        sim.crash_restart_range_meta(NodeId(2));
+        let t = sim.range_table(NodeId(2)).unwrap();
+        assert_eq!(t.ranges().len(), 2);
+        assert_eq!(t.meta_epoch(), expected.meta_epoch());
+        assert_eq!(t.lookup(b"z"), Some(GroupId(1)));
+    }
+
+    /// #25: snapshot payload carries the range table to a lagging follower.
+    #[test]
+    fn range_meta_snapshot_catches_up_follower() {
+        let mut sim = ClusterSim::new(3, 26, no_fault_config());
+        sim.run_ticks(60);
+        let leader = sim.current_leader().expect("leader");
+        let follower = (1u64..=3).map(NodeId).find(|&id| id != leader).unwrap();
+        let peers: Vec<NodeId> = (1u64..=3)
+            .map(NodeId)
+            .filter(|&id| id != follower)
+            .collect();
+        sim.network_mut().isolate(follower, &peers);
+
+        sim.propose_put(b"pre", b"v").unwrap();
+        sim.run_ticks(8);
+        let expected = propose_split_at(&mut sim, b"m");
+        sim.run_ticks(20);
+        assert!(sim.take_snapshot(leader).is_some());
+
+        sim.network_mut().reconnect(follower, &peers);
+        sim.run_ticks(80);
+
+        let t = sim.range_table(follower).expect("follower table");
+        assert_eq!(t.ranges().len(), 2);
+        assert_eq!(t.meta_epoch(), expected.meta_epoch());
+        assert_eq!(t.lookup(b"m"), Some(GroupId(1)));
         assert!(sim.violations().is_empty(), "{:?}", sim.violations());
     }
 }

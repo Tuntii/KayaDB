@@ -33,6 +33,8 @@ pub(crate) async fn drain_and_apply(
         host,
         engine,
         roster,
+        range_table,
+        split_rt,
         data_dir,
         self_id,
         self_raft,
@@ -141,7 +143,7 @@ pub(crate) async fn drain_and_apply(
         }
     }
 
-    maybe_compact_raft_log(host, engine, roster, data_dir).await;
+    maybe_compact_raft_log(host, engine, roster, range_table, data_dir).await;
 }
 
 /// Apply a committed RangeMeta snapshot with optimistic concurrency on meta_epoch.

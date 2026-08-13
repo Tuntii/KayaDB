@@ -94,6 +94,10 @@ pub const ADMIN_AUTH_PREFIX: &[u8] = b"ADMIN\x00";
 /// Format when present: CLIENT\x00 | token_len(u16 LE) | token_bytes | inner (unchanged)
 pub const CLIENT_AUTH_PREFIX: &[u8] = b"CLIENT\x00";
 
+/// Optional client range-cache epoch on PUT/GET/DELETE/SCAN.
+/// Format: MEPO | epoch(u64 LE) | inner
+pub const META_EPOCH_PREFIX: &[u8] = b"MEPO";
+
 /// Max snapshot payload bytes on the wire (frame budget minus headers).
 pub const MAX_SNAPSHOT_DATA_LEN: u32 = DEFAULT_MAX_FRAME_LEN.saturating_sub(64);
 
@@ -602,6 +606,27 @@ pub fn decode_client_auth_payload(data: &[u8]) -> Result<(Vec<u8>, Option<String
     Ok((cur.to_vec(), token))
 }
 
+/// Prefix a data-path payload with the client's cached `meta_epoch`.
+pub fn encode_meta_epoch_payload(inner: &[u8], meta_epoch: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(META_EPOCH_PREFIX.len() + 8 + inner.len());
+    out.extend_from_slice(META_EPOCH_PREFIX);
+    out.extend_from_slice(&meta_epoch.to_le_bytes());
+    out.extend_from_slice(inner);
+    out
+}
+
+/// Peel an optional `MEPO` prefix. Returns `(inner, Some(epoch))` when present.
+pub fn decode_meta_epoch_payload(data: &[u8]) -> Result<(Vec<u8>, Option<u64>), String> {
+    if data.len() >= META_EPOCH_PREFIX.len() + 8 && data.starts_with(META_EPOCH_PREFIX) {
+        let epoch = u64::from_le_bytes([
+            data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
+        ]);
+        Ok((data[12..].to_vec(), Some(epoch)))
+    } else {
+        Ok((data.to_vec(), None))
+    }
+}
+
 /// Encode a SCAN request payload: `prefix_len(u32) | prefix`.
 pub fn encode_scan_payload(prefix: &[u8]) -> Vec<u8> {
     encode_key_payload(prefix)
@@ -995,6 +1020,18 @@ pub fn decode_error_payload(data: &[u8]) -> Result<String, String> {
 mod tests {
     use super::*;
     use kaya_raft::{AppendRequest, LogEntry};
+
+    #[test]
+    fn meta_epoch_prefix_round_trip() {
+        let inner = encode_put_payload(b"k", b"v");
+        let framed = encode_meta_epoch_payload(&inner, 7);
+        let (got, epoch) = decode_meta_epoch_payload(&framed).unwrap();
+        assert_eq!(epoch, Some(7));
+        assert_eq!(got, inner);
+        let (plain, none) = decode_meta_epoch_payload(&inner).unwrap();
+        assert_eq!(none, None);
+        assert_eq!(plain, inner);
+    }
 
     #[test]
     fn round_trip_group_id_nonzero() {
