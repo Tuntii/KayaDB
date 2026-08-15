@@ -274,6 +274,86 @@ Use `kayactl inspect ...` and `kayactl recover --dry-run` to understand a data d
 
 ---
 
+
+## Inspecting WAL and SSTable JSON (local demo)
+
+After the local write path above has created files under your data directory,
+`kayactl inspect … --json` is the fastest way to confirm on-disk shape without
+reading `spec/`.
+
+Create a tiny dataset, force a flush, then inspect:
+
+```bash
+DATA=/tmp/kayadb-inspect-demo
+rm -rf "$DATA"
+kayactl --data "$DATA" put hello world
+kayactl --data "$DATA" put foo bar
+kayactl --data "$DATA" flush
+```
+
+### WAL segment
+
+```bash
+kayactl inspect wal "$DATA"/wal-000001.wal --json
+```
+
+Expected top-level fields (names are stable; values vary):
+
+```json
+{
+  "segment": "/tmp/kayadb-inspect-demo/wal-000001.wal",
+  "records": [
+    {
+      "offset": 0,
+      "lsn": 1,
+      "sequence": 1,
+      "type": "PUT",
+      "key_len": 5,
+      "value_len": 5
+    }
+  ],
+  "warnings": []
+}
+```
+
+Useful checks: `records[].type` is `PUT`/`DEL`, `warnings` stays empty on a
+clean segment, and `offset` increases monotonically.
+
+### SSTable
+
+```bash
+kayactl inspect sstable "$DATA"/sst-000001.sst --json
+```
+
+Expected top-level fields:
+
+```json
+{
+  "path": "/tmp/kayadb-inspect-demo/sst-000001.sst",
+  "version": 4,
+  "mvcc": true,
+  "entry_count": 2,
+  "min_seq": 1,
+  "max_seq": 2,
+  "entries": [
+    {
+      "seq": 1,
+      "commit_ts": 1,
+      "op": "PUT",
+      "user_key": "foo",
+      "value_len": 3
+    }
+  ],
+  "warnings": []
+}
+```
+
+On multi-version tables (`mvcc: true`) prefer `user_key` + `commit_ts`; on older
+single-version tables the same command still works and `mvcc` is `false`.
+
+Filenames (`wal-000001.wal`, `sst-000001.sst`) can differ if other segments
+already exist — list the data directory and pass the real path.
+
 ## Cleanup
 
 For local experiments, stop all running `kayadb-server` processes and remove the data directories you created:
