@@ -38,7 +38,7 @@ Sources live in `docs/` (Docsify on GitHub Pages; `SUMMARY.md` kept for GitBook 
 **Quick links in this README:**
 - [Install](#install)
 - [Why KayaDB exists](#why-kayadb-exists)
-- [Quick start](#quick-start)
+- [Quick start](#quick-start) — 60-second `kayactl` path, then from-source cluster
 - [Feature snapshot](#feature-snapshot)
 - [Releases](docs/releases.md) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md)
 
@@ -68,6 +68,8 @@ cargo install kayactl
 cargo install kaya-server --bin kayadb-server
 ```
 
+After `cargo install kayactl`, you can `put` / `get` / `inspect` without cloning — [try it in 60 seconds](#try-it-in-60-seconds).
+
 Pre-built binaries: [GitHub Releases](https://github.com/Tuntii/KayaDB/releases) (`v0.1.113` and later).  
 Rust library: `kaya-engine = "0.1.113"` — see [installation guide](docs/installation.md).
 
@@ -96,13 +98,31 @@ Rust library: `kaya-engine = "0.1.113"` — see [installation guide](docs/instal
 
 ## Quick start
 
-### Requirements
+### Try it in 60 seconds
+
+No clone required. `kayactl` opens an embedded engine against a data directory:
+
+```bash
+cargo install kayactl
+
+kayactl --data ./demo put hello world
+kayactl --data ./demo get hello
+kayactl --data ./demo inspect wal ./demo/wal-000001.wal
+```
+
+That is the whole loop: write, read, inspect the WAL. Need the server binary too? `cargo install kaya-server --bin kayadb-server`. Other install options (release binaries, TLS) live in the [installation guide](docs/installation.md).
+
+### From source: workspace and cluster
+
+Clone the repo when you want to run the test suite, start a local cluster, or hack on the engine.
+
+#### Requirements
 
 - Rust 1.85 or newer
 - Cargo
 - Linux, macOS, or Windows for development
 
-### Build and test
+#### Build and test
 
 ```bash
 git clone https://github.com/Tuntii/KayaDB.git
@@ -120,9 +140,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-### Use KayaDB locally without a server
+#### Use KayaDB locally without a server
 
-`kayactl` can open an embedded engine directly against a data directory:
+From the workspace, `kayactl` can open an embedded engine directly against a data directory:
 
 ```bash
 cargo run -p kayactl -- --data ./.kayadb-demo put hello world
@@ -132,7 +152,7 @@ cargo run -p kayactl -- --data ./.kayadb-demo stats
 cargo run -p kayactl -- --data ./.kayadb-demo recover --dry-run
 ```
 
-### Run a single-node server
+#### Run a single-node server
 
 In one terminal:
 
@@ -148,7 +168,7 @@ cargo run -p kayactl -- --server 127.0.0.1:7379 get hello
 cargo run -p kayactl -- --server 127.0.0.1:7379 status
 ```
 
-### Run a three-node local cluster
+#### Run a three-node local cluster
 
 Start one command per terminal:
 
