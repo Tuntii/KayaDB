@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **crates.io publish order:** publish `kaya-ebpf` (and `kaya-server`) before `kayactl` so optional/path deps resolve on the registry
 
 ### Changed
+- **README Quick start (#44):** lead with crates.io `kayactl` 60-second put/get/inspect; keep the from-source workspace/cluster walkthrough as step 2
 - **Release hygiene:** align `workspace.dependencies` path crate versions with `workspace.package` (`0.1.113`); refresh README/docs install pins and release pages to the current line
 
 ---
