@@ -295,7 +295,6 @@ fn put_with_lying_key_length_is_malformed() {
     }
 }
 
-
 #[test]
 fn put_with_lying_value_length_is_malformed() {
     // Invariant: key_len+value_len must not exceed the payload body after the
