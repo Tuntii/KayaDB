@@ -31,7 +31,7 @@ impl TapBackend {
     }
 
     pub fn drain_events(&mut self) -> Vec<ProbeEvent> {
-        self.pending.drain(..).collect()
+        Vec::from(std::mem::take(&mut self.pending))
     }
 
     pub fn new() -> Self {

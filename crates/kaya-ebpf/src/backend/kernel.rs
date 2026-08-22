@@ -161,7 +161,7 @@ impl KernelBackend {
         }
         let decoded = decode_ringbuf_items(&raws, &mut self.next_seq);
         self.pending.extend(decoded);
-        self.pending.drain(..).collect()
+        std::mem::take(&mut self.pending)
     }
 }
 

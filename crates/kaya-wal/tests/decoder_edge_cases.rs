@@ -296,6 +296,24 @@ fn put_with_lying_key_length_is_malformed() {
 }
 
 #[test]
+fn put_with_lying_value_length_is_malformed() {
+    // Invariant: key_len+value_len must not exceed the payload body after the
+    // two length prefixes. A self-consistent CRC must not let a lying value_len
+    // through as a Complete Put.
+    let mut encoded = encoded_put();
+    // Put payload wire: [key_len u32][value_len u32][key][value]
+    encoded[WAL_HEADER_LEN + 4..WAL_HEADER_LEN + 8].copy_from_slice(&10_000_u32.to_le_bytes());
+    rewrite_payload_crc(&mut encoded);
+    rewrite_header_crc(&mut encoded);
+    match decode_record(&encoded, 0, MAX_PAYLOAD) {
+        DecodeRecordResult::Invalid {
+            warning: WalWarning::MalformedPayload { offset, .. },
+        } => assert_eq!(offset, 0),
+        other => panic!("unexpected decode result: {other:?}"),
+    }
+}
+
+#[test]
 fn decoder_is_stateless_across_a_corrupt_record() {
     // decode_record is per-record: an Invalid result at one offset must not
     // affect decoding a well-formed record that follows it in the buffer.
