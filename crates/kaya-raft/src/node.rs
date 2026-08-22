@@ -839,7 +839,7 @@ impl RaftNode {
     ///
     /// The caller is responsible for executing each command against the state machine.
     pub fn drain_applied(&mut self) -> Vec<(LogIndex, Term, Vec<u8>)> {
-        self.applied_entries.drain(..).collect()
+        std::mem::take(&mut self.applied_entries)
     }
 
     /// If a snapshot was installed on this node (via InstallSnapshot RPC or direct compact),

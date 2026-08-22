@@ -123,7 +123,7 @@ impl KernelSimulatedBackend {
         if !self.attached {
             return Vec::new();
         }
-        self.pending.drain(..).collect()
+        Vec::from(std::mem::take(&mut self.pending))
     }
 }
 
