@@ -117,6 +117,7 @@ impl RefModel {
             RaftCommand::TxnPrepare { .. }
             | RaftCommand::TxnCommit2pc { .. }
             | RaftCommand::TxnAbort2pc { .. }
+            | RaftCommand::TxnDecision { .. }
             | RaftCommand::RangeMeta { .. } => Ok(()),
         }
     }

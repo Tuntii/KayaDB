@@ -367,6 +367,15 @@ async fn apply_command(
             .await
             .map(|_| None)
             .map_err(|e| e.to_string()),
+        // Global 2PC decision log (meta group); recovery resolves local
+        // Preparing/Prepared records against it.
+        Ok(RaftCommand::TxnDecision { txn_id, commit }) => engine
+            .lock()
+            .await
+            .apply_txn_decision(txn_id, commit)
+            .await
+            .map(|_| None)
+            .map_err(|e| e.to_string()),
         Err(e) => Err(format!("corrupt command in log: {e}")),
     }
 }

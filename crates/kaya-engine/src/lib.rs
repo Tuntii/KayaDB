@@ -31,9 +31,10 @@ pub use snapshot::SnapshotView;
 pub use stats::{CompactionResult, EngineStats, FlushResult, WriteResult};
 pub use txn::{Intent, TxnId};
 pub use txn2pc::{
-    decode_intent_value, encode_intent_key, encode_intent_scan_prefix, encode_intent_value,
-    encode_rec_key, is_txn_system_key, parse_rec_txn_id, user_key_from_intent_key,
-    Txn2pcRecoveryStats, Txn2pcState, TXN_INTENT_PREFIX, TXN_REC_PREFIX, TXN_SYS_PREFIX,
+    decode_intent_value, encode_dec_key, encode_intent_key, encode_intent_scan_prefix,
+    encode_intent_value, encode_rec_key, is_txn_system_key, parse_rec_txn_id,
+    user_key_from_intent_key, Txn2pcRecoveryStats, Txn2pcState, TXN_DEC_PREFIX, TXN_INTENT_PREFIX,
+    TXN_REC_PREFIX, TXN_SYS_PREFIX,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -101,6 +102,10 @@ pub struct RecoveryReport {
     pub txn2pc_aborted: u32,
     /// 2PC `Committing` records finished to `Committed` during open.
     pub txn2pc_finished_commits: u32,
+    /// `Prepared` records left in doubt: acked prepares with no locally durable
+    /// decision. Never aborted by the participant (see `transactions-spec.md`
+    /// §17.4); the recovering coordinator resolves them.
+    pub txn2pc_pending: u32,
 }
 
 #[derive(Debug)]
@@ -276,6 +281,7 @@ impl<D: Disk> Engine<D> {
             records_replayed: wal_records_replayed,
             txn2pc_aborted: 0,
             txn2pc_finished_commits: 0,
+            txn2pc_pending: 0,
         };
 
         let mut engine = Self {
@@ -307,6 +313,7 @@ impl<D: Disk> Engine<D> {
         let txn2pc = engine.recover_incomplete_2pc().await?;
         engine.last_recovery.txn2pc_aborted = txn2pc.aborted;
         engine.last_recovery.txn2pc_finished_commits = txn2pc.finished_commits;
+        engine.last_recovery.txn2pc_pending = txn2pc.undecided_prepared.len() as u32;
         Ok(engine)
     }
 

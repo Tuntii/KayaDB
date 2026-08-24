@@ -273,6 +273,7 @@ are read from the range table under one lock (`referenced_group_ids()` in
 | 17 | `MERGE_RANGE` | Request: left_start; response: one merged descriptor |
 | 20 | `REBALANCE_PLAN` | **Advisory only.** Range-count heuristic; suggests moves for opcode 21 |
 | 21 | `MOVE_RANGE` | Live migrate: reassign a range to a target group (admin; operator token) |
+| 22 | `TXN_FORWARD` | Internal. Cross-group 2PC coordinator → participant group leader; see `transactions-spec.md` §17.4 |
 
 **Status `RANGE_MOVED` (11):** body is a list-ranges payload (count≥1) for the
 key’s current owner. Clients refresh cache and retry.

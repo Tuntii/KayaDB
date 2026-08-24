@@ -77,6 +77,36 @@ pub const REBALANCE_PLAN_OPCODE: u8 = 20;
 /// Body: `start_len(u32 LE) | start_key | target_group(u64 LE)`. Requires operator
 /// token when configured. Response uses the LIST_RANGES layout with `count=1`.
 pub const MOVE_RANGE_OPCODE: u8 = 21;
+/// TXN_FORWARD — internal node-to-node 2PC forwarding (#26).
+///
+/// Opcode 21 is `MOVE_RANGE` (#24); this is 22.
+///
+/// Sent by a cross-group transaction coordinator to the **leader of a
+/// participant Raft group** when that leader is a different node. Body:
+/// `group_id(u64 LE) | raft_command_bytes`. The receiver proposes the command on
+/// that group and replies once it is committed and applied.
+///
+/// Treated as an admin opcode: when an operator token is configured it must be
+/// presented via the `ADMIN` framing, since the body is a raw replicated command.
+pub const TXN_FORWARD_OPCODE: u8 = 22;
+
+/// Encode a TXN_FORWARD body: `group_id(u64 LE) | raft_command_bytes`.
+pub fn encode_txn_forward_payload(group_id: u64, command: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + command.len());
+    out.extend_from_slice(&group_id.to_le_bytes());
+    out.extend_from_slice(command);
+    out
+}
+
+/// Decode a TXN_FORWARD body written by [`encode_txn_forward_payload`].
+pub fn decode_txn_forward_payload(payload: &[u8]) -> Result<(u64, Vec<u8>), String> {
+    if payload.len() < 9 {
+        return Err("TXN_FORWARD payload must carry a group id and a command".to_owned());
+    }
+    let mut gid = [0u8; 8];
+    gid.copy_from_slice(&payload[..8]);
+    Ok((u64::from_le_bytes(gid), payload[8..].to_vec()))
+}
 
 /// CDC event op: put.
 pub const CDC_EVENT_PUT: u8 = 1;

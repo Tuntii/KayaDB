@@ -314,8 +314,15 @@ writable via public put/delete):
 |---|---|
 | `\x00txn/rec/{txn_id_be8}` | 1-byte state: `1=Preparing`, `2=Prepared`, `3=Committed`, `4=Aborted`, `5=Committing` |
 | `\x00txn/intent/{txn_id_be8}/{user_key}` | Intent payload: `0` = delete tombstone; `1 \|\| value` = put |
+| `\x00txn/dec/{txn_id_be8}` | **Global decision log** (§17.4): 1 byte, `1` = commit, `0` = abort |
 
 `txn_id` in keys is encoded as **8-byte big-endian** for ordered scans.
+
+The `rec` and `intent` keys are *participant* state, written by the group that
+owns the key range. The `dec` key is the *coordinator's* decision, replicated on
+the **meta group (group 0)**. A missing `dec` key means "not decided *here*
+yet" — which is not the same as "aborted", because this node's group-0 log may
+simply be behind (see §17.4).
 
 ### 17.2 RaftCommand variants
 
@@ -324,9 +331,14 @@ writable via public put/delete):
 | 5 | `TxnPrepare { txn_id, coordinator_group, mutations }` | Persist intents + mark `Prepared` |
 | 6 | `TxnCommit2pc { txn_id }` | Mark `Committing`, materialize intents via `apply_mutations`, clear intents, mark `Committed` |
 | 7 | `TxnAbort2pc { txn_id }` | Delete intents only, mark `Aborted` (rejects `Committing`/`Committed`) |
+| 9 | `TxnDecision { txn_id, commit }` | Write the global decision record (meta group only) |
 
 Types 1–4 retain their existing wire layouts (Put / Delete / ConfigChange /
-single-group `TxnCommit`).
+single-group `TxnCommit`); type 8 is `RangeMeta`.
+
+`TxnDecision` is `9 \| txn_id(u64 LE) \| commit(u8)`. Apply is idempotent, and a
+second decision that *contradicts* a durable one is rejected: a 2PC decision is
+final.
 
 ### 17.3 Engine apply API
 
@@ -339,6 +351,8 @@ impl Engine {
     ) -> Result<()>;
     pub async fn apply_txn_commit_2pc(&mut self, txn_id: u64) -> Result<()>;
     pub async fn apply_txn_abort_2pc(&mut self, txn_id: u64) -> Result<()>;
+    pub async fn apply_txn_decision(&mut self, txn_id: u64, commit: bool) -> Result<()>;
+    pub fn read_txn_decision(&mut self, txn_id: u64) -> Result<Option<bool>>;
 }
 ```
 
@@ -349,28 +363,126 @@ impl Engine {
   `Committed`; resumes from `Committing` if interrupted; rejects if `Aborted`.
 - **Abort:** delete intent keys, set record `Aborted`. Does not touch user keys.
   Idempotent if already `Aborted`; rejects if `Committed` or `Committing`.
+- **Decision:** write `\x00txn/dec/{txn_id}`. Idempotent; rejects a flip.
 
 Prepared intents are **not** visible to ordinary user `get`/`scan` (they live
 only under `\x00txn/intent/…`).
 
-### 17.4 Coordinator algorithm (server)
+### 17.4 Coordinator role, decision log, and recovery
 
-1. Partition mutations by range → group.
-2. `coordinator_group` = group of the lexicographically smallest key.
-3. Propose `TxnPrepare` on each participant group (sequential propose; wait applied).
-4. If all prepared: propose `TxnCommit2pc` on all; else `TxnAbort2pc` on
-   prepared participants.
-5. Crash recovery on every `Engine::open` (and again at server startup for logging;
-   second pass is idempotent):
-   - `Preparing` / `Prepared` → abort (fail-closed; no durable commit decision)
-   - `Committing` → finish commit (never abort)
-   - `Committed` / `Aborted` → leave untouched
-   - Counts exposed on `RecoveryReport.txn2pc_aborted` / `txn2pc_finished_commits`
+#### Coordinator
 
-**Operational note:** cross-group 2PC requires this node to be leader of **all**
-participant groups for the sequential propose path (shared-engine single-node
-and co-leader multi-group deployments). Not expanded to multi-node meta
-replication or TimeoutNow in this path.
+The **coordinator** for a cross-group transaction is the node that holds the
+transaction's staged intents, i.e. the leader of the **meta group (group 0)** —
+`TXN_BEGIN` / `TXN_OP` / `TXN_COMMIT` are all served there. Participants are the
+Raft groups owning the ranges the staged mutations map to.
+
+`coordinator_group` (recorded in each `TxnPrepare`) is the group of the
+lexicographically smallest key. It is a recovery/diagnostic hint only; it does
+not elect the coordinator.
+
+#### Algorithm
+
+1. Partition mutations by range → group; deterministic participant order by
+   group id.
+2. **Prepare — parallel.** `TxnPrepare` is fanned out to every participant at
+   once, under a per-phase timeout (`DEFAULT_PHASE_TIMEOUT`, 5s). A timeout is a
+   failure.
+3. **Decide.** All prepared → propose `TxnDecision { commit: true }` on group 0
+   and wait for it to be committed *and applied*. This is the transaction's
+   commit point.
+4. **Commit — parallel.** `TxnCommit2pc` is fanned out to every participant.
+5. **Abort path.** Prepare or the decision failed → propose
+   `TxnDecision { commit: false }` (so a restarted participant resolves without
+   guessing), then fan `TxnAbort2pc` out to every group that reached `Prepared`.
+
+Nothing user-visible changes before step 3, and step 4 never starts before step
+3 finishes — that is the ordering the recovery rules below rely on.
+
+#### Multi-leader participants (forwarding)
+
+The coordinator does **not** have to lead the participant groups. When it is not
+the leader of a participant group, it forwards the 2PC command to that group's
+leader over the existing client RPC:
+
+| Opcode | Body | Reply |
+|---:|---|---|
+| 22 `TXN_FORWARD` | `group_id(u64 LE) \| raft_command_bytes` | `STATUS_OK` once committed **and applied** on that group; `STATUS_NOT_LEADER` otherwise |
+
+The leader is taken from the local Raft status of that group
+(`status_of(group).leader_id`) and mapped to a client address through the node
+roster. `TXN_FORWARD` carries a raw replicated command, so it is treated as an
+**admin** opcode: it requires the operator token when one is configured, and is
+refused outright when a client token or prefix ACL is configured without an
+operator token (it would otherwise bypass the data-path ACL).
+
+*Limitations.* Forwarding uses the plaintext client RPC, so on a TLS-enabled
+cluster the forward fails and the transaction aborts — no worse than the pre-#26
+`NOT_LEADER`, but TLS-aware forwarding is a follow-on. Leader lookup is a single
+attempt: a stale leader answers `NOT_LEADER`, the transaction aborts, and the
+client retries.
+
+#### Recovery
+
+On every `Engine::open` (and again at server startup for logging; the second
+pass is idempotent) each incomplete participant record is resolved against the
+decision log:
+
+| Local record | Decision log | Action |
+|---|---|---|
+| any in-flight state | `commit` | Finish commit (`txn2pc_finished_commits`) |
+| any in-flight state | `abort` | Abort, drop intents (`txn2pc_aborted`) |
+| `Preparing` | **absent** | Abort, drop intents (`txn2pc_aborted`) |
+| `Prepared` | **absent** | **Leave in doubt** — intents held (`txn2pc_pending`) |
+| `Committing` | any | Finish commit — never abort |
+| `Committed` / `Aborted` | any | Leave untouched |
+
+The `Preparing` / `Prepared` split is the safety rule (**TXN-2PC-8**):
+
+- `Preparing` means the prepare was never acked to the coordinator, so the
+  coordinator cannot have counted this participant and cannot have decided
+  commit. Aborting locally is safe.
+- `Prepared` means the prepare **was** acked. The coordinator may have decided
+  commit and other participants may already have committed, while *this* node's
+  group-0 log lagged. Aborting it here would produce a partial user-visible
+  commit, so a participant must never do it. The record stays `Prepared` with
+  its intents held — invisible to readers either way — until a decision arrives.
+
+**Resolving an in-doubt record.** Applying a `TxnDecision` drives any local
+`Preparing` / `Prepared` record for that `txn_id` to the decided outcome, so a
+lagging participant is unblocked the moment its group-0 log catches up. The
+participant group's own log also still carries `TxnCommit2pc`, which resolves it
+independently.
+
+**Liveness — coordinator recovery.** Because participants no longer self-abort,
+the coordinator has to close out orphans. When a node **gains** meta-group
+leadership (including its first election after a restart) it scans for `Prepared`
+records with no decision and proposes `TxnDecision { commit: false }` for each.
+At that instant any earlier coordinator has lost its term, so an undecided
+transaction is orphaned and can only abort. This is safe even against a commit
+decision still in flight: decisions are ordered by the group-0 log, that entry
+precedes the sweep's, and a durable decision is never flipped — the commit wins
+and the abort is discarded.
+
+**Coordinator death.** The decision record survives the coordinator, because it
+lives in group 0's Raft log rather than in coordinator memory:
+
+- died *before* the decision → participants hold `Prepared`; the next meta-group
+  leader records an abort decision and every participant releases. No partial
+  commit.
+- died *after* the decision, before/while committing → participants that already
+  committed stay committed; the rest read `commit` from the decision log and
+  finish. No partial commit.
+
+*Residuals:* a transaction stays in doubt (intents held, but never user-visible)
+from the coordinator's death until a new meta-group leader is elected. The sweep
+runs on leadership gain, so a transaction that reaches `Prepared` in the
+microseconds between that election and the scan can be aborted spuriously — a
+client-visible failed commit, not a correctness problem. Recovery is node-local
+(it writes to the engine, not through Raft), so replicas can differ transiently
+until the group log delivers the same outcome — unchanged from the `Committing`
+recovery already shipped. Decision records are never garbage-collected (same as
+`rec` keys).
 
 ### 17.5 Invariants (2PC)
 
@@ -381,13 +493,17 @@ replication or TimeoutNow in this path.
 | TXN-2PC-3 | After `Aborted`, no user-key mutation from that txn remains |
 | TXN-2PC-4 | Types 1–4 decode/encode unchanged after adding types 5–7 |
 | TXN-2PC-5 | `Committing` always finishes to `Committed` on recovery; never aborted |
+| TXN-2PC-6 | The global decision record is durable **before** any participant is asked to commit |
+| TXN-2PC-7 | A durable decision is final: it is never flipped, and recovery follows it |
+| TXN-2PC-8 | A participant never aborts a `Prepared` record on its own; only the decision log (or an un-acked `Preparing`) may release it |
 
 ### 17.6 Client transparency
 
 The client `TXN_BEGIN` / `TXN_OP` / `TXN_COMMIT` / `TXN_ROLLBACK` opcodes are
 unchanged. When staged mutations map to more than one Raft group, the server
 coordinator runs 2PC; single-group commits still use type-4 `TxnCommit`. No
-client API or wire break for cross-range transactions.
+client API or wire break for cross-range transactions. `TXN_FORWARD` (22) is an
+internal node-to-node opcode; clients never send it.
 
 ### 17.7 HLC commit timestamps and uncertainty (#27)
 

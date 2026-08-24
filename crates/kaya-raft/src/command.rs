@@ -5,7 +5,7 @@
 //! ```text
 //! type      : u8       (1 = Put, 2 = Delete, 3 = ConfigChange, 4 = TxnCommit,
 //!                       5 = TxnPrepare, 6 = TxnCommit2pc, 7 = TxnAbort2pc,
-//!                       8 = RangeMeta)
+//!                       8 = RangeMeta, 9 = TxnDecision)
 //! key_len   : u32 LE
 //! key       : bytes
 //! [Put only]
@@ -28,6 +28,9 @@
 //! base_epoch : u64 LE   // CAS: must equal current table meta_epoch on apply
 //! snap_len   : u32 LE
 //! snapshot   : bytes    // StaticRangeTable::encode
+//! [TxnDecision]
+//! txn_id    : u64 LE
+//! commit    : u8       (1 = commit, 0 = abort)
 //! ```
 
 /// Phase of a membership configuration change (joint consensus).
@@ -150,6 +153,17 @@ pub enum RaftCommand {
         /// Encoded [`crate::StaticRangeTable`] after the split/merge.
         snapshot: Vec<u8>,
     },
+    /// Global 2PC decision record (type byte 9).
+    ///
+    /// Committed on the **meta group** (group 0) by the coordinator *before* any
+    /// participant is told to commit. Apply writes `\x00txn/dec/{txn_id_be8}`,
+    /// which crash recovery consults to resolve local `Preparing` / `Prepared`
+    /// records (see `transactions-spec.md` §17.4).
+    TxnDecision {
+        txn_id: u64,
+        /// `true` = commit, `false` = abort.
+        commit: bool,
+    },
 }
 
 impl RaftCommand {
@@ -212,6 +226,11 @@ impl RaftCommand {
                 out.extend_from_slice(&base_epoch.to_le_bytes());
                 out.extend_from_slice(&(snapshot.len() as u32).to_le_bytes());
                 out.extend_from_slice(snapshot);
+            }
+            RaftCommand::TxnDecision { txn_id, commit } => {
+                out.push(9u8);
+                out.extend_from_slice(&txn_id.to_le_bytes());
+                out.push(u8::from(*commit));
             }
         }
         out
@@ -291,6 +310,11 @@ impl RaftCommand {
                     base_epoch,
                     snapshot,
                 })
+            }
+            9 => {
+                let txn_id = next_u64(&mut cur)?;
+                let commit = next_u8(&mut cur)? != 0;
+                Ok(RaftCommand::TxnDecision { txn_id, commit })
             }
             t => Err(format!("unknown RaftCommand type: {t}")),
         }
@@ -546,6 +570,19 @@ mod tests {
         let encoded = cmd.encode();
         assert_eq!(encoded[0], 4u8, "TxnCommit type byte must be 4");
         assert_eq!(RaftCommand::decode(&encoded).unwrap(), cmd);
+    }
+
+    #[test]
+    fn round_trip_txn_decision() {
+        for commit in [true, false] {
+            let cmd = RaftCommand::TxnDecision {
+                txn_id: 0x0102_0304_0506_0708,
+                commit,
+            };
+            let encoded = cmd.encode();
+            assert_eq!(encoded[0], 9u8, "TxnDecision type byte must be 9");
+            assert_eq!(RaftCommand::decode(&encoded).unwrap(), cmd);
+        }
     }
 
     #[test]
