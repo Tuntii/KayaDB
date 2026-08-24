@@ -27,14 +27,23 @@ pub struct MetricsSnapshot {
     pub raft_is_leader: u8,
     pub raft_role: String,
     pub raft_leader_id: Option<u64>,
+    /// Hosted Raft groups no longer referenced by the range table, awaiting
+    /// reclaim (issue #30). Should settle back to 0 shortly after a merge.
+    pub orphan_group_count: u64,
+    /// Cumulative orphan groups reclaimed (unhosted + data dir removed) since
+    /// process start (issue #30).
+    pub reclaim_total: u64,
 }
 
 impl MetricsSnapshot {
     /// Build a snapshot from engine stats and an observed Raft status.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_engine_and_raft(
         engine_stats: EngineStats,
         raft_status: &RaftStatus,
         is_leader: bool,
+        orphan_group_count: u64,
+        reclaim_total: u64,
     ) -> Self {
         Self {
             wal_fsync_total_us: engine_stats.wal_fsync_total_us,
@@ -56,6 +65,8 @@ impl MetricsSnapshot {
             raft_is_leader: u8::from(is_leader),
             raft_role: role_label(raft_status.role),
             raft_leader_id: raft_status.leader_id.map(|id| id.0),
+            orphan_group_count,
+            reclaim_total,
         }
     }
 }
@@ -112,6 +123,12 @@ fn render_base_prometheus(snapshot: &MetricsSnapshot) -> String {
             "# HELP kaya_raft_is_leader 1 if this node is the Raft leader, 0 otherwise.\n",
             "# TYPE kaya_raft_is_leader gauge\n",
             "kaya_raft_is_leader {}\n",
+            "# HELP kaya_range_orphan_groups Hosted Raft groups no longer referenced by the range table, awaiting reclaim.\n",
+            "# TYPE kaya_range_orphan_groups gauge\n",
+            "kaya_range_orphan_groups {}\n",
+            "# HELP kaya_range_orphan_groups_reclaimed_total Orphan Raft groups reclaimed (unhosted + data dir removed) since process start.\n",
+            "# TYPE kaya_range_orphan_groups_reclaimed_total counter\n",
+            "kaya_range_orphan_groups_reclaimed_total {}\n",
         ),
         snapshot.wal_fsync_total_us,
         snapshot.wal_fsync_max_us,
@@ -130,6 +147,8 @@ fn render_base_prometheus(snapshot: &MetricsSnapshot) -> String {
         snapshot.live_sstables,
         snapshot.raft_term,
         snapshot.raft_is_leader,
+        snapshot.orphan_group_count,
+        snapshot.reclaim_total,
     )
 }
 
@@ -186,6 +205,8 @@ mod tests {
             },
             &status,
             true,
+            1,
+            2,
         )
     }
 
@@ -213,6 +234,12 @@ mod tests {
             "# HELP kaya_raft_is_leader",
             "# TYPE kaya_raft_is_leader gauge",
             "kaya_raft_is_leader 1",
+            "# HELP kaya_range_orphan_groups",
+            "# TYPE kaya_range_orphan_groups gauge",
+            "kaya_range_orphan_groups 1",
+            "# HELP kaya_range_orphan_groups_reclaimed_total",
+            "# TYPE kaya_range_orphan_groups_reclaimed_total counter",
+            "kaya_range_orphan_groups_reclaimed_total 2",
         ] {
             assert!(
                 body.contains(expected),

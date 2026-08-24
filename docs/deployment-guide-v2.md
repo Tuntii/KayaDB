@@ -171,6 +171,16 @@ Admin (operator token when configured):
 
 Cross-range transactions: clients use the same TXN opcodes; the server coordinator runs 2PC when a commit spans more than one group. No client API change.
 
+**Orphan group reclaim (#30):** a merge drops the right range from the meta
+table but the Raft group that owned it keeps running as an *orphan* until the
+next drain pass unhosts it and deletes its `{data_dir}/groups/{id}` directory
+— no operator action required, and safe to interrupt (a crash mid-reclaim just
+resumes cleanup on the next pass; a restart never rehosts an orphan since
+startup only hosts groups the persisted range table still references). Watch
+`kaya_range_orphan_groups` (gauge) and `kaya_range_orphan_groups_reclaimed_total`
+(counter) on `/metrics` if you want to confirm a merge finished cleaning up;
+see `spec/docs/range-routing-spec.md` §3d for the invariants.
+
 ---
 
 ## 4. Recommended staging profile

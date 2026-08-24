@@ -17,7 +17,10 @@ use crate::raft_persister::RaftPersister;
 
 use super::client_ops::{ProposeReq, ReadIndexReq, SharedRangeTable, SplitRuntime};
 use super::replication::drain_and_apply;
-use super::{SharedApplyIndexes, SharedEngine, SharedPending, SharedPendingReads, SharedRaftHost};
+use super::{
+    SharedApplyIndexes, SharedEngine, SharedPending, SharedPendingReads, SharedRaftHost,
+    SharedReclaimStats,
+};
 
 fn persist_raft_state(
     host: &SharedRaftHost,
@@ -51,6 +54,7 @@ pub(crate) async fn raft_event_loop(
     split_rt: SplitRuntime,
     data_dir: PathBuf,
     apply_indexes: SharedApplyIndexes,
+    reclaimed_total: SharedReclaimStats,
     mut incoming_rx: mpsc::Receiver<kaya_raft::Envelope>,
     mut propose_rx: mpsc::Receiver<ProposeReq>,
     mut read_propose_rx: mpsc::Receiver<ReadIndexReq>,
@@ -92,6 +96,7 @@ pub(crate) async fn raft_event_loop(
                     &apply_indexes,
                     &pending,
                     &pending_reads,
+                    &reclaimed_total,
                     self_id,
                     self_raft,
                     self_client,
@@ -118,6 +123,7 @@ pub(crate) async fn raft_event_loop(
                     &apply_indexes,
                     &pending,
                     &pending_reads,
+                    &reclaimed_total,
                     self_id,
                     self_raft,
                     self_client,
@@ -147,6 +153,7 @@ pub(crate) async fn raft_event_loop(
                             &apply_indexes,
                             &pending,
                             &pending_reads,
+                            &reclaimed_total,
                             self_id,
                             self_raft,
                             self_client,
@@ -179,6 +186,7 @@ pub(crate) async fn raft_event_loop(
                             &apply_indexes,
                             &pending,
                             &pending_reads,
+                            &reclaimed_total,
                             self_id,
                             self_raft,
                             self_client,

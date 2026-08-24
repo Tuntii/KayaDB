@@ -449,6 +449,8 @@ pub(crate) type SharedPending = Arc<Mutex<PendingMap>>;
 pub(crate) type PendingReadsMap = HashMap<u64, tokio::sync::oneshot::Sender<Result<(), String>>>;
 pub(crate) type SharedPendingReads = Arc<Mutex<PendingReadsMap>>;
 pub(crate) type SharedApplyIndexes = Arc<Mutex<HashMap<u64, RaftApplyIndex>>>;
+/// Cumulative count of orphan Raft groups reclaimed since process start (issue #30).
+pub(crate) type SharedReclaimStats = Arc<std::sync::atomic::AtomicU64>;
 
 // ── startup ───────────────────────────────────────────────────────────────────
 
@@ -600,6 +602,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     let shared_raft: SharedRaftHost = Arc::new(Mutex::new(host));
     let shared_persisters: SharedPersisters = Arc::new(Mutex::new(persister_map));
     let apply_indexes: SharedApplyIndexes = Arc::new(Mutex::new(apply_map));
+    let reclaimed_total: SharedReclaimStats = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let shared_range_table: client_ops::SharedRangeTable =
         Arc::new(tokio::sync::RwLock::new(boot_range_table));
     let split_rt = client_ops::SplitRuntime {
@@ -738,14 +741,29 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         );
         let r = shared_raft.clone();
         let e = shared_engine.clone();
+        let ranges = shared_range_table.clone();
+        let reclaimed = reclaimed_total.clone();
         #[cfg(feature = "ebpf")]
         {
             let ebpf = shared_ebpf.clone();
-            Some(metrics_accept_loop(metrics_listener, r, e, ebpf))
+            Some(metrics_accept_loop(
+                metrics_listener,
+                r,
+                e,
+                ranges,
+                reclaimed,
+                ebpf,
+            ))
         }
         #[cfg(not(feature = "ebpf"))]
         {
-            Some(metrics_accept_loop(metrics_listener, r, e))
+            Some(metrics_accept_loop(
+                metrics_listener,
+                r,
+                e,
+                ranges,
+                reclaimed,
+            ))
         }
     } else {
         None
@@ -874,6 +892,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         split_rt.clone(),
         config.data_dir.clone(),
         apply_indexes,
+        reclaimed_total,
         incoming_rx,
         propose_rx,
         read_propose_rx,
@@ -998,15 +1017,21 @@ async fn metrics_accept_loop(
     listener: TcpListener,
     raft: SharedRaftHost,
     engine: SharedEngine,
+    range_table: client_ops::SharedRangeTable,
+    reclaimed_total: SharedReclaimStats,
     ebpf: Option<SharedProbeManager>,
 ) -> std::io::Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         let raft = raft.clone();
         let engine = engine.clone();
+        let range_table = range_table.clone();
+        let reclaimed_total = reclaimed_total.clone();
         let ebpf = ebpf.clone();
         tokio::spawn(async move {
-            let _ = handle_metrics_connection(stream, raft, engine, ebpf).await;
+            let _ =
+                handle_metrics_connection(stream, raft, engine, range_table, reclaimed_total, ebpf)
+                    .await;
         });
     }
 }
@@ -1016,13 +1041,18 @@ async fn metrics_accept_loop(
     listener: TcpListener,
     raft: SharedRaftHost,
     engine: SharedEngine,
+    range_table: client_ops::SharedRangeTable,
+    reclaimed_total: SharedReclaimStats,
 ) -> std::io::Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         let raft = raft.clone();
         let engine = engine.clone();
+        let range_table = range_table.clone();
+        let reclaimed_total = reclaimed_total.clone();
         tokio::spawn(async move {
-            let _ = handle_metrics_connection(stream, raft, engine).await;
+            let _ =
+                handle_metrics_connection(stream, raft, engine, range_table, reclaimed_total).await;
         });
     }
 }
@@ -1032,6 +1062,8 @@ async fn handle_metrics_connection(
     mut stream: TcpStream,
     raft: SharedRaftHost,
     engine: SharedEngine,
+    range_table: client_ops::SharedRangeTable,
+    reclaimed_total: SharedReclaimStats,
     ebpf: Option<SharedProbeManager>,
 ) -> std::io::Result<()> {
     let mut buf = [0u8; 1024];
@@ -1071,7 +1103,16 @@ async fn handle_metrics_connection(
                 );
                 let _ = guard.write_status();
             }
-            crate::metrics::MetricsSnapshot::from_engine_and_raft(engine_stats, &status, is_leader)
+            // Orphan group reclaim (#30): live gauge + cumulative counter.
+            let orphan_group_count = replication::orphan_group_count(&raft, &range_table).await;
+            let reclaim_total = reclaimed_total.load(std::sync::atomic::Ordering::Relaxed);
+            crate::metrics::MetricsSnapshot::from_engine_and_raft(
+                engine_stats,
+                &status,
+                is_leader,
+                orphan_group_count,
+                reclaim_total,
+            )
         };
         let ebpf_hist = ebpf.as_ref().map(|mgr| mgr.lock().histogram().clone());
         let body = crate::metrics::render_prometheus_with_ebpf(&snapshot, ebpf_hist.as_ref());
@@ -1090,6 +1131,8 @@ async fn handle_metrics_connection(
     mut stream: TcpStream,
     raft: SharedRaftHost,
     engine: SharedEngine,
+    range_table: client_ops::SharedRangeTable,
+    reclaimed_total: SharedReclaimStats,
 ) -> std::io::Result<()> {
     let mut buf = [0u8; 1024];
     let n = stream.read(&mut buf).await?;
@@ -1119,7 +1162,16 @@ async fn handle_metrics_connection(
                 (status, is_leader)
             };
             let engine_stats = engine.lock().await.stats();
-            crate::metrics::MetricsSnapshot::from_engine_and_raft(engine_stats, &status, is_leader)
+            // Orphan group reclaim (#30): live gauge + cumulative counter.
+            let orphan_group_count = replication::orphan_group_count(&raft, &range_table).await;
+            let reclaim_total = reclaimed_total.load(std::sync::atomic::Ordering::Relaxed);
+            crate::metrics::MetricsSnapshot::from_engine_and_raft(
+                engine_stats,
+                &status,
+                is_leader,
+                orphan_group_count,
+                reclaim_total,
+            )
         };
         let body = crate::metrics::render_prometheus(&snapshot);
         let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n{body}");
