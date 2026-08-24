@@ -117,12 +117,12 @@ The M16–M25 arc has closed its **documented production path**: operators can r
 | No HLC uncertainty-interval wait/clamp | Clock skew under multi-node wall clocks is not fully mitigated |
 | Jepsen grand matrix residual | Multi-range bank `bank-mr` is **nightly CI** (split+merge+kill+partition, sum invariant); live MOVE_RANGE rebalance still not product-side, so rebalance chaos is advisory-only |
 | Linearizability minimal counterexample | **Shipped:** WGL `minimal_counterexample` + Jepsen violation report; residual is richer MUSes / interactive explorer |
-| Encryption key rotation / multi-tenancy | Single KEK=DEK key; no online rotation; ACL is prefix-token isolation only |
+| Full multi-tenancy | **Encryption key rotation shipped (#28):** `Keyring`-backed `EncryptedDisk`, `kayactl encryption init/rotate/list/verify`, online dual-key read window (no background re-encrypt — see `docs/security.md` §7.1). ACL is still prefix-token isolation only, not full tenancy |
 | Observability gaps | Kernel+userspace fsync attribution, io_uring completion tracing, stap/perf privileged CI, Dashboard v2, scheduled profiling CI |
 | Orphan Raft groups after merge | Group reclaim after `merge_with_next` is follow-on |
 | Client gaps | Zig client not shipped; TS client is minimal (put/get/delete/health/hello) |
 
-**Next cut after v0.2.0 candidate:** pick residual rows that matter for the next release train (live range migrate, 2PC recovery hardening, chaos grand matrix in CI, key rotation) rather than reopening the whole arc.
+**Next cut after v0.2.0 candidate:** pick residual rows that matter for the next release train (live range migrate, 2PC recovery hardening, chaos grand matrix in CI) rather than reopening the whole arc.
 
 ---
 

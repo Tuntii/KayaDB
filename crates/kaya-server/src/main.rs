@@ -208,9 +208,15 @@ fn run() -> Result<(), String> {
     // --acl-file <path> / KAYA_ACL_FILE — JSON map prefix -> token (M24 per-prefix ACL).
     let acl_file = take_value(&mut args, "--acl-file").or_else(|| env::var("KAYA_ACL_FILE").ok());
 
-    // --encryption-key-file <path> / KAYA_ENCRYPTION_KEY_FILE — 32 raw bytes AES-256 key.
+    // --encryption-key-file <path> / KAYA_ENCRYPTION_KEY_FILE — 32 raw bytes AES-256 key
+    // (single, non-rotating key). Mutually exclusive with --encryption-keyring-file.
     let encryption_key_file = take_value(&mut args, "--encryption-key-file")
         .or_else(|| env::var("KAYA_ENCRYPTION_KEY_FILE").ok());
+
+    // --encryption-keyring-file <path> / KAYA_ENCRYPTION_KEYRING_FILE — active + previous
+    // keys for online rotation (#28). See `kayactl encryption` and docs/security.md §7.
+    let encryption_keyring_file = take_value(&mut args, "--encryption-keyring-file")
+        .or_else(|| env::var("KAYA_ENCRYPTION_KEYRING_FILE").ok());
 
     let tls_cert = take_value(&mut args, "--tls-cert").or_else(|| env::var("KAYA_TLS_CERT").ok());
     let tls_key = take_value(&mut args, "--tls-key").or_else(|| env::var("KAYA_TLS_KEY").ok());
@@ -244,10 +250,24 @@ fn run() -> Result<(), String> {
             .map_err(|e| format!("--acl-file {path}: {e}"))?;
         config = config.with_acl(acl);
     }
-    if let Some(path) = encryption_key_file {
-        let key = kaya_io::load_key_file(&path)
-            .map_err(|e| format!("--encryption-key-file {path}: {e}"))?;
-        config = config.with_encryption_key(key);
+    match (encryption_key_file, encryption_keyring_file) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "--encryption-key-file and --encryption-keyring-file are mutually exclusive"
+                    .to_owned(),
+            );
+        }
+        (Some(path), None) => {
+            let key = kaya_io::load_key_file(&path)
+                .map_err(|e| format!("--encryption-key-file {path}: {e}"))?;
+            config = config.with_encryption_key(key);
+        }
+        (None, Some(path)) => {
+            let keyring = kaya_io::load_keyring_file(&path)
+                .map_err(|e| format!("--encryption-keyring-file {path}: {e}"))?;
+            config = config.with_encryption_keyring(keyring);
+        }
+        (None, None) => {}
     }
 
     let audit_log = audit_log_flag.unwrap_or_else(|| {

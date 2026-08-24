@@ -48,6 +48,12 @@ pub(crate) fn print_usage() {
     println!("  kayactl [--data <dir>] [--json] index verify <name>");
     println!("  kayactl [--data <dir>] [--json] index backfill <pause|resume|step|status> <name> [--batch N]");
     println!();
+    println!("ENCRYPTION KEY ROTATION (#28)");
+    println!("  kayactl encryption init --keyring <path> [--from-key-file <path>]   (bootstrap id 0 from a fresh or existing key)");
+    println!("  kayactl encryption rotate --keyring <path>   (new active key id; previous ids stay readable)");
+    println!("  kayactl encryption list --keyring <path>");
+    println!("  kayactl [--data <dir>] encryption verify --keyring <path>|--key-file <path>");
+    println!();
     println!("BACKUP");
     println!(
         "  kayactl backup --data <src> --out <dest> [--incremental] [--cdc-consumer <id>] [--json]"
