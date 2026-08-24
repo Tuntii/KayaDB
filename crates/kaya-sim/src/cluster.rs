@@ -876,6 +876,11 @@ async fn apply_command_to_engine(
             .await
             .map(|_| None)
             .map_err(|e| e.to_string()),
+        RaftCommand::TxnDecision { txn_id, commit } => engine
+            .apply_txn_decision(txn_id, commit)
+            .await
+            .map(|_| None)
+            .map_err(|e| e.to_string()),
     }
 }
 

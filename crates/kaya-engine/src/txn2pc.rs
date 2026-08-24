@@ -9,9 +9,14 @@
 //! ```text
 //! \x00txn/rec/{txn_id_be8}                 → Txn2pcState (1 byte)
 //! \x00txn/intent/{txn_id_be8}/{user_key}   → intent payload
+//! \x00txn/dec/{txn_id_be8}                 → global decision (1 byte)
 //! ```
 //!
 //! Intent payload: `0` = delete tombstone; `1 || value` = put.
+//!
+//! The **decision record** is written by the coordinator on the meta group
+//! (group 0) *before* any participant is asked to commit, and is what crash
+//! recovery consults to resolve a local `Preparing` / `Prepared` record.
 
 use kaya_core::{Bytes, KayaError, Result};
 use kaya_io::Disk;
@@ -24,6 +29,11 @@ pub const TXN_SYS_PREFIX: &[u8] = b"\x00txn/";
 pub const TXN_REC_PREFIX: &[u8] = b"\x00txn/rec/";
 /// Durable intent keys: `\x00txn/intent/{txn_id_be8}/{user_key}`.
 pub const TXN_INTENT_PREFIX: &[u8] = b"\x00txn/intent/";
+/// Global 2PC decision keys: `\x00txn/dec/{txn_id_be8}`.
+pub const TXN_DEC_PREFIX: &[u8] = b"\x00txn/dec/";
+
+const DECISION_ABORT: u8 = 0;
+const DECISION_COMMIT: u8 = 1;
 
 const INTENT_DELETE: u8 = 0;
 const INTENT_PUT: u8 = 1;
@@ -93,6 +103,14 @@ pub fn encode_intent_key(txn_id: u64, user_key: &[u8]) -> Bytes {
     k
 }
 
+/// `\x00txn/dec/{txn_id as u64 BE}` — global 2PC decision record key.
+pub fn encode_dec_key(txn_id: u64) -> Bytes {
+    let mut k = Vec::with_capacity(TXN_DEC_PREFIX.len() + 8);
+    k.extend_from_slice(TXN_DEC_PREFIX);
+    k.extend_from_slice(&txn_id.to_be_bytes());
+    k
+}
+
 /// Prefix for scanning all intents belonging to `txn_id`.
 pub fn encode_intent_scan_prefix(txn_id: u64) -> Bytes {
     let mut k = Vec::with_capacity(TXN_INTENT_PREFIX.len() + 8 + 1);
@@ -124,9 +142,11 @@ pub fn parse_rec_txn_id(key: &[u8]) -> Option<u64> {
 /// Counts returned by [`Engine::recover_incomplete_2pc`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Txn2pcRecoveryStats {
-    /// Records that were `Preparing` / `Prepared` and aborted fail-closed.
+    /// Records that were `Preparing` / `Prepared` and aborted (explicit abort
+    /// decision, or fail-closed because no decision was durable locally).
     pub aborted: u32,
-    /// Records that were `Committing` and finished to `Committed`.
+    /// Records that were `Committing`, or `Preparing` / `Prepared` with a
+    /// durable commit decision, and were finished to `Committed`.
     pub finished_commits: u32,
 }
 
@@ -285,6 +305,46 @@ impl<D: Disk> Engine<D> {
         Ok(())
     }
 
+    /// Persist the **global** 2PC decision for `txn_id` (meta-group apply).
+    ///
+    /// Written before any participant is told to commit. Idempotent; a second
+    /// write with a conflicting decision is rejected — a 2PC decision is final.
+    pub async fn apply_txn_decision(&mut self, txn_id: u64, commit: bool) -> Result<()> {
+        if let Some(prev) = self.read_txn_decision(txn_id)? {
+            if prev != commit {
+                return Err(KayaError::invalid_argument(format!(
+                    "2PC decision for txn {txn_id} already durable as {} — cannot flip",
+                    if prev { "commit" } else { "abort" }
+                )));
+            }
+            return Ok(());
+        }
+        let byte = if commit {
+            DECISION_COMMIT
+        } else {
+            DECISION_ABORT
+        };
+        self.write_put(encode_dec_key(txn_id), vec![byte], WriteOptions::default())
+            .await?;
+        Ok(())
+    }
+
+    /// Read the durable global 2PC decision: `Some(true)` = commit,
+    /// `Some(false)` = abort, `None` = undecided (or not replicated here yet).
+    pub fn read_txn_decision(&mut self, txn_id: u64) -> Result<Option<bool>> {
+        match self.get_inner(&encode_dec_key(txn_id), ReadTimestamp::Latest)? {
+            Some(raw) if !raw.is_empty() => match raw[0] {
+                DECISION_COMMIT => Ok(Some(true)),
+                DECISION_ABORT => Ok(Some(false)),
+                other => Err(KayaError::corruption(format!(
+                    "unknown 2PC decision byte {other}"
+                ))),
+            },
+            Some(_) => Err(KayaError::corruption("empty 2PC decision value")),
+            None => Ok(None),
+        }
+    }
+
     /// Read the durable 2PC record state, if present.
     pub fn read_txn2pc_state(&mut self, txn_id: u64) -> Result<Option<Txn2pcState>> {
         let rec_key = encode_rec_key(txn_id);
@@ -297,7 +357,10 @@ impl<D: Disk> Engine<D> {
 
     /// Crash recovery for incomplete 2PC participant records (run on open).
     ///
-    /// - `Preparing` / `Prepared` → abort (fail-closed; no durable commit decision)
+    /// - `Preparing` / `Prepared` → consult the durable decision record
+    ///   (`\x00txn/dec/…`): commit decision → finish commit; abort decision or
+    ///   **no** decision → abort (fail-closed — no participant can have
+    ///   committed without the decision being durable first)
     /// - `Committing` → finish commit (decision was durable; never abort)
     /// - `Committed` / `Aborted` → leave untouched
     ///
@@ -318,8 +381,13 @@ impl<D: Disk> Engine<D> {
             let state = Txn2pcState::from_byte(kv.value[0])?;
             match state {
                 Txn2pcState::Preparing | Txn2pcState::Prepared => {
-                    self.apply_txn_abort_2pc(txn_id).await?;
-                    stats.aborted = stats.aborted.saturating_add(1);
+                    if self.read_txn_decision(txn_id)? == Some(true) {
+                        self.apply_txn_commit_2pc(txn_id).await?;
+                        stats.finished_commits = stats.finished_commits.saturating_add(1);
+                    } else {
+                        self.apply_txn_abort_2pc(txn_id).await?;
+                        stats.aborted = stats.aborted.saturating_add(1);
+                    }
                 }
                 Txn2pcState::Committing => {
                     self.apply_txn_commit_2pc(txn_id).await?;
@@ -868,6 +936,100 @@ mod tests {
                 None
             );
         });
+    }
+
+    /// A `Prepared` record plus a durable **commit** decision must be finished
+    /// on reopen, not aborted fail-closed.
+    #[test]
+    fn recovery_commits_prepared_when_decision_is_commit() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            {
+                let mut engine = Engine::open(EngineConfig::default(), disk.clone())
+                    .await
+                    .unwrap();
+                engine
+                    .apply_txn_prepare(400, &[(b"dk".to_vec(), Some(b"dv".to_vec()))])
+                    .await
+                    .unwrap();
+                // Coordinator wrote the global decision on the meta group, then died
+                // before this participant applied TxnCommit2pc.
+                engine.apply_txn_decision(400, true).await.unwrap();
+            }
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            assert_eq!(engine.last_recovery().txn2pc_finished_commits, 1);
+            assert_eq!(engine.last_recovery().txn2pc_aborted, 0);
+            assert_eq!(
+                engine.read_txn2pc_state(400).unwrap(),
+                Some(Txn2pcState::Committed)
+            );
+            assert_eq!(
+                engine.get(b"dk", ReadOptions::default()).await.unwrap(),
+                Some(b"dv".to_vec())
+            );
+        });
+    }
+
+    /// Explicit **abort** decision, and no decision at all, both fail closed.
+    #[test]
+    fn recovery_aborts_prepared_on_abort_decision_and_when_undecided() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            {
+                let mut engine = Engine::open(EngineConfig::default(), disk.clone())
+                    .await
+                    .unwrap();
+                engine
+                    .apply_txn_prepare(401, &[(b"ak".to_vec(), Some(b"av".to_vec()))])
+                    .await
+                    .unwrap();
+                engine.apply_txn_decision(401, false).await.unwrap();
+                engine
+                    .apply_txn_prepare(402, &[(b"uk".to_vec(), Some(b"uv".to_vec()))])
+                    .await
+                    .unwrap();
+            }
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            assert_eq!(engine.last_recovery().txn2pc_aborted, 2);
+            assert_eq!(engine.last_recovery().txn2pc_finished_commits, 0);
+            for (txn, key) in [(401u64, b"ak".as_slice()), (402, b"uk".as_slice())] {
+                assert_eq!(
+                    engine.read_txn2pc_state(txn).unwrap(),
+                    Some(Txn2pcState::Aborted)
+                );
+                assert_eq!(engine.get(key, ReadOptions::default()).await.unwrap(), None);
+            }
+        });
+    }
+
+    #[test]
+    fn decision_is_final_and_idempotent() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            assert_eq!(engine.read_txn_decision(500).unwrap(), None);
+            engine.apply_txn_decision(500, true).await.unwrap();
+            engine.apply_txn_decision(500, true).await.unwrap();
+            assert_eq!(engine.read_txn_decision(500).unwrap(), Some(true));
+            let err = engine.apply_txn_decision(500, false).await.unwrap_err();
+            assert!(err.to_string().contains("cannot flip"), "{err}");
+            assert_eq!(engine.read_txn_decision(500).unwrap(), Some(true));
+        });
+    }
+
+    #[test]
+    fn dec_key_layout_is_ordered_and_disjoint() {
+        let k = encode_dec_key(0x1122_3344_5566_7788);
+        assert!(k.starts_with(TXN_DEC_PREFIX));
+        assert!(is_txn_system_key(&k));
+        assert_eq!(
+            &k[TXN_DEC_PREFIX.len()..],
+            &0x1122_3344_5566_7788u64.to_be_bytes()
+        );
+        // Decision keys must not collide with rec / intent scans.
+        assert!(!k.starts_with(TXN_REC_PREFIX));
+        assert!(!k.starts_with(TXN_INTENT_PREFIX));
+        assert_eq!(parse_rec_txn_id(&k), None);
     }
 
     #[test]

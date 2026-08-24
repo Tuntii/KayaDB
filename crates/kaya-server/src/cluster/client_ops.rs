@@ -33,7 +33,8 @@ use kaya_net::{
     MERGE_RANGE_OPCODE, MOVE_RANGE_OPCODE, PROTO_VERSION, REBALANCE_PLAN_OPCODE,
     SPLIT_RANGE_OPCODE, STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER,
     STATUS_OK, STATUS_RANGE_MOVED, STATUS_TXN_CONFLICT, TRANSFER_LEADER_OPCODE, TXN_BEGIN_OPCODE,
-    TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
+    TXN_COMMIT_OPCODE, TXN_FORWARD_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT,
+    TXN_ROLLBACK_OPCODE,
 };
 use kaya_raft::{
     multi_raft_group_dir, ClusterMember, GroupId, NodeId, RaftConfig, RaftNode, StaticRangeTable,
@@ -506,6 +507,7 @@ async fn dispatch(
         || opcode == PROMOTE_LEARNER_OPCODE
         || opcode == REBALANCE_PLAN_OPCODE
         || opcode == MOVE_RANGE_OPCODE
+        || opcode == TXN_FORWARD_OPCODE
     {
         // Peel optional ADMIN prefix + token if present; otherwise treat payload as legacy raw.
         let (clean_payload, presented) =
@@ -544,6 +546,43 @@ async fn dispatch(
                     None,
                 );
             }
+        }
+
+        // TXN_FORWARD (21): a peer coordinator asks us, the leader of
+        // `group_id`, to replicate one 2PC command on that group (#26).
+        if opcode == TXN_FORWARD_OPCODE {
+            // The body is a raw replicated command, so it bypasses the data-path
+            // ACL. A cluster that authorizes data ops must also gate forwarding.
+            if operator_token.is_none() && (client_token.is_some() || acl.is_some()) {
+                return outcome(
+                    STATUS_ERROR,
+                    encode_error_payload(
+                        "TXN_FORWARD requires an operator token when client auth or an ACL is configured",
+                    ),
+                    operator_auth,
+                    None,
+                );
+            }
+            return match kaya_net::decode_txn_forward_payload(&clean_payload) {
+                Ok((group_id, command)) => {
+                    let roster_snapshot = roster.read().await.clone();
+                    let (status, body) = propose_and_wait(
+                        raft,
+                        &roster_snapshot,
+                        propose_tx,
+                        GroupId(group_id),
+                        command,
+                    )
+                    .await;
+                    outcome(status, body, operator_auth, None)
+                }
+                Err(e) => outcome(
+                    STATUS_INVALID_ARGUMENT,
+                    encode_error_payload(&e),
+                    operator_auth,
+                    None,
+                ),
+            };
         }
 
         if opcode == ADD_MEMBER_OPCODE {
@@ -1023,6 +1062,7 @@ async fn dispatch(
                     range_table,
                     propose_tx,
                     txn_id,
+                    operator_token.as_deref(),
                 )
                 .await;
                 outcome(status, body, client_auth, None)
@@ -1380,6 +1420,7 @@ fn map_txn_err(
 ///
 /// Intents are cleared before propose (fail-closed if propose fails — client
 /// restarts the txn).
+#[allow(clippy::too_many_arguments)]
 async fn txn_commit_via_raft(
     raft: &SharedRaftHost,
     engine: &SharedEngine,
@@ -1387,6 +1428,7 @@ async fn txn_commit_via_raft(
     range_table: &SharedRangeTable,
     propose_tx: &mpsc::Sender<ProposeReq>,
     txn_id: u64,
+    operator_token: Option<&str>,
 ) -> (u16, Vec<u8>) {
     if !is_leader_of(raft, GroupId::ZERO) {
         return (STATUS_NOT_LEADER, get_leader_hint(raft, roster));
@@ -1427,9 +1469,12 @@ async fn txn_commit_via_raft(
 
     if by_group.len() > 1 {
         // Cross-group 2PC path (M23).
-        let result = super::txn_coord::commit_cross_group(txn_id, by_group, |gid, cmd| {
-            propose_cmd_result(raft, roster, propose_tx, gid, cmd)
-        })
+        let result = super::txn_coord::commit_cross_group(
+            txn_id,
+            by_group,
+            super::txn_coord::DEFAULT_PHASE_TIMEOUT,
+            |gid, cmd| propose_cmd_result(raft, roster, propose_tx, gid, cmd, operator_token),
+        )
         .await;
 
         return match result {
@@ -1472,7 +1517,13 @@ async fn propose_cmd_result(
     propose_tx: &mpsc::Sender<ProposeReq>,
     group_id: GroupId,
     cmd: RaftCommand,
+    operator_token: Option<&str>,
 ) -> Result<(), String> {
+    // A participant group may be led by another node: forward there instead of
+    // failing the whole transaction with NOT_LEADER (#26).
+    if !is_leader_of(raft, group_id) {
+        return forward_to_group_leader(raft, roster, group_id, &cmd, operator_token).await;
+    }
     let (status, body) = propose_and_wait(raft, roster, propose_tx, group_id, cmd.encode()).await;
     if status == STATUS_OK {
         return Ok(());
@@ -1483,6 +1534,59 @@ async fn propose_cmd_result(
     match kaya_net::decode_error_payload(&body) {
         Ok(msg) => Err(msg),
         Err(_) => Err(format!("propose failed with status {status}")),
+    }
+}
+
+/// Forward one 2PC command to the node that leads `group_id` (#26).
+///
+/// Cross-group transactions are coordinated by the group-0 leader, but a
+/// participant range may be led elsewhere. Rather than failing the commit with
+/// NOT_LEADER, the coordinator ships the command to that leader over the
+/// existing client RPC (`TXN_FORWARD`, opcode 21) and waits for it to be
+/// committed and applied there.
+///
+/// The forwarded body is a raw replicated command, so it carries the operator
+/// credential when one is configured (same gate as the other admin opcodes).
+///
+/// **TLS note:** forwarding uses the plaintext client RPC, so on a TLS-enabled
+/// cluster the forward fails and the transaction aborts — no worse than the
+/// pre-#26 NOT_LEADER (see `transactions-spec.md` §17.4).
+async fn forward_to_group_leader(
+    raft: &SharedRaftHost,
+    roster: &NodeRoster,
+    group_id: GroupId,
+    cmd: &RaftCommand,
+    operator_token: Option<&str>,
+) -> Result<(), String> {
+    let leader = {
+        let host = raft.lock().unwrap();
+        host.status_of(group_id).and_then(|s| s.leader_id)
+    };
+    let Some(leader) = leader else {
+        return Err("not_leader".to_owned());
+    };
+    let Some(addr) = roster.client_addr(leader) else {
+        return Err(format!("no client address for group {} leader", group_id.0));
+    };
+
+    let inner = kaya_net::encode_txn_forward_payload(group_id.0, &cmd.encode());
+    // Same convention as the other admin opcodes: raw body when no operator
+    // token is configured, ADMIN-framed body when one is.
+    let payload = match operator_token.filter(|t| !t.is_empty()) {
+        Some(tok) => {
+            crate::operator_auth::encode_admin_payload(TXN_FORWARD_OPCODE, &inner, Some(tok))
+        }
+        None => inner,
+    };
+    match kaya_net::roundtrip(addr, TXN_FORWARD_OPCODE, &payload).await {
+        Ok((STATUS_OK, _)) => Ok(()),
+        Ok((STATUS_NOT_LEADER, _)) => Err("not_leader".to_owned()),
+        Ok((status, body)) => Err(kaya_net::decode_error_payload(&body)
+            .unwrap_or_else(|_| format!("forwarded propose failed with status {status}"))),
+        Err(e) => Err(format!(
+            "forward to group {} leader {addr} failed: {e}",
+            group_id.0
+        )),
     }
 }
 

@@ -31,9 +31,10 @@ pub use snapshot::SnapshotView;
 pub use stats::{CompactionResult, EngineStats, FlushResult, WriteResult};
 pub use txn::{Intent, TxnId};
 pub use txn2pc::{
-    decode_intent_value, encode_intent_key, encode_intent_scan_prefix, encode_intent_value,
-    encode_rec_key, is_txn_system_key, parse_rec_txn_id, user_key_from_intent_key,
-    Txn2pcRecoveryStats, Txn2pcState, TXN_INTENT_PREFIX, TXN_REC_PREFIX, TXN_SYS_PREFIX,
+    decode_intent_value, encode_dec_key, encode_intent_key, encode_intent_scan_prefix,
+    encode_intent_value, encode_rec_key, is_txn_system_key, parse_rec_txn_id,
+    user_key_from_intent_key, Txn2pcRecoveryStats, Txn2pcState, TXN_DEC_PREFIX, TXN_INTENT_PREFIX,
+    TXN_REC_PREFIX, TXN_SYS_PREFIX,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

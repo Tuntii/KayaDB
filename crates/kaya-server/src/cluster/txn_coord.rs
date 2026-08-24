@@ -1,19 +1,29 @@
-//! Cross-group 2PC transaction coordinator (M23).
+//! Cross-group 2PC transaction coordinator (M23, #26).
 //!
 //! When a multi-key SI commit spans more than one Raft group (via
-//! [`StaticRangeTable`](kaya_raft::StaticRangeTable) lookup), the leader runs
-//! prepare-then-commit (or abort) using:
+//! [`StaticRangeTable`](kaya_raft::StaticRangeTable) lookup), the group-0 leader
+//! acts as **coordinator** and drives prepare → decide → commit/abort using:
 //! - [`RaftCommand::TxnPrepare`] (type 5)
+//! - [`RaftCommand::TxnDecision`] (type 9) — durable global decision, meta group
 //! - [`RaftCommand::TxnCommit2pc`] (type 6)
 //! - [`RaftCommand::TxnAbort2pc`] (type 7)
 //!
 //! Single-group commits stay on type-4 [`RaftCommand::TxnCommit`].
 //!
+//! # Phases
+//!
+//! Prepare, commit and abort each fan out to every participant **in parallel**
+//! (concurrently in the coordinator task) under a per-phase timeout. Between
+//! prepare and commit the coordinator writes the durable global decision on the
+//! meta group (group 0); **no participant is ever asked to commit before that
+//! record is applied**, which is what makes recovery deterministic.
+//!
 //! # Crash recovery
 //!
 //! On startup (and on every [`kaya_engine::Engine::open`]), incomplete 2PC
-//! records are recovered:
-//! - `Preparing` / `Prepared` → abort (fail-closed; no durable global decision)
+//! records are recovered against the decision log:
+//! - `Preparing` / `Prepared` → commit if a durable commit decision exists,
+//!   else abort (fail-closed; the coordinator cannot have committed anywhere)
 //! - `Committing` → finish commit (decision was durable; never abort)
 //! - `Committed` / `Aborted` → leave untouched
 //!
@@ -22,9 +32,21 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
+use std::time::Duration;
 
 use kaya_io::Disk;
 use kaya_raft::{GroupId, RaftCommand};
+
+/// Meta group carrying the durable global 2PC decision log.
+pub const DECISION_GROUP: GroupId = GroupId::ZERO;
+
+/// Default per-phase deadline for prepare / decide / commit fan-out.
+///
+/// A phase that blows the deadline is treated as failed: prepare timeouts abort
+/// the txn, commit timeouts leave the (already durable) decision for recovery.
+pub const DEFAULT_PHASE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Put when `Some`, delete when `None`.
 type Mutation = (Vec<u8>, Option<Vec<u8>>);
@@ -49,19 +71,98 @@ pub fn coordinator_group(mutations_by_group: &MutationsByGroup) -> Option<GroupI
     best.map(|(_, g)| g)
 }
 
+/// Poll every future concurrently in the current task; results keep input order.
+///
+/// A hand-rolled `join_all` avoids a `futures` dependency and, unlike `JoinSet`,
+/// imposes no `'static` bound on the caller's closure.
+async fn join_all<F: Future>(futs: Vec<F>) -> Vec<F::Output> {
+    let mut pending: Vec<Option<Pin<Box<F>>>> =
+        futs.into_iter().map(|f| Some(Box::pin(f))).collect();
+    let mut out: Vec<Option<F::Output>> = pending.iter().map(|_| None).collect();
+    std::future::poll_fn(|cx| {
+        let mut done = true;
+        for (slot, res) in pending.iter_mut().zip(out.iter_mut()) {
+            let Some(fut) = slot else { continue };
+            match fut.as_mut().poll(cx) {
+                Poll::Ready(v) => {
+                    *res = Some(v);
+                    *slot = None;
+                }
+                Poll::Pending => done = false,
+            }
+        }
+        if done {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+    out.into_iter()
+        .map(|o| o.expect("joined future produced no output"))
+        .collect()
+}
+
+/// Fan `cmd_for(group)` out to every group in parallel under `timeout`.
+///
+/// Returns `(ok_groups, first_error)`.
+async fn fan_out<F, Fut>(
+    groups: &[GroupId],
+    timeout: Duration,
+    propose: &F,
+    cmd_for: impl Fn(GroupId) -> RaftCommand,
+) -> (Vec<GroupId>, Option<String>)
+where
+    F: Fn(GroupId, RaftCommand) -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    let results = join_all(
+        groups
+            .iter()
+            .map(|gid| tokio::time::timeout(timeout, propose(*gid, cmd_for(*gid))))
+            .collect(),
+    )
+    .await;
+
+    let mut ok = Vec::with_capacity(groups.len());
+    let mut err = None;
+    for (gid, res) in groups.iter().zip(results) {
+        match res {
+            Ok(Ok(())) => ok.push(*gid),
+            Ok(Err(e)) => {
+                err.get_or_insert(e);
+            }
+            Err(_) => {
+                err.get_or_insert_with(|| {
+                    format!(
+                        "2PC phase timed out after {}ms on group {}",
+                        timeout.as_millis(),
+                        gid.0
+                    )
+                });
+            }
+        }
+    }
+    (ok, err)
+}
+
 /// Run multi-group 2PC for `txn_id`.
 ///
 /// 1. `coordinator_group` = group of the lexicographically smallest key.
-/// 2. Propose `TxnPrepare` on each participant (all sent before waiting so the
-///    raft loop can apply them without an extra client round-trip).
-/// 3. If every prepare applies: propose `TxnCommit2pc` on all participants.
-/// 4. Else: propose `TxnAbort2pc` on every group that prepared successfully.
+/// 2. **Parallel** `TxnPrepare` on every participant (per-phase timeout).
+/// 3. All prepared → propose `TxnDecision { commit: true }` on the meta group
+///    (group 0) and wait for it to apply. **Nothing user-visible has changed
+///    yet**, so a crash before this point is an abort.
+/// 4. Decision durable → **parallel** `TxnCommit2pc` on every participant.
+/// 5. Prepare (or decision) failed → propose `TxnDecision { commit: false }`,
+///    then **parallel** `TxnAbort2pc` on every group that reached `Prepared`.
 ///
-/// `propose(group, cmd)` must wait until the command is committed and applied
-/// on that group (or return an error).
+/// `propose(group, cmd)` must wait until the command is committed and applied on
+/// that group (or return an error); it may forward to that group's leader.
 pub async fn commit_cross_group<F, Fut>(
     txn_id: u64,
     mutations_by_group: MutationsByGroup,
+    phase_timeout: Duration,
     propose: F,
 ) -> Result<(), String>
 where
@@ -80,56 +181,76 @@ where
     let coordinator = coordinator_group(&mutations_by_group)
         .ok_or_else(|| "commit_cross_group: no keys in mutations_by_group".to_owned())?;
 
-    // ── Phase 1: Prepare ────────────────────────────────────────────────────
-    let mut prepared: Vec<GroupId> = Vec::with_capacity(mutations_by_group.len());
-    let mut prepare_err: Option<String> = None;
+    // Deterministic participant order (HashMap iteration is not stable).
+    let mut participants: Vec<GroupId> = mutations_by_group.keys().copied().collect();
+    participants.sort_by_key(|g| g.0);
 
-    // Sequential proposes keep the API simple (no 'static bound on `propose`).
-    // The raft event loop still applies each command as soon as it is enqueued.
-    for (gid, mutations) in &mutations_by_group {
-        let cmd = RaftCommand::TxnPrepare {
+    // ── Phase 1: Prepare (parallel) ─────────────────────────────────────────
+    let (prepared, prepare_err) = fan_out(&participants, phase_timeout, &propose, |gid| {
+        RaftCommand::TxnPrepare {
             txn_id,
             coordinator_group: coordinator.0,
-            mutations: mutations.clone(),
-        };
-        match propose(*gid, cmd).await {
-            Ok(()) => prepared.push(*gid),
-            Err(e) => {
-                prepare_err = Some(e);
-                break;
-            }
+            mutations: mutations_by_group[&gid].clone(),
         }
-    }
+    })
+    .await;
 
-    if let Some(err) = prepare_err {
-        // Best-effort abort of groups that reached Prepared.
-        for gid in prepared {
-            let _ = propose(gid, RaftCommand::TxnAbort2pc { txn_id }).await;
+    // ── Phase 2: Durable global decision (meta group) ───────────────────────
+    // Written before any participant commits. TXN-2PC-6.
+    let decision_err = if prepare_err.is_none() {
+        decide(txn_id, true, phase_timeout, &propose).await.err()
+    } else {
+        None
+    };
+
+    if let Some(err) = prepare_err.or(decision_err) {
+        // Nothing committed anywhere: record the abort decision (so a restarted
+        // participant resolves deterministically instead of fail-closing), then
+        // release prepared intents.
+        if !prepared.is_empty() {
+            let _ = decide(txn_id, false, phase_timeout, &propose).await;
+            let _ = fan_out(&prepared, phase_timeout, &propose, |_| {
+                RaftCommand::TxnAbort2pc { txn_id }
+            })
+            .await;
         }
         return Err(err);
     }
 
-    // ── Phase 2: Commit decision ────────────────────────────────────────────
-    let mut commit_err: Option<String> = None;
-    for gid in mutations_by_group.keys() {
-        match propose(*gid, RaftCommand::TxnCommit2pc { txn_id }).await {
-            Ok(()) => {}
-            Err(e) => {
-                commit_err = Some(e);
-                break;
-            }
-        }
-    }
+    // ── Phase 3: Commit (parallel) ──────────────────────────────────────────
+    let (_, commit_err) = fan_out(&participants, phase_timeout, &propose, |_| {
+        RaftCommand::TxnCommit2pc { txn_id }
+    })
+    .await;
 
     if let Some(err) = commit_err {
-        // Partial commit decision is rare (shared-engine single-node often
-        // materializes all intents on the first Commit2pc). Still attempt abort
-        // on remaining groups is unsafe if any commit applied — leave recovery
-        // to the conservative startup scanner if the process dies here.
+        // The commit decision is durable on the meta group, so aborting here
+        // would be unsafe. Recovery finishes the remaining participants.
         return Err(format!("2PC commit phase failed for txn {txn_id}: {err}"));
     }
 
     Ok(())
+}
+
+/// Propose the durable global decision for `txn_id` on the meta group.
+async fn decide<F, Fut>(
+    txn_id: u64,
+    commit: bool,
+    timeout: Duration,
+    propose: &F,
+) -> Result<(), String>
+where
+    F: Fn(GroupId, RaftCommand) -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    let cmd = RaftCommand::TxnDecision { txn_id, commit };
+    match tokio::time::timeout(timeout, propose(DECISION_GROUP, cmd)).await {
+        Ok(r) => r.map_err(|e| format!("2PC decision log write failed for txn {txn_id}: {e}")),
+        Err(_) => Err(format!(
+            "2PC decision log write timed out after {}ms for txn {txn_id}",
+            timeout.as_millis()
+        )),
+    }
 }
 
 /// Crash recovery for incomplete 2PC participant records.
@@ -180,7 +301,7 @@ mod tests {
         m.insert(GroupId(1), vec![(b"a".to_vec(), Some(b"1".to_vec()))]);
         m.insert(GroupId(2), vec![(b"m".to_vec(), Some(b"2".to_vec()))]);
 
-        commit_cross_group(99, m, |gid, cmd| {
+        commit_cross_group(99, m, DEFAULT_PHASE_TIMEOUT, |gid, cmd| {
             let log = log2.clone();
             async move {
                 let tag = match &cmd {
@@ -195,6 +316,9 @@ mod tests {
                     RaftCommand::TxnAbort2pc { txn_id } => {
                         format!("abort g{} txn{txn_id}", gid.0)
                     }
+                    RaftCommand::TxnDecision { txn_id, commit } => {
+                        format!("decide g{} txn{txn_id} commit{commit}", gid.0)
+                    }
                     _ => format!("other g{}", gid.0),
                 };
                 log.lock().unwrap().push(tag);
@@ -205,8 +329,8 @@ mod tests {
         .unwrap();
 
         let entries = log.lock().unwrap().clone();
-        assert_eq!(entries.len(), 4, "{entries:?}");
-        // Two prepares then two commits (group order follows HashMap iteration).
+        assert_eq!(entries.len(), 5, "{entries:?}");
+        // Two prepares, one decision on the meta group, then two commits.
         assert_eq!(entries.iter().filter(|e| e.starts_with("prep")).count(), 2);
         assert_eq!(
             entries.iter().filter(|e| e.starts_with("commit")).count(),
@@ -215,6 +339,100 @@ mod tests {
         assert!(entries.iter().all(|e| !e.starts_with("abort")));
         // Coordinator is group of key "a" → group 1.
         assert!(entries.iter().any(|e| e.contains("coord1")));
+
+        // TXN-2PC-6: the decision lands on group 0 strictly before any commit.
+        let decide_at = entries
+            .iter()
+            .position(|e| e == "decide g0 txn99 committrue")
+            .unwrap_or_else(|| panic!("no commit decision on meta group: {entries:?}"));
+        let first_commit = entries
+            .iter()
+            .position(|e| e.starts_with("commit"))
+            .expect("commit");
+        assert!(
+            decide_at < first_commit,
+            "decision must precede every commit: {entries:?}"
+        );
+    }
+
+    /// Prepare fan-out must be concurrent: two prepares that each block until
+    /// both have started can only finish if they run at the same time.
+    #[tokio::test]
+    async fn prepare_and_commit_fan_out_in_parallel() {
+        let started = Arc::new(tokio::sync::Barrier::new(2));
+
+        let mut m: MutationsByGroup = HashMap::new();
+        m.insert(GroupId(1), vec![(b"a".to_vec(), Some(b"1".to_vec()))]);
+        m.insert(GroupId(2), vec![(b"m".to_vec(), Some(b"2".to_vec()))]);
+
+        let run = commit_cross_group(5, m, DEFAULT_PHASE_TIMEOUT, |_gid, cmd| {
+            let started = started.clone();
+            async move {
+                // Only the two-participant phases rendezvous; the meta-group
+                // decision is a single proposal.
+                if !matches!(cmd, RaftCommand::TxnDecision { .. }) {
+                    started.wait().await;
+                }
+                Ok(())
+            }
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), run)
+            .await
+            .expect("parallel fan-out deadlocked — phases ran sequentially")
+            .expect("2PC should succeed");
+    }
+
+    /// A participant that never answers must not hang the coordinator.
+    #[tokio::test]
+    async fn prepare_timeout_aborts_and_records_decision() {
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let log2 = log.clone();
+
+        let mut m: MutationsByGroup = HashMap::new();
+        m.insert(GroupId(1), vec![(b"a".to_vec(), Some(b"1".to_vec()))]);
+        m.insert(GroupId(2), vec![(b"m".to_vec(), Some(b"2".to_vec()))]);
+
+        let err = commit_cross_group(11, m, std::time::Duration::from_millis(50), |gid, cmd| {
+            let log = log2.clone();
+            async move {
+                log.lock()
+                    .unwrap()
+                    .push(format!("{} g{}", tag(&cmd), gid.0));
+                // Group 2 never answers its prepare.
+                if gid == GroupId(2) && matches!(cmd, RaftCommand::TxnPrepare { .. }) {
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            }
+        })
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("timed out"), "{err}");
+        let entries = log.lock().unwrap().clone();
+        assert!(
+            entries.contains(&"decide g0".to_owned()),
+            "abort decision must be durable: {entries:?}"
+        );
+        assert!(
+            entries.contains(&"abort g1".to_owned()),
+            "prepared participant must be released: {entries:?}"
+        );
+        assert!(
+            entries.iter().all(|e| !e.starts_with("commit")),
+            "must not commit after a prepare timeout: {entries:?}"
+        );
+    }
+
+    fn tag(cmd: &RaftCommand) -> &'static str {
+        match cmd {
+            RaftCommand::TxnPrepare { .. } => "prep",
+            RaftCommand::TxnCommit2pc { .. } => "commit",
+            RaftCommand::TxnAbort2pc { .. } => "abort",
+            RaftCommand::TxnDecision { .. } => "decide",
+            _ => "other",
+        }
     }
 
     #[tokio::test]
@@ -226,7 +444,13 @@ mod tests {
         use kaya_io::SimDisk;
 
         let disk = Arc::new(SimDisk::new());
-        let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+        // SimDisk is in-memory, but the directory lock is not: these tests all
+        // share the default data_dir, so skip it rather than serialize them.
+        let cfg = EngineConfig {
+            disable_locking: true,
+            ..EngineConfig::default()
+        };
+        let mut engine = Engine::open(cfg, disk).await.unwrap();
 
         // Prepared → abort on recovery.
         engine
@@ -270,7 +494,13 @@ mod tests {
         use kaya_io::SimDisk;
 
         let disk = Arc::new(SimDisk::new());
-        let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+        // SimDisk is in-memory, but the directory lock is not: these tests all
+        // share the default data_dir, so skip it rather than serialize them.
+        let cfg = EngineConfig {
+            disable_locking: true,
+            ..EngineConfig::default()
+        };
+        let mut engine = Engine::open(cfg, disk).await.unwrap();
         engine
             .apply_txn_prepare(3, &[(b"x".to_vec(), Some(b"v".to_vec()))])
             .await
@@ -303,7 +533,7 @@ mod tests {
         m.insert(GroupId(1), vec![(b"a".to_vec(), Some(b"1".to_vec()))]);
         m.insert(GroupId(2), vec![(b"z".to_vec(), Some(b"2".to_vec()))]);
 
-        let err = commit_cross_group(7, m, |gid, cmd| {
+        let err = commit_cross_group(7, m, DEFAULT_PHASE_TIMEOUT, |gid, cmd| {
             let log = log2.clone();
             let call = call2.clone();
             async move {
@@ -328,6 +558,10 @@ mod tests {
                         log.lock().unwrap().push(format!("commit {}", gid.0));
                         Ok(())
                     }
+                    RaftCommand::TxnDecision { commit, .. } => {
+                        log.lock().unwrap().push(format!("decide {commit}"));
+                        Ok(())
+                    }
                     _ => Ok(()),
                 }
             }
@@ -344,6 +578,10 @@ mod tests {
         assert!(
             entries.iter().all(|e| !e.starts_with("commit")),
             "must not commit after prepare failure: {entries:?}"
+        );
+        assert!(
+            entries.contains(&"decide false".to_owned()),
+            "abort must be recorded in the decision log: {entries:?}"
         );
     }
 }
