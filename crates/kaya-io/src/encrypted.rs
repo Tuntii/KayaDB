@@ -41,6 +41,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -301,8 +302,13 @@ pub fn load_keyring_file(path: impl AsRef<Path>) -> Result<Keyring> {
     })
 }
 
-/// Write a [`Keyring`] to `path` in the format read by [`load_keyring_file`].
+/// Write a [`Keyring`] to `path` in the format read by [`load_keyring_file`],
+/// atomically (write a sibling `<path>.tmp`, fsync, rename over `path`, so a
+/// crash mid-write never leaves a truncated/empty keyring behind) and, on
+/// unix, created with mode `0600` so the key material is never
+/// world/group-readable even momentarily.
 pub fn save_keyring_file(path: impl AsRef<Path>, keyring: &Keyring) -> Result<()> {
+    let path = path.as_ref();
     let mut out = String::new();
     out.push_str("# KayaDB encryption keyring: key material, treat like a private key.\n");
     let _ = writeln!(out, "active {}", keyring.active_id());
@@ -310,7 +316,23 @@ pub fn save_keyring_file(path: impl AsRef<Path>, keyring: &Keyring) -> Result<()
         let key = keyring.get(id).expect("id from key_ids() exists");
         let _ = writeln!(out, "key {id} {}", encode_hex_key(key));
     }
-    std::fs::write(path, out).map_err(KayaError::from)
+
+    let mut tmp_name = path.as_os_str().to_owned();
+    tmp_name.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp_name);
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp).map_err(KayaError::from)?;
+    file.write_all(out.as_bytes()).map_err(KayaError::from)?;
+    file.sync_all().map_err(KayaError::from)?;
+    drop(file);
+    std::fs::rename(&tmp, path).map_err(KayaError::from)
 }
 
 fn parse_keyring(text: &str) -> std::result::Result<Keyring, String> {
@@ -858,6 +880,23 @@ mod tests {
         assert_eq!(loaded.key_ids(), vec![0, 1]);
         assert_eq!(*loaded.get(0).unwrap(), test_key());
         assert_eq!(*loaded.get(1).unwrap(), other_key());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keyring_file_is_created_with_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keyring.txt");
+        save_keyring_file(&path, &Keyring::new(0, test_key())).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "keyring must not be group/world readable"
+        );
+        // No stray .tmp file left behind after the rename.
+        assert!(!dir.path().join("keyring.txt.tmp").exists());
     }
 
     #[test]

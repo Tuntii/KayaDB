@@ -36,7 +36,7 @@ Restart the node with the keyring instead of the raw key file:
 
 `--encryption-key-file` and `--encryption-keyring-file` are mutually exclusive. Existing `KAYAENC1` files decrypt unchanged (they're implicitly key id 0); nothing is rewritten by this step alone.
 
-Protect `keyring.txt` the same way you would `key.bin`: file mode `0600`, not committed to version control, ideally sourced from a secrets manager.
+`kayactl encryption init`/`rotate` always create/rewrite `keyring.txt` atomically with mode `0600` (unix). Still protect it the same way you would `key.bin`: not committed to version control, ideally sourced from a secrets manager. If you ever hand-copy or hand-edit a keyring file, `chmod 600` it yourself — nothing on the read path checks or fixes permissions on an existing file.
 
 ## Rotate
 
