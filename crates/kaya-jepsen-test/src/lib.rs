@@ -63,9 +63,10 @@ pub use nemesis::{MemberSpec, Nemesis, NemesisConfig, NemesisType};
 pub use partition::PartitionTracker;
 pub use runner::{scenario_uses_partition, TestConfig, TestResult, TestRunner};
 pub use scenario::{
-    bank_scenario, multi_range_bank_scenario, rich_nemesis_scenario, scenario_registry,
-    smoke_scenario, t1_scenario, t2_scenario, t3_scenario, t4_scenario, t5_scenario, t6_scenario,
-    t7_scenario, Scenario, Topology, VerifyMode, WorkloadHook,
+    bank_scenario, multi_range_bank_move_scenario, multi_range_bank_scenario,
+    rich_nemesis_scenario, scenario_registry, smoke_scenario, t1_scenario, t2_scenario,
+    t3_scenario, t4_scenario, t5_scenario, t6_scenario, t7_scenario, Scenario, Topology,
+    VerifyMode, WorkloadHook,
 };
 pub use workload::{
     register_key, seed_bank_on_cluster, seed_bank_on_cluster_layout, Workload, WorkloadConfig,

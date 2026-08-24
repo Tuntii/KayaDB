@@ -22,18 +22,18 @@ use kaya_engine::CdcOp;
 use kaya_net::{
     decode_cdc_checkpoint_request, decode_cdc_poll_request, decode_hello_request,
     decode_key_payload, decode_member_payload, decode_merge_range_request,
-    decode_meta_epoch_payload, decode_promote_learner_payload, decode_put_payload,
-    decode_remove_member_payload, decode_scan_payload, decode_split_range_request,
-    decode_transfer_leader_request, decode_txn_id_payload, decode_txn_op_payload,
-    encode_cdc_poll_response, encode_error_payload, encode_hello_response,
+    decode_meta_epoch_payload, decode_move_range_request, decode_promote_learner_payload,
+    decode_put_payload, decode_remove_member_payload, decode_scan_payload,
+    decode_split_range_request, decode_transfer_leader_request, decode_txn_id_payload,
+    decode_txn_op_payload, encode_cdc_poll_response, encode_error_payload, encode_hello_response,
     encode_list_ranges_response, encode_range_moved_payload, encode_rebalance_plan_response,
     encode_scan_response, encode_txn_begin_response, encode_txn_commit_response,
     encode_value_payload, read_client_frame, send_envelopes, write_client_response, NodeRoster,
     CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE, CDC_EVENT_PUT, CDC_POLL_OPCODE, LIST_RANGES_OPCODE,
-    MERGE_RANGE_OPCODE, PROTO_VERSION, REBALANCE_PLAN_OPCODE, SPLIT_RANGE_OPCODE, STATUS_ERROR,
-    STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER, STATUS_OK, STATUS_RANGE_MOVED,
-    STATUS_TXN_CONFLICT, TRANSFER_LEADER_OPCODE, TXN_BEGIN_OPCODE, TXN_COMMIT_OPCODE,
-    TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
+    MERGE_RANGE_OPCODE, MOVE_RANGE_OPCODE, PROTO_VERSION, REBALANCE_PLAN_OPCODE,
+    SPLIT_RANGE_OPCODE, STATUS_ERROR, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND, STATUS_NOT_LEADER,
+    STATUS_OK, STATUS_RANGE_MOVED, STATUS_TXN_CONFLICT, TRANSFER_LEADER_OPCODE, TXN_BEGIN_OPCODE,
+    TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
 };
 use kaya_raft::{
     multi_raft_group_dir, ClusterMember, GroupId, NodeId, RaftConfig, RaftNode, StaticRangeTable,
@@ -495,7 +495,8 @@ async fn dispatch(
         };
     }
 
-    // Handle admin opcodes 7/8/18/19/20 (ADD/REMOVE/TRANSFER/PROMOTE/REBALANCE_PLAN)
+    // Handle admin opcodes 7/8/18/19/20/21
+    // (ADD/REMOVE/TRANSFER/PROMOTE/REBALANCE_PLAN/MOVE_RANGE)
     // with optional operator token enforcement. Supports backward-compat raw payloads
     // (no token configured) and ADMIN-prefixed payloads when clients present the
     // credential. If server has token set, must match.
@@ -504,6 +505,7 @@ async fn dispatch(
         || opcode == TRANSFER_LEADER_OPCODE
         || opcode == PROMOTE_LEARNER_OPCODE
         || opcode == REBALANCE_PLAN_OPCODE
+        || opcode == MOVE_RANGE_OPCODE
     {
         // Peel optional ADMIN prefix + token if present; otherwise treat payload as legacy raw.
         let (clean_payload, presented) =
@@ -610,6 +612,18 @@ async fn dispatch(
                     None,
                 ),
             };
+        } else if opcode == MOVE_RANGE_OPCODE {
+            let (status, body) = handle_move_range(
+                raft,
+                roster,
+                range_table,
+                split_rt,
+                propose_tx,
+                drain,
+                &clean_payload,
+            )
+            .await;
+            return outcome(status, body, operator_auth, None);
         } else if opcode == REBALANCE_PLAN_OPCODE {
             // Advisory only: range-count heuristic over current group leaders.
             // Empty body; does not migrate data or transfer leases.
@@ -1717,6 +1731,106 @@ async fn propose_promote_learner(
 }
 
 /// Send a proposal to the Raft loop and wait for it to be committed+applied.
+/// MOVE_RANGE (21) — live migrate cutover (#24).
+///
+/// Reassigns one range to `target_group` with a single committed `RangeMeta`
+/// entry (CAS on `meta_epoch`). Keys are **not** copied: every group in a
+/// process shares one engine, so the cutover changes routing only. Order is
+/// host target → quiesce source → commit cutover, so a post-cutover write
+/// always finds a hosted group and never overtakes a pre-cutover apply.
+async fn handle_move_range(
+    raft: &SharedRaftHost,
+    roster: &SharedRoster,
+    range_table: &SharedRangeTable,
+    split_rt: &SplitRuntime,
+    propose_tx: &mpsc::Sender<ProposeReq>,
+    drain: bool,
+    payload: &[u8],
+) -> (u16, Vec<u8>) {
+    let (range_start, target_group) = match decode_move_range_request(payload) {
+        Ok(v) => v,
+        Err(e) => return (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
+    };
+    if drain {
+        return (
+            STATUS_ERROR,
+            encode_error_payload("node is draining; refuse new range hosting"),
+        );
+    }
+    let roster_snapshot = roster.read().await.clone();
+    if !is_leader_of(raft, GroupId::ZERO) {
+        return (STATUS_NOT_LEADER, get_leader_hint(raft, &roster_snapshot));
+    }
+
+    let target = GroupId(target_group);
+    // Clone + mutate a snapshot; the write lock is needed by apply, and a
+    // concurrent meta change loses the CAS on apply.
+    let prepared = {
+        let t = range_table.read().await;
+        let base_epoch = t.meta_epoch();
+        let source = t
+            .ranges()
+            .iter()
+            .find(|r| r.start_key == range_start)
+            .map(|r| r.group_id);
+        let mut next = t.clone();
+        next.move_range(&range_start, target).map(|moved| {
+            let wire = vec![(
+                moved.range_id,
+                moved.epoch,
+                moved.group_id.0,
+                moved.start_key,
+                moved.end_key,
+            )];
+            (
+                source,
+                encode_range_meta_command(base_epoch, &next),
+                wire,
+                next.meta_epoch(),
+            )
+        })
+    };
+    let (source, cmd, wire, epoch) = match prepared {
+        Ok(v) => v,
+        Err(e) => return (STATUS_INVALID_ARGUMENT, encode_error_payload(&e)),
+    };
+
+    // Host the target before cutover so post-cutover writes find a group.
+    if let Err(e) = ensure_group_hosted(split_rt, target) {
+        return (STATUS_ERROR, encode_error_payload(&e));
+    }
+    // Catch-up barrier: flush what is already committed on the source group
+    // into the engine before ownership flips.
+    if let Some(source) = source {
+        quiesce_group(raft, &roster_snapshot, propose_tx, source).await;
+    }
+    let (status, body) =
+        propose_and_wait(raft, &roster_snapshot, propose_tx, GroupId::ZERO, cmd).await;
+    if status != STATUS_OK {
+        return (status, body);
+    }
+    (STATUS_OK, encode_list_ranges_response(epoch, &wire))
+}
+
+/// MOVE_RANGE catch-up barrier (#24): commit + apply an empty entry on `group_id`
+/// so every write already committed there is durable in the engine on this node
+/// before the ownership cutover lands.
+///
+/// Best-effort: when this node is not the leader of the source group the barrier
+/// is skipped (the cutover itself stays safe — the engine is shared, so no key
+/// moves; only cross-group read freshness relies on the barrier).
+async fn quiesce_group(
+    raft: &SharedRaftHost,
+    roster: &NodeRoster,
+    propose_tx: &mpsc::Sender<ProposeReq>,
+    group_id: GroupId,
+) {
+    if !is_leader_of(raft, group_id) {
+        return;
+    }
+    let _ = propose_and_wait(raft, roster, propose_tx, group_id, Vec::new()).await;
+}
+
 async fn propose_and_wait(
     raft: &SharedRaftHost,
     roster: &NodeRoster,

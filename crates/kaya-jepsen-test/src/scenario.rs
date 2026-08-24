@@ -294,7 +294,7 @@ pub fn bank_scenario() -> Scenario {
 /// Static ranges `[a,m)→g1` / `[m,z)→g2` with multi-range account keys so SI
 /// transfers frequently cross groups (sequential 2PC). Range ops soft-fail when
 /// the meta table is already split/merged; kill/partition stress leadership.
-/// Live MOVE_RANGE rebalance is out of scope (advisory plan only product-side).
+/// Live MOVE_RANGE rebalance has its own scenario ([`multi_range_bank_move_scenario`]).
 pub fn multi_range_bank_scenario() -> Scenario {
     Scenario {
         id: "bank-mr",
@@ -328,6 +328,46 @@ pub fn multi_range_bank_scenario() -> Scenario {
     }
 }
 
+/// Multi-range bank under live MOVE_RANGE + kill (#24 chaos gate).
+///
+/// **Documented subset of the nightly matrix:** move + kill only (no split /
+/// merge / partition), so the sum invariant isolates the cutover. `[m,z)` is
+/// flapped between its owning group and a fresh group while SI transfers run;
+/// a move whose target already owns the range soft-fails like split/merge.
+pub fn multi_range_bank_move_scenario() -> Scenario {
+    Scenario {
+        id: "bank-mr-move",
+        workload: WorkloadConfig {
+            workload_type: WorkloadType::Bank,
+            clients: 5,
+            duration: Duration::from_secs(90),
+            rate_limit: 0,
+            verify_max_ops: None,
+            bank_layout: BankLayout::MultiRange,
+        },
+        hooks: vec![],
+        duration_secs: 90,
+        verify: VerifyMode::BankSum,
+        topology: Topology::ThreeNodeMultiRange,
+        nemesis: Some(NemesisConfig {
+            nemesis_type: NemesisType::Composite(vec![
+                NemesisType::MoveRange {
+                    range_start: b"m".to_vec(),
+                    target_group: 3,
+                },
+                NemesisType::KillNode,
+                NemesisType::MoveRange {
+                    range_start: b"m".to_vec(),
+                    target_group: 2,
+                },
+            ]),
+            interval: Duration::from_secs(12),
+            duration: Duration::from_secs(6),
+            probability: 1.0,
+        }),
+    }
+}
+
 /// All registered scenarios (smoke + rich + T1–T7 + bank + multi-range bank).
 pub fn scenario_registry() -> Vec<Scenario> {
     vec![
@@ -342,6 +382,7 @@ pub fn scenario_registry() -> Vec<Scenario> {
         t7_scenario(),
         bank_scenario(),
         multi_range_bank_scenario(),
+        multi_range_bank_move_scenario(),
     ]
 }
 
@@ -355,13 +396,36 @@ mod tests {
     #[test]
     fn registry_contains_smoke_rich_t1_through_t7_and_bank() {
         let registry = scenario_registry();
-        assert_eq!(registry.len(), 11);
+        assert_eq!(registry.len(), 12);
         assert_eq!(registry[0].id, "smoke");
         assert_eq!(registry[1].id, "rich");
         assert_eq!(registry[2].id, "t1");
         assert_eq!(registry[8].id, "t7");
         assert_eq!(registry[9].id, "bank");
         assert_eq!(registry[10].id, "bank-mr");
+        assert_eq!(registry[11].id, "bank-mr-move");
+    }
+
+    /// #24: the move chaos gate is a documented subset — MOVE_RANGE + kill only.
+    #[test]
+    fn multi_range_bank_move_scenario_uses_move_range_nemesis() {
+        let s = multi_range_bank_move_scenario();
+        assert_eq!(s.id, "bank-mr-move");
+        assert_eq!(s.topology, Topology::ThreeNodeMultiRange);
+        assert_eq!(s.workload.bank_layout, BankLayout::MultiRange);
+        assert_eq!(s.verify, VerifyMode::BankSum);
+        let Some(NemesisType::Composite(types)) = s.nemesis.as_ref().map(|n| &n.nemesis_type)
+        else {
+            panic!("expected composite nemesis");
+        };
+        let moves = types
+            .iter()
+            .filter(|t| matches!(t, NemesisType::MoveRange { .. }))
+            .count();
+        assert_eq!(moves, 2, "move there and back");
+        assert!(types.iter().any(|t| matches!(t, NemesisType::KillNode)));
+        // Documented subset: no partition in this gate.
+        assert!(!scenario_uses_partition(s.nemesis.as_ref()));
     }
 
     #[test]

@@ -11,8 +11,8 @@
 //! ```
 
 use kaya_jepsen_test::{
-    multi_range_bank_scenario, ClusterController, Scenario, TestConfig, TestResult, TestRunner,
-    Topology, VerifyMode,
+    multi_range_bank_move_scenario, multi_range_bank_scenario, ClusterController, Scenario,
+    TestConfig, TestResult, TestRunner, Topology, VerifyMode,
 };
 use std::time::Duration;
 
@@ -106,6 +106,42 @@ async fn multi_range_bank_grand_matrix() {
         "[grand_matrix] bank-mr PASSED sum invariant partition_attempted={} applied={}",
         result.partition_attempted, result.partition_applied
     );
+}
+
+/// #24 chaos gate: multi-range bank sum under live MOVE_RANGE + kill.
+///
+/// **Documented subset** of the nightly matrix: move + kill only, so a sum
+/// violation points at the cutover rather than at split/merge/partition. The
+/// full move × split × merge × partition cross-product is not run — it is
+/// several times the wall-clock of `bank-mr` for no extra signal on #24.
+#[tokio::test]
+#[ignore = "grand matrix — nightly / --ignored; multi-range bank + MOVE_RANGE + kill"]
+async fn multi_range_bank_move_range_chaos() {
+    let scenario = scale_for_fast(multi_range_bank_move_scenario());
+    assert_eq!(scenario.id, "bank-mr-move");
+    assert_eq!(scenario.verify, VerifyMode::BankSum);
+    assert_eq!(scenario.topology, Topology::ThreeNodeMultiRange);
+
+    let mut result = run_once(&scenario).await;
+    for attempt in 1..=4 {
+        if result.passed {
+            break;
+        }
+        eprintln!(
+            "[grand_matrix] bank-mr-move retry {attempt}/4 (violations={:?})",
+            result.violations
+        );
+        unsafe { std::env::set_var("KAYA_JEPSEN_QUIET", "1") };
+        result = run_once(&scenario).await;
+        unsafe { std::env::remove_var("KAYA_JEPSEN_QUIET") };
+    }
+
+    assert!(
+        result.passed,
+        "bank-mr-move sum invariant failed under MOVE_RANGE + kill: {:?}",
+        result.violations
+    );
+    eprintln!("[grand_matrix] bank-mr-move PASSED sum invariant");
 }
 
 /// Quieter multi-range bank: concurrent SI + 2PC without process kill (sum only).

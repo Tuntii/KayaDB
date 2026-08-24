@@ -6,11 +6,12 @@ use kaya_core::{KayaError, Result};
 use kaya_net::{
     decode_cdc_poll_response, decode_error_payload, decode_hello_response,
     decode_list_ranges_response, decode_scan_response, decode_txn_begin_response,
-    decode_txn_commit_response, decode_value_payload, encode_cdc_checkpoint_request,
-    encode_cdc_poll_request, encode_client_auth_payload, encode_hello_request, encode_key_payload,
-    encode_meta_epoch_payload, encode_put_payload, encode_scan_payload, encode_split_range_request,
-    encode_txn_id_payload, encode_txn_op_payload, request_on_stream, CDC_CHECKPOINT_OPCODE,
-    CDC_EVENT_DELETE, CDC_EVENT_PUT, CDC_POLL_OPCODE, HELLO_OPCODE, LIST_RANGES_OPCODE,
+    decode_txn_commit_response, decode_value_payload, encode_admin_payload,
+    encode_cdc_checkpoint_request, encode_cdc_poll_request, encode_client_auth_payload,
+    encode_hello_request, encode_key_payload, encode_meta_epoch_payload, encode_move_range_request,
+    encode_put_payload, encode_scan_payload, encode_split_range_request, encode_txn_id_payload,
+    encode_txn_op_payload, request_on_stream, CDC_CHECKPOINT_OPCODE, CDC_EVENT_DELETE,
+    CDC_EVENT_PUT, CDC_POLL_OPCODE, HELLO_OPCODE, LIST_RANGES_OPCODE, MOVE_RANGE_OPCODE,
     PROTO_VERSION, SPLIT_RANGE_OPCODE, STATUS_INVALID_ARGUMENT, STATUS_NOT_FOUND,
     STATUS_NOT_LEADER, STATUS_OK, STATUS_RANGE_MOVED, STATUS_TXN_CONFLICT, TXN_BEGIN_OPCODE,
     TXN_COMMIT_OPCODE, TXN_OP_DELETE, TXN_OP_GET, TXN_OP_OPCODE, TXN_OP_PUT, TXN_ROLLBACK_OPCODE,
@@ -36,6 +37,8 @@ pub struct KayaClient {
     addr: SocketAddr,
     max_redirects: usize,
     client_token: Option<String>,
+    /// Operator credential for admin opcodes (MOVE_RANGE); ADMIN-framed when set.
+    operator_token: Option<String>,
     retry_policy: RetryPolicy,
     observer: Option<SharedObserver>,
     /// Reproducible jitter state for the retry policy.
@@ -150,6 +153,7 @@ impl KayaClient {
             addr,
             max_redirects: 3,
             client_token: None,
+            operator_token: None,
             retry_policy: RetryPolicy::default(),
             observer: None,
             backoff_seed: seed_from_addr(addr),
@@ -169,6 +173,7 @@ impl KayaClient {
             addr,
             max_redirects: 3,
             client_token: None,
+            operator_token: None,
             retry_policy: RetryPolicy::default(),
             observer: None,
             backoff_seed: seed_from_addr(addr),
@@ -198,6 +203,11 @@ impl KayaClient {
     /// Set the client token used for data-path operations (PUT/GET/DELETE/SCAN/STATS/TXN).
     pub fn set_client_token(&mut self, token: impl Into<String>) {
         self.client_token = Some(token.into());
+    }
+
+    /// Set the operator token used for admin operations (MOVE_RANGE).
+    pub fn set_operator_token(&mut self, token: impl Into<String>) {
+        self.operator_token = Some(token.into());
     }
 
     pub fn addr(&self) -> SocketAddr {
@@ -328,6 +338,34 @@ impl KayaClient {
             Err(KayaError::invalid_argument(
                 "range moved during split; cache refreshed",
             ))
+        } else {
+            let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
+            Err(KayaError::internal(msg))
+        }
+    }
+
+    /// Move the range starting at `range_start` to `target_group` (MOVE_RANGE, #24).
+    ///
+    /// Admin op on the leader of group 0; presents the operator token when one is
+    /// set. Ownership cuts over atomically; refreshes the local range cache.
+    pub async fn move_range(
+        &mut self,
+        range_start: &[u8],
+        target_group: u64,
+    ) -> Result<RangeCache> {
+        let inner = encode_move_range_request(range_start, target_group);
+        let payload = match self.operator_token.as_deref() {
+            Some(tok) => encode_admin_payload(MOVE_RANGE_OPCODE, &inner, Some(tok)),
+            None => inner,
+        };
+        let (status, body) = self.send_with_retry(MOVE_RANGE_OPCODE, &payload).await?;
+        if status == STATUS_OK {
+            let _ = decode_list_ranges_response(&body).map_err(KayaError::corruption)?;
+            self.list_ranges().await
+        } else if status == STATUS_INVALID_ARGUMENT {
+            let msg =
+                decode_error_payload(&body).unwrap_or_else(|_| "invalid argument".to_string());
+            Err(KayaError::invalid_argument(msg))
         } else {
             let msg = decode_error_payload(&body).unwrap_or_else(|_| "Unknown error".to_string());
             Err(KayaError::internal(msg))
@@ -1026,6 +1064,7 @@ mod tests {
             addr: "127.0.0.1:9".parse().unwrap(),
             max_redirects: 3,
             client_token: None,
+            operator_token: None,
             retry_policy: RetryPolicy::none(),
             observer: None,
             backoff_seed: 1,
@@ -1060,6 +1099,7 @@ mod tests {
             addr: "127.0.0.1:9".parse().unwrap(),
             max_redirects: 3,
             client_token: None,
+            operator_token: None,
             retry_policy: RetryPolicy::none(),
             observer: None,
             backoff_seed: 1,

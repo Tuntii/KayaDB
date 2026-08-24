@@ -1,4 +1,5 @@
-//! `kayactl range` — list / split / merge / rebalance-plan meta ranges (M21/M22).
+//! `kayactl range` — list / split / merge / move / rebalance-plan meta ranges
+//! (M21/M22 + live MOVE_RANGE #24).
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -7,9 +8,9 @@ use kaya_core::{KayaError, Result};
 use kaya_net::{
     decode_error_payload, decode_list_ranges_response, decode_rebalance_plan_response,
     encode_admin_payload, encode_client_auth_payload, encode_merge_range_request,
-    encode_split_range_request, roundtrip, LIST_RANGES_OPCODE, MERGE_RANGE_OPCODE,
-    REBALANCE_PLAN_OPCODE, SPLIT_RANGE_OPCODE, STATUS_INVALID_ARGUMENT, STATUS_NOT_LEADER,
-    STATUS_OK,
+    encode_move_range_request, encode_split_range_request, roundtrip, LIST_RANGES_OPCODE,
+    MERGE_RANGE_OPCODE, MOVE_RANGE_OPCODE, REBALANCE_PLAN_OPCODE, SPLIT_RANGE_OPCODE,
+    STATUS_INVALID_ARGUMENT, STATUS_NOT_LEADER, STATUS_OK,
 };
 
 use crate::cli::{block_on, json_string};
@@ -149,6 +150,47 @@ pub fn run_range(
                         "OK merge left_start={raw:?}; meta_epoch={meta_epoch} merged={}",
                         ranges.len()
                     );
+                    for (range_id, epoch, group_id, start, end) in &ranges {
+                        println!(
+                            "  range_id={range_id} epoch={epoch} group={group_id} [{:?}, {:?})",
+                            String::from_utf8_lossy(start),
+                            String::from_utf8_lossy(end),
+                        );
+                    }
+                }
+                Ok(())
+            })
+        }
+        "move" => {
+            let raw = args
+                .first()
+                .cloned()
+                .ok_or_else(|| KayaError::invalid_argument(move_usage()))?;
+            let target: u64 = args
+                .get(1)
+                .ok_or_else(|| KayaError::invalid_argument(move_usage()))?
+                .parse()
+                .map_err(|_| KayaError::invalid_argument("target group must be a u64"))?;
+            let range_start = parse_range_key(&raw)?;
+            let inner = encode_move_range_request(&range_start, target);
+            let payload = match &operator_token {
+                Some(tok) => encode_admin_payload(MOVE_RANGE_OPCODE, &inner, Some(tok.as_str())),
+                None => inner,
+            };
+            block_on(async {
+                let (status, body) =
+                    request_admin(&server_addrs, MOVE_RANGE_OPCODE, &payload, timeout).await?;
+                if status != STATUS_OK {
+                    return status_err(status, &body);
+                }
+                let (meta_epoch, ranges) =
+                    decode_list_ranges_response(&body).map_err(KayaError::corruption)?;
+                if json {
+                    println!(
+                        "{{\"ok\":true,\"meta_epoch\":{meta_epoch},\"target_group\":{target}}}"
+                    );
+                } else {
+                    println!("OK move start={raw:?} -> group={target}; meta_epoch={meta_epoch}");
                     for (range_id, epoch, group_id, start, end) in &ranges {
                         println!(
                             "  range_id={range_id} epoch={epoch} group={group_id} [{:?}, {:?})",
@@ -302,5 +344,9 @@ fn status_err(status: u16, body: &[u8]) -> Result<()> {
 }
 
 fn range_usage() -> &'static str {
-    "usage: kayactl --server <addr> [--operator-token <tok>] range <list|split|merge|rebalance-plan> ..."
+    "usage: kayactl --server <addr> [--operator-token <tok>] range <list|split|merge|move|rebalance-plan> ..."
+}
+
+fn move_usage() -> &'static str {
+    "usage: kayactl --server <addr> [--operator-token <tok>] range move <range-start> <target-group>"
 }

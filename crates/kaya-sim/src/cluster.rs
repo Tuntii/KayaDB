@@ -1443,6 +1443,143 @@ mod tests {
         assert_eq!(t.lookup(b"z"), Some(GroupId(1)));
     }
 
+    fn propose_move_range(
+        sim: &mut ClusterSim,
+        range_start: &[u8],
+        target: GroupId,
+    ) -> StaticRangeTable {
+        let leader = sim.current_leader().expect("leader");
+        let mut table = sim
+            .range_table(leader)
+            .cloned()
+            .unwrap_or_else(|| StaticRangeTable::single_group(GroupId::ZERO));
+        let base = table.meta_epoch();
+        table.move_range(range_start, target).expect("move");
+        let cmd = RaftCommand::RangeMeta {
+            base_epoch: base,
+            snapshot: table.encode(),
+        };
+        assert!(sim.propose(cmd.encode()).is_some());
+        table
+    }
+
+    /// Range table invariant: ordered, gapless, non-overlapping cover of the
+    /// keyspace — every key resolves to exactly one range (no duplicate owner).
+    fn assert_single_owner_cover(table: &StaticRangeTable, keys: &[Vec<u8>], label: &str) {
+        let ranges = table.ranges();
+        assert!(!ranges.is_empty(), "{label}: empty range table");
+        assert!(
+            ranges[0].start_key.is_empty(),
+            "{label}: keyspace not covered"
+        );
+        for pair in ranges.windows(2) {
+            assert_eq!(
+                pair[0].end_key, pair[1].start_key,
+                "{label}: gap/overlap between ranges"
+            );
+        }
+        assert!(
+            ranges[ranges.len() - 1].end_key.is_empty(),
+            "{label}: upper bound not open"
+        );
+        for k in keys {
+            let owners = ranges.iter().filter(|r| r.contains(k)).count();
+            assert_eq!(owners, 1, "{label}: key {k:?} has {owners} owners");
+        }
+    }
+
+    /// #24: MOVE_RANGE cutover loses and duplicates no user key when a node
+    /// crash-restarts at any point mid-migrate.
+    #[test]
+    fn move_range_no_lost_or_duplicated_keys_across_crash() {
+        let keys: Vec<Vec<u8>> = (0..8u8)
+            .map(|i| format!("{}{i}", if i % 2 == 0 { "a" } else { "n" }).into_bytes())
+            .collect();
+
+        for crash_at in 0..10u64 {
+            let mut sim = ClusterSim::new(3, 240 + crash_at, no_fault_config());
+            sim.run_ticks(60);
+            assert!(sim.current_leader().is_some(), "crash_at={crash_at}");
+
+            for k in &keys {
+                sim.propose_put(k, b"v1").expect("seed put");
+            }
+            sim.run_ticks(20);
+            propose_split_at(&mut sim, b"m"); // [,m)→g0  [m,)→g1
+            sim.run_ticks(30);
+
+            // Cut the right range over to a fresh group, then crash mid-migrate.
+            let expected = propose_move_range(&mut sim, b"m", GroupId(5));
+            sim.run_ticks(crash_at);
+            sim.crash_restart_range_meta(NodeId(2));
+            sim.run_ticks(80);
+
+            for id in (1u64..=3).map(NodeId) {
+                let t = sim
+                    .range_table(id)
+                    .unwrap_or_else(|| panic!("table node {} crash_at={crash_at}", id.0));
+                assert_single_owner_cover(t, &keys, &format!("node {} crash_at={crash_at}", id.0));
+                assert_eq!(
+                    t.meta_epoch(),
+                    expected.meta_epoch(),
+                    "node {} did not converge (crash_at={crash_at})",
+                    id.0
+                );
+                assert_eq!(
+                    t.lookup(b"n0"),
+                    Some(GroupId(5)),
+                    "node {} owner after cutover (crash_at={crash_at})",
+                    id.0
+                );
+                assert_eq!(t.lookup(b"a0"), Some(GroupId::ZERO));
+
+                // No key lost: the migrate never touches user data.
+                let sm = sim.state_machine(id).expect("state machine");
+                for k in &keys {
+                    assert_eq!(
+                        sm.get(k).map(Vec::as_slice),
+                        Some(b"v1".as_ref()),
+                        "node {} lost key {k:?} (crash_at={crash_at})",
+                        id.0
+                    );
+                }
+            }
+            assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+        }
+    }
+
+    /// Writes that land after the cutover route to the new owner and stay
+    /// readable; the pre-migrate values are untouched.
+    #[test]
+    fn move_range_preserves_writes_across_cutover() {
+        let mut sim = ClusterSim::new(3, 251, no_fault_config());
+        sim.run_ticks(60);
+        sim.propose_put(b"n-pre", b"before").unwrap();
+        sim.run_ticks(15);
+        propose_split_at(&mut sim, b"m");
+        sim.run_ticks(25);
+
+        let expected = propose_move_range(&mut sim, b"m", GroupId(4));
+        sim.propose_put(b"n-post", b"after").unwrap();
+        sim.run_ticks(60);
+
+        for id in (1u64..=3).map(NodeId) {
+            let t = sim.range_table(id).expect("table");
+            assert_eq!(t.meta_epoch(), expected.meta_epoch());
+            assert_eq!(t.lookup(b"n-post"), Some(GroupId(4)));
+            let sm = sim.state_machine(id).expect("sm");
+            assert_eq!(
+                sm.get(b"n-pre").map(Vec::as_slice),
+                Some(b"before".as_ref())
+            );
+            assert_eq!(
+                sm.get(b"n-post").map(Vec::as_slice),
+                Some(b"after".as_ref())
+            );
+        }
+        assert!(sim.violations().is_empty(), "{:?}", sim.violations());
+    }
+
     /// #25: snapshot payload carries the range table to a lagging follower.
     #[test]
     fn range_meta_snapshot_catches_up_follower() {
