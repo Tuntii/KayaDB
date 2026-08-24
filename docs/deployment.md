@@ -59,6 +59,7 @@ When running `kayadb-server` directly or in containers:
 | `--metrics-addr` / `--no-metrics` | Prometheus HTTP `/metrics` (default `127.0.0.1:9090`) |
 | `--tls-cert`, `--tls-key`, `--tls-ca` | Native TLS (feature build) |
 | `--max-client-connections` / `KAYA_MAX_CLIENT_CONNECTIONS` | Cap concurrent client connections (default 1024); excess connections wait in the TCP backlog |
+| `--max-clock-offset-micros` / `KAYA_MAX_CLOCK_OFFSET_MICROS` | HLC uncertainty bound in microseconds (default 500000 = 500ms); only meaningful when HLC commit timestamps are in use (multi-group ranges). See `docs/runbooks/hlc-clock-skew.md` |
 
 **Health checks:** opcode 5 (HEALTH) stays open when client token is configured — use for liveness probes.
 

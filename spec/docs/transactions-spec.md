@@ -389,18 +389,50 @@ unchanged. When staged mutations map to more than one Raft group, the server
 coordinator runs 2PC; single-group commits still use type-4 `TxnCommit`. No
 client API or wire break for cross-range transactions.
 
-### 17.7 HLC commit timestamps and uncertainty (minimal)
+### 17.7 HLC commit timestamps and uncertainty (#27)
 
 Multi-group ClusterNode auto-enables `EngineConfig.use_hlc`. Commit sequences
 are HLC-packed as `(physical_ms << 16) | logical` (see `multi-raft-spec.md` §8
 and `kaya_core::Hlc`).
 
-**Uncertainty interval (v1):** there is no `max_offset_ms` wait or clamp on the
-client or coordinator. Nodes trust the HLC merge rule
-(`max(local, wall, remote)`). A full Cockroach-style uncertainty interval
-(wait out max clock offset, or retry reads when a version falls inside the
-uncertainty window) is deferred; operators should keep NTP skew small relative
-to the intended SI freshness window. When implemented, the clamp would live on
-the engine HLC tick path (`prepare_hlc_write_sequence`) and/or the read path.
+**Uncertainty bound.** `EngineConfig.max_clock_offset_micros`
+(`ClusterConfig.max_clock_offset_micros`, CLI `--max-clock-offset-micros`, env
+`KAYA_MAX_CLOCK_OFFSET_MICROS`) bounds how far a remote HLC observation's
+physical component may lead this node's own wall clock. Default 500ms,
+matching CockroachDB's `--max-offset`.
+
+**Reject on ingest.** `Engine::sync_clock` (the entry point for merging a
+remote HLC sample) uses `Hlc::checked_update` instead of the plain
+unconditional `update`: a remote physical time more than the bound ahead of
+local wall-clock time is rejected outright (`KayaError::ClockSkew`) and does
+**not** mutate the local clock. This is the "reject when skew exceeds bound"
+half of the design — a single skewed or misbehaving peer cannot drag this
+node's clock arbitrarily far into the future.
+
+**Wait-before-serve on the write path.** After `checked_update` accepts a
+remote sample within the bound, the local HLC's physical component can
+legitimately lead real wall-clock time by up to the bound (e.g. a peer whose
+clock genuinely runs a bit fast). `prepare_hlc_write_sequence` — the tick
+path every `put`/`delete` goes through when `use_hlc` is set — detects this
+lead (`Hlc::lead_over_wall_ms`) and sleeps it out, capped at the bound,
+*before* the WAL append/memtable insert that would make the write (and its
+commit_ts) durable and visible. A commit_ts is therefore never exposed to a
+reader before the wall clock has actually caught up to it. This is a no-op
+(zero wait) in the common case of a single node or already-synced clocks.
+
+Net effect: the uncertainty interval is enforced both ways — a sample too far
+ahead is rejected at the source, and a sample within bound only delays local
+exposure rather than being trusted immediately.
+
+**Out of scope for #27:** propagating HLC samples over the wire between
+peers (no `sync_clock` caller exists yet outside tests — see
+`multi-raft-spec.md` §8/§10) and a read-side uncertainty retry (CockroachDB's
+"restart the read at a higher timestamp" for a version observed inside the
+uncertainty window of a snapshot read). The write-path wait above covers the
+snapshot-anomaly risk from the write side; the read-side symmetric case is a
+follow-on once cross-node HLC gossip exists.
+
+See `docs/runbooks/hlc-clock-skew.md` for operator guidance when skew
+exceeds the bound.
 
 Formal sketch: `spec/specs/txn/TwoPhaseCommit.tla` (TLC-checkable small model).

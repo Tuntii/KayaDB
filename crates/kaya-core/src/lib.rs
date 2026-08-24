@@ -7,7 +7,7 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 
 pub use histogram::{LatencyHistogram, LATENCY_BUCKET_BOUNDS_US};
-pub use hlc::Hlc;
+pub use hlc::{ClockSkewExceeded, Hlc};
 pub use probe_markers::{
     emit_probe_marker, set_probe_marker_callback, set_probe_span_callback, ProbeMarkerPhase,
     ProbeMarkerSite,
@@ -26,6 +26,8 @@ pub const DEFAULT_MEMTABLE_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_SSTABLE_BLOCK_TARGET_BYTES: usize = 32 * 1024;
 pub const DEFAULT_SSTABLE_BLOOM_BITS_PER_KEY: u32 = 10;
 pub const DEFAULT_SSTABLE_BLOCK_CACHE_CAPACITY: usize = 64;
+/// HLC uncertainty bound default (500ms), matching CockroachDB's `--max-offset`.
+pub const DEFAULT_MAX_CLOCK_OFFSET_MICROS: u64 = 500_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KayaError {
@@ -53,6 +55,10 @@ pub enum KayaError {
     InvariantViolation { id: String, message: String },
     #[error("internal error: {message}")]
     Internal { message: String },
+    /// A remote HLC observation exceeded the configured uncertainty bound
+    /// (`EngineConfig::max_clock_offset_micros`); see `kaya_core::hlc` (#27).
+    #[error("clock skew exceeded: {message}")]
+    ClockSkew { message: String },
 }
 
 impl KayaError {
@@ -82,6 +88,7 @@ impl KayaError {
             Self::InvariantViolation { .. } => 5,
             Self::LockConflict => 6,
             Self::TxnConflict => 7,
+            Self::ClockSkew { .. } => 8,
             Self::Io { .. } | Self::DiskFull | Self::FsyncFailed | Self::Internal { .. } => 1,
         }
     }
@@ -115,6 +122,11 @@ impl KayaError {
             Self::UnsupportedVersion { .. } => Some(
                 "This binary is older than the on-disk format. Upgrade kayadb to a version \
                  that supports this format, or restore a compatible backup.",
+            ),
+            Self::ClockSkew { .. } => Some(
+                "Check NTP/chrony sync on this node and its peers. Raise \
+                 --max-clock-offset-micros only after confirming the skew is transient; a \
+                 sustained large offset needs a clock fix, not a wider bound.",
             ),
             _ => None,
         }
@@ -395,6 +407,15 @@ pub struct EngineConfig {
     /// When true, assign commit sequences from a hybrid logical clock (HLC) packed as
     /// `(physical_ms << 16) | logical`. When false (default), use plain monotonic sequences.
     pub use_hlc: bool,
+    /// HLC uncertainty bound in microseconds (only meaningful when `use_hlc`
+    /// is true). A remote HLC sample (`Engine::sync_clock`) whose physical
+    /// component is more than this far ahead of local wall-clock time is
+    /// rejected rather than merged. Also caps the wait a write applies
+    /// before exposing a commit_ts whose physical component was pulled
+    /// ahead by a legitimately-skewed-but-within-bound remote sample. See
+    /// `spec/docs/transactions-spec.md` §17.7. Default 500ms (500_000us),
+    /// matching CockroachDB's `--max-offset` default.
+    pub max_clock_offset_micros: u64,
 }
 
 impl Default for EngineConfig {
@@ -410,6 +431,7 @@ impl Default for EngineConfig {
             disable_locking: false,
             enable_cdc: true,
             use_hlc: false,
+            max_clock_offset_micros: DEFAULT_MAX_CLOCK_OFFSET_MICROS,
         }
     }
 }

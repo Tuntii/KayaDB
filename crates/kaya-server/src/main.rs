@@ -199,6 +199,17 @@ fn run() -> Result<(), String> {
         })
         .transpose()?;
 
+    // --max-clock-offset-micros <n> / KAYA_MAX_CLOCK_OFFSET_MICROS — HLC uncertainty bound (#27).
+    // Only takes effect when HLC commit timestamps are in use (multi-group ranges, or
+    // ClusterConfig::with_use_hlc). See spec/docs/transactions-spec.md §17.7.
+    let max_clock_offset_micros = take_value(&mut args, "--max-clock-offset-micros")
+        .or_else(|| env::var("KAYA_MAX_CLOCK_OFFSET_MICROS").ok())
+        .map(|s| {
+            s.parse::<u64>()
+                .map_err(|e| format!("--max-clock-offset-micros: {e}"))
+        })
+        .transpose()?;
+
     let operator_token =
         take_value(&mut args, "--operator-token").or_else(|| env::var("KAYA_OPERATOR_TOKEN").ok());
 
@@ -303,6 +314,9 @@ fn run() -> Result<(), String> {
     }
     if let Some(max) = max_client_connections {
         config = config.with_max_client_connections(max);
+    }
+    if let Some(micros) = max_clock_offset_micros {
+        config = config.with_max_clock_offset_micros(micros);
     }
 
     #[cfg(feature = "ebpf")]

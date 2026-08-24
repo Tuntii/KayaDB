@@ -58,6 +58,7 @@
 * [Rolling restart](runbooks/rolling-restart.md)
 * [Backup & restore](runbooks/backup-restore.md)
 * [Detecting split-brain](runbooks/detecting-split-brain.md)
+* [HLC clock skew](runbooks/hlc-clock-skew.md)
 * [mTLS sidecar](runbooks/mtls-sidecar.md)
 
 ## Correctness & Testing

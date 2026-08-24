@@ -32,7 +32,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
-use kaya_core::{DurabilityConfig, DurabilityMode, EngineConfig, Result as KayaResult};
+use kaya_core::{
+    DurabilityConfig, DurabilityMode, EngineConfig, Result as KayaResult,
+    DEFAULT_MAX_CLOCK_OFFSET_MICROS,
+};
 use kaya_engine::Engine;
 use kaya_io::{DirEntry, Disk, EncryptedDisk, FileDisk, RelativePath};
 use kaya_net::{start_raft_listener, NodeRoster};
@@ -125,6 +128,10 @@ pub struct ClusterConfig {
     /// When true, engine commit sequences are assigned from a hybrid logical clock.
     /// Default false for back-compat; enabled automatically when multi-group ranges are configured.
     pub use_hlc: bool,
+    /// HLC uncertainty bound in microseconds, forwarded to `EngineConfig::max_clock_offset_micros`
+    /// (only meaningful when `use_hlc` is true). See `spec/docs/transactions-spec.md` §17.7 and
+    /// `docs/runbooks/hlc-clock-skew.md`. Default 500ms.
+    pub max_clock_offset_micros: u64,
     /// Static key-range -> Raft group routing. Default is single group 0 (whole keyspace).
     pub range_table: StaticRangeTable,
     /// When true, this node is draining for decommission: status JSON reports
@@ -188,6 +195,7 @@ impl ClusterConfig {
             #[cfg(feature = "otel")]
             otel_enabled: false,
             use_hlc: false,
+            max_clock_offset_micros: DEFAULT_MAX_CLOCK_OFFSET_MICROS,
             range_table: StaticRangeTable::single_group(GroupId::ZERO),
             drain: false,
             encryption_key: None,
@@ -307,6 +315,14 @@ impl ClusterConfig {
     /// Enable hybrid-logical-clock commit timestamps on the local engine.
     pub fn with_use_hlc(mut self) -> Self {
         self.use_hlc = true;
+        self
+    }
+
+    /// Set the HLC uncertainty bound (microseconds). A remote clock sample
+    /// more than this far ahead of local wall-clock time is rejected rather
+    /// than merged; see `spec/docs/transactions-spec.md` §17.7.
+    pub fn with_max_clock_offset_micros(mut self, micros: u64) -> Self {
+        self.max_clock_offset_micros = micros;
         self
     }
 
@@ -478,6 +494,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
                 ..DurabilityConfig::default()
             },
             use_hlc: config.use_hlc || multi_group,
+            max_clock_offset_micros: config.max_clock_offset_micros,
             ..EngineConfig::default()
         };
         #[cfg(feature = "ebpf")]
