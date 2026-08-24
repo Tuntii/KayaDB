@@ -156,11 +156,24 @@ Integration test: `test_multi_raft_static_ranges_put_get` (single-node, two rang
 
 - `update(now_ms, remote: Option<Hlc>)` — standard HLC merge
 - `tick(now_ms)` — local advance
+- `checked_update(now_ms, remote, max_offset_ms)` — like `update`, but rejects
+  (`ClockSkewExceeded`) a remote sample whose physical time is more than
+  `max_offset_ms` ahead of `now_ms` (#27 uncertainty bound)
+- `lead_over_wall_ms(now_ms)` — how far this clock's physical component
+  currently leads `now_ms`
 - `to_u64` / `from_u64` — pack as `(physical_ms << 16) | logical` for `commit_ts`
 
 When `EngineConfig.use_hlc` is true (or multi-group ClusterNode config), each
 `put`/`delete` ticks the HLC and calls `WalWriter::ensure_min_sequence` so the
 WAL sequence / commit_ts is HLC-derived and monotonic when wall time stalls.
+
+**Uncertainty interval (#27):** `EngineConfig.max_clock_offset_micros`
+(`ClusterConfig.max_clock_offset_micros` / `--max-clock-offset-micros` /
+`KAYA_MAX_CLOCK_OFFSET_MICROS`, default 500ms) bounds clock trust both ways —
+`Engine::sync_clock` rejects an out-of-bound remote sample via
+`checked_update`, and `prepare_hlc_write_sequence` waits out any in-bound lead
+before a write's commit_ts is written/exposed. See
+`spec/docs/transactions-spec.md` §17.7 and `docs/runbooks/hlc-clock-skew.md`.
 
 ---
 
@@ -193,7 +206,9 @@ STATS JSON includes `raft_groups` (count of hosted groups). HEALTH reports
 | RANGE_MOVED | No (M21) |
 | Dynamic splits / meta range | No (M21) |
 | Per-range Jepsen / 3×N chaos | No |
-| Live clock-skew nemesis | No |
+| HLC uncertainty bound (reject + wait-before-serve) | Yes (#27) |
+| Live clock-skew nemesis (wall-clock / HLC) | No — unit tests with injected clock only |
+| Cross-node HLC gossip (`sync_clock` wired to the wire) | No |
 | Full OTel context propagation | No (stub only) |
 
 ---

@@ -333,16 +333,36 @@ impl<D: Disk> Engine<D> {
     /// Advance the HLC with an optional remote sample and bump WAL sequence to match.
     ///
     /// Used to align local commit timestamps with a remote HLC observation.
-    pub async fn sync_clock(&mut self, hlc_u64: u64) {
+    ///
+    /// Uncertainty bound (#27): rejects with `KayaError::ClockSkew` a remote
+    /// sample whose physical component is more than
+    /// `EngineConfig::max_clock_offset_micros` ahead of local wall-clock
+    /// time, instead of silently pulling the local clock arbitrarily far
+    /// into the future. See `spec/docs/transactions-spec.md` §17.7.
+    pub async fn sync_clock(&mut self, hlc_u64: u64) -> Result<()> {
         let now_ms = wall_clock_ms();
         let remote = Hlc::from_u64(hlc_u64);
-        let ts = self.hlc.update(now_ms, Some(remote)).to_u64().max(1);
+        let max_offset_ms = self.config.max_clock_offset_micros / 1_000;
+        let merged = self
+            .hlc
+            .checked_update(now_ms, Some(remote), max_offset_ms)
+            .map_err(|e| KayaError::ClockSkew {
+                message: e.to_string(),
+            })?;
+        let ts = merged.to_u64().max(1);
         self.wal.ensure_min_sequence(ts).await;
+        Ok(())
     }
 
     /// When use_hlc, tick the local HLC and ensure the next WAL sequence equals the packed ts.
     ///
-    /// v1: no `max_offset_ms` uncertainty wait — see `kaya_core::hlc` module docs.
+    /// Uncertainty wait (#27): if the assigned physical component leads real
+    /// wall-clock time (a prior `sync_clock` merged in a remote sample
+    /// genuinely ahead, within the uncertainty bound), sleep out that lead —
+    /// capped at `max_clock_offset_micros` — before returning. This delays
+    /// the WAL append/memtable insert that follows, so a commit_ts is never
+    /// written or exposed before the wall clock has actually caught up to
+    /// it. Zero-cost in the common case (single node, or clocks in sync).
     pub(crate) async fn prepare_hlc_write_sequence(&mut self) {
         if !self.config.use_hlc {
             return;
@@ -350,6 +370,11 @@ impl<D: Disk> Engine<D> {
         let now_ms = wall_clock_ms();
         let ts = self.hlc.tick(now_ms).to_u64().max(1);
         self.wal.ensure_min_sequence(ts).await;
+        let max_offset_ms = self.config.max_clock_offset_micros / 1_000;
+        let lead_ms = self.hlc.lead_over_wall_ms(now_ms).min(max_offset_ms);
+        if lead_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(lead_ms)).await;
+        }
     }
 
     /// Current GC watermark (versions with seq < watermark may be dropped by compaction).
@@ -644,6 +669,7 @@ mod tests {
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
+            .enable_all()
             .build()
             .unwrap()
             .block_on(f)
@@ -2037,17 +2063,23 @@ mod tests {
             let disk = Arc::new(SimDisk::new());
             let config = EngineConfig {
                 use_hlc: true,
+                // Not exercising the uncertainty wait/bound here (see the
+                // dedicated `hlc_uncertainty_*` tests below) — disable it so
+                // an arbitrarily-far-future fixed physical component can be
+                // injected directly without tripping the wait or the bound.
+                max_clock_offset_micros: 0,
                 ..EngineConfig::default()
             };
             let mut engine = Engine::open(config, disk).await.unwrap();
             assert!(engine.use_hlc());
 
-            // Force a fixed physical component via sync_clock so wall stalls.
+            // Force a fixed physical component directly (bypassing sync_clock's
+            // uncertainty bound, which is not what this test exercises) so wall stalls.
             let base = Hlc {
                 physical_ms: 5_000_000_000_000,
                 logical: 0,
             };
-            engine.sync_clock(base.to_u64()).await;
+            engine.hlc = base;
 
             let w1 = engine
                 .put(b"a".to_vec(), b"1".to_vec(), strict_opts())
@@ -2087,6 +2119,125 @@ mod tests {
             assert_eq!(
                 engine.get(b"a", ReadOptions::default()).await.unwrap(),
                 None
+            );
+        });
+    }
+
+    // ── HLC uncertainty interval (#27) ──────────────────────────────────────
+
+    #[test]
+    fn sync_clock_accepts_remote_within_uncertainty_bound() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = EngineConfig {
+                use_hlc: true,
+                max_clock_offset_micros: 500_000, // 500ms, the default
+                ..EngineConfig::default()
+            };
+            let mut engine = Engine::open(config, disk).await.unwrap();
+            let now_ms = wall_clock_ms();
+            // 100ms ahead of real wall-clock time: within the 500ms bound.
+            let remote = Hlc {
+                physical_ms: now_ms + 100,
+                logical: 0,
+            };
+            assert!(engine.sync_clock(remote.to_u64()).await.is_ok());
+            assert!(engine.hlc().physical_ms >= now_ms + 100);
+        });
+    }
+
+    #[test]
+    fn sync_clock_rejects_remote_beyond_uncertainty_bound() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = EngineConfig {
+                use_hlc: true,
+                max_clock_offset_micros: 500_000, // 500ms bound
+                ..EngineConfig::default()
+            };
+            let mut engine = Engine::open(config, disk).await.unwrap();
+            let before = engine.hlc();
+            let now_ms = wall_clock_ms();
+            // 10s ahead of real wall-clock time: well beyond the 500ms bound.
+            let remote = Hlc {
+                physical_ms: now_ms + 10_000,
+                logical: 0,
+            };
+            let err = engine
+                .sync_clock(remote.to_u64())
+                .await
+                .expect_err("skew beyond bound must be rejected, not merged");
+            assert!(
+                matches!(err, KayaError::ClockSkew { .. }),
+                "unexpected error: {err:?}"
+            );
+            // A rejected sync_clock must not have mutated the engine's clock.
+            assert_eq!(engine.hlc(), before);
+        });
+    }
+
+    #[test]
+    fn hlc_uncertainty_wait_delays_commit_when_clock_leads_wall_clock() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = EngineConfig {
+                use_hlc: true,
+                max_clock_offset_micros: 500_000, // 500ms bound
+                ..EngineConfig::default()
+            };
+            let mut engine = Engine::open(config, disk).await.unwrap();
+
+            // Simulate receiving a remote HLC sample 80ms ahead of local wall
+            // clock (within bound) — e.g. a peer whose clock genuinely runs
+            // a bit fast.
+            let now_ms = wall_clock_ms();
+            let remote = Hlc {
+                physical_ms: now_ms + 80,
+                logical: 0,
+            };
+            engine.sync_clock(remote.to_u64()).await.unwrap();
+
+            // The next write ticks off this now-leading clock. Per the
+            // uncertainty wait, the write must not return until the wall
+            // clock has caught up to the assigned physical time — i.e. the
+            // commit_ts is not exposed to the caller before then.
+            let start = std::time::Instant::now();
+            let w = engine
+                .put(b"k".to_vec(), b"v".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            let elapsed = start.elapsed();
+
+            assert!(
+                elapsed >= std::time::Duration::from_millis(60),
+                "commit returned after only {elapsed:?}, expected to wait out most of the ~80ms lead"
+            );
+            let committed = Hlc::from_u64(w.sequence.get());
+            assert!(committed.physical_ms >= now_ms + 80);
+        });
+    }
+
+    #[test]
+    fn hlc_uncertainty_wait_is_zero_when_clock_not_leading() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let config = EngineConfig {
+                use_hlc: true,
+                ..EngineConfig::default()
+            };
+            let mut engine = Engine::open(config, disk).await.unwrap();
+
+            // No sync_clock call: the local clock never leads real wall-clock
+            // time, so writes must not incur any uncertainty wait.
+            let start = std::time::Instant::now();
+            engine
+                .put(b"k".to_vec(), b"v".to_vec(), strict_opts())
+                .await
+                .unwrap();
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_millis(50),
+                "unexpected uncertainty wait with no clock skew: {elapsed:?}"
             );
         });
     }

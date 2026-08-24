@@ -139,6 +139,7 @@ This is key-space isolation, not multi-tenancy (no quotas, tenant IDs, or resour
 | `--metrics-addr` / `--no-metrics` | Prometheus `/metrics` (default `127.0.0.1:9090`) |
 | `--tls-cert`, `--tls-key`, `--tls-ca` | Native TLS (feature build) |
 | `--max-client-connections` / `KAYA_MAX_CLIENT_CONNECTIONS` | Cap concurrent clients (default 1024) |
+| `--max-clock-offset-micros` / `KAYA_MAX_CLOCK_OFFSET_MICROS` | HLC uncertainty bound in microseconds (default 500000); see `docs/runbooks/hlc-clock-skew.md` |
 
 ---
 

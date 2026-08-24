@@ -4,14 +4,24 @@
 //! Physical time is milliseconds; logical is a 16-bit counter that advances
 //! when the wall clock stalls or when receiving a remote timestamp.
 //!
-//! # Uncertainty interval (v1 / M23)
+//! # Uncertainty interval (v1 / #27)
 //!
-//! There is **no** `max_offset_ms` wait or clamp on tick/update. The merge rule
-//! (`max(local, wall, remote)`) is trusted; operators should keep NTP skew well
-//! under the intended SI freshness window. A future Cockroach-style uncertainty
-//! interval (wait out max clock offset, or retry reads when `commit_ts` falls
-//! inside the uncertainty window) would clamp here and on the engine write
-//! path (`prepare_hlc_write_sequence`).
+//! Plain `update`/`tick` still trust the merge rule (`max(local, wall,
+//! remote)`) unconditionally; they are the low-level primitives and stay
+//! infallible. Callers who receive a remote HLC sample (e.g.
+//! `Engine::sync_clock`) should go through [`Hlc::checked_update`] instead,
+//! which rejects a remote physical time that is implausibly far ahead of the
+//! local wall clock (more than `max_offset_ms`, the configured uncertainty
+//! bound — see `EngineConfig::max_clock_offset_micros`) rather than silently
+//! pulling the local clock into the future.
+//!
+//! [`Hlc::lead_over_wall_ms`] reports how far a clock's physical component
+//! currently leads real wall-clock time (nonzero right after a remote sample
+//! genuinely ahead of local time was merged in, within the uncertainty
+//! bound). The engine write path (`prepare_hlc_write_sequence`) waits out
+//! that lead before a commit_ts derived from it is written/exposed, so a
+//! commit is never observable before the wall clock has caught up to it.
+//! See `spec/docs/transactions-spec.md` §17.7.
 
 /// Hybrid logical clock: physical milliseconds + logical counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
@@ -66,6 +76,40 @@ impl Hlc {
         self.update(now_ms, None)
     }
 
+    /// Merge a remote HLC sample like [`Hlc::update`], but reject it when its
+    /// physical component is more than `max_offset_ms` ahead of the local
+    /// wall clock `now_ms` — the configured uncertainty bound. Guards
+    /// against a single skewed or misbehaving peer dragging this node's
+    /// clock arbitrarily far into the future.
+    pub fn checked_update(
+        &mut self,
+        now_ms: u64,
+        remote: Option<Hlc>,
+        max_offset_ms: u64,
+    ) -> Result<Hlc, ClockSkewExceeded> {
+        if let Some(r) = remote {
+            if r.physical_ms > now_ms.saturating_add(max_offset_ms) {
+                return Err(ClockSkewExceeded {
+                    local_now_ms: now_ms,
+                    remote_physical_ms: r.physical_ms,
+                    max_offset_ms,
+                });
+            }
+        }
+        Ok(self.update(now_ms, remote))
+    }
+
+    /// How far this clock's physical component leads real wall-clock time
+    /// `now_ms`, in milliseconds. Zero in the common case; positive right
+    /// after a `checked_update`/`update` merged in a remote sample genuinely
+    /// ahead of local time (bounded by the uncertainty bound, since anything
+    /// further ahead is rejected by `checked_update`). Callers wait out this
+    /// lead before exposing a commit_ts derived from this clock, so it is
+    /// never observable before the wall clock has actually caught up to it.
+    pub fn lead_over_wall_ms(self, now_ms: u64) -> u64 {
+        self.physical_ms.saturating_sub(now_ms)
+    }
+
     /// Pack to `u64` for use as `commit_ts`: `(physical_ms << 16) | logical`.
     ///
     /// Physical milliseconds above `u64::MAX >> 16` are saturated so the shift
@@ -83,6 +127,31 @@ impl Hlc {
         }
     }
 }
+
+/// A remote HLC observation's physical component was more than the
+/// configured uncertainty bound ahead of the local wall clock, and was
+/// rejected by [`Hlc::checked_update`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockSkewExceeded {
+    pub local_now_ms: u64,
+    pub remote_physical_ms: u64,
+    pub max_offset_ms: u64,
+}
+
+impl core::fmt::Display for ClockSkewExceeded {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "remote clock offset {}ms exceeds max_clock_offset_ms={} (local wall clock {}ms, remote physical {}ms)",
+            self.remote_physical_ms.saturating_sub(self.local_now_ms),
+            self.max_offset_ms,
+            self.local_now_ms,
+            self.remote_physical_ms,
+        )
+    }
+}
+
+impl std::error::Error for ClockSkewExceeded {}
 
 #[cfg(test)]
 mod tests {
@@ -221,5 +290,90 @@ mod tests {
             logical: 0,
         };
         assert_eq!(h2.to_u64(), 1u64 << 16);
+    }
+
+    // ── uncertainty interval (#27) ──────────────────────────────────────────
+
+    #[test]
+    fn checked_update_accepts_remote_within_bound() {
+        let mut h = Hlc {
+            physical_ms: 1_000,
+            logical: 0,
+        };
+        let remote = Hlc {
+            physical_ms: 1_400, // 400ms ahead of local wall clock (1000)
+            logical: 0,
+        };
+        let t = h
+            .checked_update(1_000, Some(remote), 500)
+            .expect("within 500ms bound");
+        assert_eq!(t.physical_ms, 1_400);
+    }
+
+    #[test]
+    fn checked_update_rejects_remote_beyond_bound() {
+        let mut h = Hlc {
+            physical_ms: 1_000,
+            logical: 0,
+        };
+        let remote = Hlc {
+            physical_ms: 2_000, // 1000ms ahead of local wall clock (1000)
+            logical: 0,
+        };
+        let before = h;
+        let err = h
+            .checked_update(1_000, Some(remote), 500)
+            .expect_err("1000ms skew exceeds 500ms bound");
+        assert_eq!(err.local_now_ms, 1_000);
+        assert_eq!(err.remote_physical_ms, 2_000);
+        assert_eq!(err.max_offset_ms, 500);
+        // Rejected merge must not mutate the local clock.
+        assert_eq!(h, before);
+    }
+
+    #[test]
+    fn checked_update_boundary_is_inclusive() {
+        let mut h = Hlc::zero();
+        let remote = Hlc {
+            physical_ms: 1_500,
+            logical: 0,
+        };
+        // Exactly at the bound (1000 + 500 = 1500) is accepted.
+        assert!(h.checked_update(1_000, Some(remote), 500).is_ok());
+        let mut h2 = Hlc::zero();
+        let remote2 = Hlc {
+            physical_ms: 1_501,
+            logical: 0,
+        };
+        assert!(h2.checked_update(1_000, Some(remote2), 500).is_err());
+    }
+
+    #[test]
+    fn lead_over_wall_ms_zero_when_not_ahead() {
+        let h = Hlc {
+            physical_ms: 1_000,
+            logical: 0,
+        };
+        assert_eq!(h.lead_over_wall_ms(1_000), 0);
+        assert_eq!(h.lead_over_wall_ms(2_000), 0);
+    }
+
+    #[test]
+    fn lead_over_wall_ms_reports_skew_after_remote_merge() {
+        let mut h = Hlc {
+            physical_ms: 1_000,
+            logical: 0,
+        };
+        let remote = Hlc {
+            physical_ms: 1_300,
+            logical: 0,
+        };
+        let now_ms = 1_000;
+        h.checked_update(now_ms, Some(remote), 500).unwrap();
+        // Local clock is now 300ms ahead of the wall-clock sample that produced it.
+        assert_eq!(h.lead_over_wall_ms(now_ms), 300);
+        // Once real wall-clock time catches up, the lead shrinks to zero.
+        assert_eq!(h.lead_over_wall_ms(1_300), 0);
+        assert_eq!(h.lead_over_wall_ms(1_400), 0);
     }
 }

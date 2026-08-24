@@ -17,6 +17,8 @@ kaya-core.workspace = true
 kaya-io.workspace = true
 kaya-lsm.workspace = true
 kaya-wal.workspace = true
+# HLC uncertainty wait (#27): `tokio::time::sleep` on the write path.
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 tokio.workspace = true
