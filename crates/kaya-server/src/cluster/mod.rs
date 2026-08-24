@@ -133,9 +133,12 @@ pub struct ClusterConfig {
     /// (see `docs/runbooks/decommission-node.md`). New range hosting via
     /// SPLIT_RANGE is rejected on a draining node.
     pub drain: bool,
-    /// Optional AES-256-GCM encryption-at-rest key (32 bytes). When set, the
-    /// engine opens over [`EncryptedDisk`] wrapping [`FileDisk`].
-    pub encryption_key: Option<[u8; 32]>,
+    /// Optional AES-256-GCM encryption-at-rest keyring. When set, the engine
+    /// opens over [`EncryptedDisk`] wrapping [`FileDisk`]. A single-key ring
+    /// (id 0) reproduces the original v1 on-disk format unchanged; a rotated
+    /// ring (#28) adds a key id to new envelopes and keeps old keys available
+    /// to decrypt files not yet rewritten under the active key.
+    pub encryption_key: Option<kaya_io::Keyring>,
 }
 
 impl ClusterConfig {
@@ -192,9 +195,16 @@ impl ClusterConfig {
     }
 
     /// Enable AES-256-GCM encryption-at-rest for engine files (WAL/SST/manifest
-    /// via the Disk layer). Key must be exactly 32 bytes.
+    /// via the Disk layer) with a single non-rotating key (id 0).
     pub fn with_encryption_key(mut self, key: [u8; 32]) -> Self {
-        self.encryption_key = Some(key);
+        self.encryption_key = Some(kaya_io::Keyring::new(0, key));
+        self
+    }
+
+    /// Enable AES-256-GCM encryption-at-rest with a full keyring (#28 rotation:
+    /// active key seals writes, previous keys remain readable).
+    pub fn with_encryption_keyring(mut self, keyring: kaya_io::Keyring) -> Self {
+        self.encryption_key = Some(keyring);
         self
     }
 
@@ -485,7 +495,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
 
     let file_disk = FileDisk::new(engine_cfg.data_dir.clone());
     let disk = Arc::new(match config.encryption_key {
-        Some(key) => EngineDisk::Encrypted(EncryptedDisk::new(file_disk, key)),
+        Some(keyring) => EngineDisk::Encrypted(EncryptedDisk::with_keyring(file_disk, keyring)),
         None => EngineDisk::Plain(file_disk),
     });
     let mut engine = Engine::open(engine_cfg, disk)

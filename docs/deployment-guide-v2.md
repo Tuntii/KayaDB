@@ -75,9 +75,10 @@ Dashboard v1 is **not** authenticated. Do not expose it on the public internet.
 
 | Flag / env | Purpose |
 |---|---|
-| `--encryption-key-file PATH` / `KAYA_ENCRYPTION_KEY_FILE` | Path to **exactly 32 raw bytes** (AES-256). Wraps engine `Disk` with `EncryptedDisk` |
+| `--encryption-key-file PATH` / `KAYA_ENCRYPTION_KEY_FILE` | Path to **exactly 32 raw bytes** (AES-256), single non-rotating key. Wraps engine `Disk` with `EncryptedDisk` |
+| `--encryption-keyring-file PATH` / `KAYA_ENCRYPTION_KEYRING_FILE` | Path to a keyring (active + previous key ids) for online rotation (#28). Mutually exclusive with `--encryption-key-file`; managed via `kayactl encryption init/rotate/list/verify` |
 
-On-disk layout for sealed blobs: `KAYAENC1 | plain_len | nonce | ciphertext+tag`. v1 uses the same key as KEK and DEK; **online rotation is not implemented**.
+On-disk layout for sealed blobs: `KAYAENC1 | plain_len | nonce | ciphertext+tag` (legacy, implicit key id 0) or, once rotated, `KAYAENC2 | key_id | plain_len | nonce | ciphertext+tag`. See [security.md](security.md) §7.1 for the format and [key-rotation runbook](runbooks/key-rotation.md) for the rotation procedure.
 
 ```bash
 # Generate a key once; store offline / secret manager; mode 600
@@ -85,11 +86,15 @@ openssl rand -out /etc/kaya/encryption.key 32
 chmod 600 /etc/kaya/encryption.key
 
 ./kayadb-server ... --encryption-key-file /etc/kaya/encryption.key
+
+# Or, to support future rotation:
+kayactl encryption init --keyring /etc/kaya/keyring.txt --from-key-file /etc/kaya/encryption.key
+./kayadb-server ... --encryption-keyring-file /etc/kaya/keyring.txt
 ```
 
 Notes:
 
-- All nodes that open the same engine data must share the same key.
+- All nodes that open the same engine data must share the same key(s).
 - Enabling encryption on an existing plaintext `data_dir` is **not** a migration tool; start with a fresh directory or restore into an encrypted layout deliberately.
 - Raft peer state and non-engine files may still sit outside `EncryptedDisk`; combine with volume encryption for full disk coverage. See [security.md](security.md).
 
@@ -218,7 +223,7 @@ CI perf envelope (put/get + multi-key txn + multi-range 2PC smoke budgets): [BEN
 
 - Live range migrate / MOVE_RANGE with physical key movement
 - Parallel-commit 2PC stretch and durable global decision log
-- Online KEK/DEK rotation
+- Background re-encrypt after a key rotation (#28 ships an online dual-key read window; old files upgrade lazily on next write — see `docs/security.md` §7.1)
 - Full multi-tenancy beyond per-prefix ACL
 - Dashboard v2 (trace timeline, eBPF, range health UI)
 - Contractual latency SLA or north-star production claim before M25 exit proof

@@ -6,6 +6,7 @@ mod ebpf;
 mod ebpf_bpftrace;
 #[cfg(feature = "ebpf")]
 mod ebpf_correlate;
+mod encryption_cmd;
 mod index_cmd;
 mod inspect;
 mod local;
@@ -192,6 +193,11 @@ fn run() -> Result<()> {
     // ── index (local secondary indexes) ───────────────────────────────────────
     if args.first().map(String::as_str) == Some("index") {
         return index_cmd::run_index(args, data_dir, durability, json);
+    }
+
+    // ── encryption (keyring rotation, #28) ─────────────────────────────────────
+    if args.first().map(String::as_str) == Some("encryption") {
+        return encryption_cmd::run_encryption(args, data_dir, json);
     }
 
     // ── local engine mode ─────────────────────────────────────────────────────

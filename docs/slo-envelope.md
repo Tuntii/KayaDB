@@ -78,7 +78,7 @@ Because this is a correctness prototype, adopt a **conservative** error budget:
 - Values > 16 MiB, keys > 4 KiB, scans intended to return > 100 000 keys or > 64 MiB in one call.
 - More than `--max-client-connections` concurrent clients (excess is backpressured, not served).
 - Relaxed-durability writes where the durability SLO is expected to hold.
-- Full multi-tenant isolation and delivery-guaranteed audit export — see `docs/security.md` §7. Optional engine encryption (`--encryption-key-file`) and per-prefix ACL (`--acl-file`) are available (M24) but do not close multi-tenancy or key-rotation risk.
+- Full multi-tenant isolation and delivery-guaranteed audit export — see `docs/security.md` §7. Optional engine encryption (`--encryption-key-file` or, for rotation, `--encryption-keyring-file` / #28) and per-prefix ACL (`--acl-file`) are available (M24) but do not close multi-tenancy risk.
 - Live range migrate, parallel-commit 2PC, and contractual p99 SLAs — see [deployment-guide-v2.md](deployment-guide-v2.md) non-goals.
 
 ---

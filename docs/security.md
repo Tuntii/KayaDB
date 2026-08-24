@@ -359,13 +359,44 @@ M15 closed data-path authZ and structured audit; M24 closes engine encryption-at
 |---|---|---|---|
 | Full authZ for all client ops (GET/PUT/DELETE/SCAN/STATS) | ✅ Implemented when `--client-token` set | Configure `--client-token` / `KAYA_CLIENT_TOKEN`; combine with firewall + mTLS; HEALTH (op 5) remains open for probes | `CLIENT\x00` framing in `crates/kaya-net/src/codec.rs`; enforcement in `crates/kaya-server/src/cluster/client_ops.rs` (opcodes 1–4, 6) |
 | Structured audit logging (local JSONL) | ✅ Implemented | Enable `--audit-log` (default on when any token configured); rotate/archive `{data_dir}/audit.jsonl` | `crates/kaya-server/src/audit.rs` |
-| Data at rest encryption | ✅ Optional engine-level AES-GCM (M24) | Set `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE` (32-byte key); combine with volume encryption for Raft/non-Disk files; **key rotation deferred** (v1 single KEK=DEK) | `EncryptedDisk` in `crates/kaya-io/src/encrypted.rs`; server open path in `cluster/mod.rs` |
+| Data at rest encryption | ✅ Optional engine-level AES-GCM (M24) | Set `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE` (32-byte key, non-rotating) or `--encryption-keyring-file` / `KAYA_ENCRYPTION_KEYRING_FILE` for rotation (#28); combine with volume encryption for Raft/non-Disk files | `EncryptedDisk` / `Keyring` in `crates/kaya-io/src/encrypted.rs`; server open path in `cluster/mod.rs` |
 | Per-prefix ACL | ✅ Optional when `--acl-file` set (M24) | JSON `prefix → token`; longest-prefix on PUT/GET/DELETE/SCAN/TXN_OP; any-rule token on TXN_BEGIN/COMMIT/ROLLBACK + CDC_POLL/CHECKPOINT + SPLIT/MERGE; empty map denies all data/admin-range ops | `PrefixAcl` in `crates/kaya-server/src/acl.rs`; enforcement in `client_ops` |
 | Multi-tenant isolation | Partial via per-prefix ACL; full tenancy still accepted risk | Use `--acl-file` for key-space isolation, or one cluster per tenant + network segmentation; no tenant IDs, quotas, or resource accounting in engine/protocol | `acl.rs`; ROADMAP: full multi-tenancy out of M16–M25 scope |
-| Encryption key rotation (KEK/DEK) | Accepted risk (v1 deferred) | Rotate by re-encrypt offline or provision a new cluster; protect the 32-byte key file (`0600`, secrets manager) | Single-key `EncryptedDisk` path; rotation API not shipped |
+| Encryption key rotation (KEK/DEK) | ✅ Implemented (#28): online dual-key read window, no background rewrite | Use `kayactl encryption init/rotate/list/verify` against a `--encryption-keyring-file`; old keys stay readable until every file naturally rewrites under the active key (see §7.1 and `docs/runbooks/key-rotation.md`) | `Keyring` in `crates/kaya-io/src/encrypted.rs`; `crates/kayactl/src/encryption_cmd.rs` |
 | Client cert enforcement on every connection | Accepted risk (partial impl.) | Enable native TLS with CA (`require_client_cert: true` when `--tls-ca` set); or ghostunnel `--allow-cn` | `crates/kaya-server/src/main.rs`, `crates/kaya-net/src/transport.rs` |
 | Compliance-grade audit export to SIEM | ✅ Optional built-in UDP syslog sink | Set `--audit-syslog <host:port>` / `KAYA_AUDIT_SYSLOG` (RFC 5424 over UDP, requires `--audit-log`); for TCP/TLS transport or delivery guarantees, front with a local syslog agent (rsyslog/vector) | `SyslogSink` in `crates/kaya-server/src/audit.rs`; UDP best-effort, no on-wire encryption |
 | Hardened remote admin API | Accepted risk | Restrict `kayactl` to bastion/VPN; require `--operator-token` for membership and `--client-token` / ACL for data ops | `kayactl` over client protocol only |
+
+### 7.1 Encryption key rotation (#28): format and guarantees
+
+**Envelope format.** Each file `EncryptedDisk` manages carries a small header identifying which key sealed it:
+
+```text
+Legacy v1 (KAYAENC1, still readable, implicit key id 0):
+  magic(8)="KAYAENC1"  plain_len(u64 LE)  nonce(12)  ciphertext||tag
+
+v2 (KAYAENC2, written once a keyring has rotated):
+  magic(8)="KAYAENC2"  key_id(u32 LE)  plain_len(u64 LE)  nonce(12)  ciphertext||tag
+```
+
+`key_id` is bound into the AES-GCM AAD (with the magic and length), so an attacker cannot repoint a ciphertext at a different key id without failing authentication. A non-rotating deployment (single key, id 0) always writes the original `KAYAENC1` bytes — **zero on-disk format change** unless you actually rotate.
+
+**Keyring.** A keyring is a small text file (`active <id>` + one or more `key <id> <64-hex-char>` lines) holding the active key plus every previous-generation key still needed to decrypt old files. It supersedes the single raw-bytes `--encryption-key-file` for deployments that want rotation; the two flags are mutually exclusive on `kayadb-server`. `save_keyring_file` (used by `kayactl encryption init`/`rotate`) writes it atomically — a sibling `<path>.tmp` is created (mode `0600` on unix), fsynced, then renamed over the real path, so a crash mid-write can never leave a truncated/empty keyring on disk (`load_keyring_file` would refuse it and the node would fail to start, rather than silently losing key material) and the key bytes are never briefly world/group-readable. This matches the trust level of `--encryption-key-file`, whose loader does no permission check either — `kayactl` does not currently warn or refuse on a pre-existing world-readable keyring, so if you hand-edit or copy a keyring file in, `chmod 600` it yourself.
+
+**Read/write semantics (multi-key decrypt window).**
+- **Read path**: decrypts using whichever key id is named in the file's own header (0 for legacy files), looked up in the keyring. Any key still present in the ring — active or previous — can be read.
+- **Write path**: every mutating op (`write_at`/`append`/`truncate`) always re-seals the **whole file** under the currently active key, upgrading a legacy or older-generation file to the new key and format as a side effect.
+
+**Rotation procedure (no data loss).**
+1. `kayactl encryption init --keyring <path>` once, to bootstrap id 0 (fresh key, or `--from-key-file <old-path>` to migrate an existing single-key deployment without re-encrypting anything).
+2. Point the server at the keyring: `--encryption-keyring-file <path>` (or `KAYA_ENCRYPTION_KEYRING_FILE`) instead of `--encryption-key-file`.
+3. `kayactl encryption rotate --keyring <path>` generates a new key, makes it active, and keeps every previous key in the ring. Distribute the updated keyring file to the node(s) and restart (or have the node re-read it, once hot-reload exists — today this is a restart).
+4. `kayactl encryption verify --data <dir> --keyring <path>` walks the data directory and confirms every sealed file still decrypts with the ring in hand — safe to run before/after a rotation, and it never prints key material.
+5. `kayactl encryption list --keyring <path>` reports the active id and all retained ids (ids only, never key bytes).
+
+**Crash safety.** Rotation only ever *replaces the keyring file* and *appends/rewrites engine files under a lock already required for durability* — it does not introduce a new crash window. A crash mid-write leaves that one file however the engine's existing WAL/fsync discipline already tolerates (the encryption layer seals/unseals whole-file contents inside the same `write_at`/`append`/`truncate` calls the engine was already crash-tested against); a half-written keyring file is caught at load (`load_keyring_file` rejects a keyring whose `active` id has no matching `key` line) and the node refuses to start rather than silently losing rotation state.
+
+**Accepted limitation (documented, not shipped).** There is no background re-encrypt daemon. Rotation opens an **online dual-key read window**: old and new files coexist and are both readable indefinitely, and files upgrade to the active key lazily (the next time something writes them — WAL segment rolls, compaction, manifest updates). To force full migration off a retired key, trigger normal write traffic/compaction (or `kayactl backup` + restore into a fresh directory) until `kayactl encryption verify --keyring <ring-without-the-old-key>` reports zero failures, then remove that key line from the keyring. This is called out explicitly, per the issue's acceptance criteria, as the intentional v1 scope: a background rewrite is a valid future enhancement, not required for correctness or data-loss safety today.
 
 **No known correctness gaps** are listed as accepted risk. Remaining items are deployment hardening, not storage or consensus defects.
 
