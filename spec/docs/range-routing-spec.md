@@ -107,8 +107,10 @@ longer referenced by any range. Reclaim runs as part of the normal drain pass
 (`cluster::replication::drain_and_apply`, driven by the tick loop — no
 separate background task) and unhosts + deletes the group's on-disk data.
 
-**Candidate set:** `hosted_group_ids \ referenced_group_ids`, always excluding
-group 0 (meta / membership group, always live).
+**Candidate set:** `{ gid ∈ hosted_group_ids : gid != 0, gid < next_group_id,
+gid ∉ referenced_group_ids }`, where `next_group_id` and `referenced_group_ids`
+are read from the range table under one lock (`referenced_group_ids()` in
+`replication.rs`) so both reflect the same snapshot.
 
 **Invariants:**
 
@@ -119,12 +121,33 @@ group 0 (meta / membership group, always live).
    reclaim pass both run under `drain_and_apply`, so a group is either fully
    referenced or fully dropped from every reclaim pass's point of view — no
    window where a range still resolves to a group mid-reclaim).
-2. **Never touch group 0.**
-3. **Drain gate:** a candidate is only reclaimed once it is quiescent
+2. **Never reclaim a group pre-hosted for a not-yet-committed split.**
+   `SPLIT_RANGE` calls `ensure_group_hosted` for its new group *before*
+   proposing the `RangeMeta` command that references it, so the leader can
+   serve that group the instant the split succeeds. In the window between
+   that call and the command committing, the new group is hosted,
+   unreferenced (the old table is still live), and trivially "drained" (a
+   fresh node has `commit_index == last_applied == 0`) — indistinguishable
+   from a real orphan by invariants 1/3 alone. `next_group_id` only advances
+   when a `RangeMeta` commits, so a not-yet-committed split's group id always
+   equals the table's current `peek_next_group_id()`; excluding
+   `gid >= next_group_id` from the candidate set closes the race (regression
+   test: `reclaim_skips_group_pre_hosted_for_in_flight_split`).
+   **Known bounded leak:** if that split's propose never commits (leader
+   steps down, channel drop before commit), its pre-hosted group stays
+   hosted — this rule can never reclaim it, since nothing advances
+   `next_group_id` past an id that was never committed — until the *next
+   successful* split on this table bumps the counter past it, at which point
+   it becomes an ordinary referenced-check candidate (invariant 1). This
+   mirrors the pre-existing "orphan stays hosted until reclaim runs" leak
+   window merge already had; it is not a regression, and is bounded by the
+   next successful split rather than unbounded.
+3. **Never touch group 0.**
+4. **Drain gate:** a candidate is only reclaimed once it is quiescent
    (`RaftStatus.commit_index == RaftStatus.last_applied` — nothing
    replicated-but-unapplied left in flight for that group). A candidate that
    isn't drained yet is skipped and retried on the next pass.
-4. **Idempotent / crash-safe:** reclaim (a) removes the group from
+5. **Idempotent / crash-safe:** reclaim (a) removes the group from
    `MultiRaftHost`, (b) drops its `RaftPersister` / `RaftApplyIndex` map
    entries, (c) `remove_dir_all`s `{data_dir}/groups/{id}`, then (d)
    increments the reclaim counter. A crash between any of these steps is

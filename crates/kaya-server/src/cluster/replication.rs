@@ -160,6 +160,20 @@ pub(crate) async fn drain_and_apply(
 ///   set is `hosted \ referenced`, so a group is only ever a candidate once a
 ///   committed `RangeMeta` snapshot has already dropped it (see
 ///   [`apply_range_meta_entry`]).
+/// - **Never reclaims `gid >= range_table.peek_next_group_id()`.** SPLIT_RANGE
+///   calls `ensure_group_hosted` for its new group *before* the `RangeMeta`
+///   command commits (so the leader can serve it the instant split succeeds).
+///   In that window the group is hosted, unreferenced (the old table is still
+///   live), and trivially "drained" (a fresh node has `commit_index ==
+///   last_applied == 0`) — exactly what an orphan looks like. `next_group_id`
+///   only advances when a `RangeMeta` commits, so a not-yet-committed split's
+///   group id always equals the table's current `peek_next_group_id()`; this
+///   bound is read under the same lock as `referenced` so the two agree.
+///   Known bounded leak: if that split's propose never commits (leader steps
+///   down, channel drop), its pre-hosted group stays hosted — un-reclaimable
+///   by this rule, since nothing ever advances `next_group_id` past it — until
+///   the next *successful* split on this range bumps the counter past it, at
+///   which point it becomes a normal (referenced-check) candidate.
 /// - Only reclaims a group once it is drained (`commit_index == last_applied`):
 ///   no unapplied entries left in flight for that group.
 /// - Idempotent / crash-safe: a group already removed from the host (previous
@@ -173,13 +187,13 @@ async fn reclaim_orphan_groups(
     range_table: &SharedRangeTable,
     reclaimed_total: &SharedReclaimStats,
 ) {
-    let referenced = referenced_group_ids(range_table).await;
+    let (referenced, next_group_id) = referenced_group_ids(range_table).await;
 
     let candidates: Vec<kaya_raft::GroupId> = {
         let guard = split_rt.raft.lock().unwrap();
         guard
             .group_ids()
-            .filter(|gid| gid.0 != 0 && !referenced.contains(&gid.0))
+            .filter(|gid| gid.0 != 0 && gid.0 < next_group_id && !referenced.contains(&gid.0))
             .collect()
     };
 
@@ -221,29 +235,33 @@ async fn reclaim_orphan_groups(
     }
 }
 
-/// Group ids the range table currently routes to.
-async fn referenced_group_ids(range_table: &SharedRangeTable) -> std::collections::HashSet<u64> {
-    range_table
-        .read()
-        .await
-        .group_ids()
-        .into_iter()
-        .map(|g| g.0)
-        .collect()
+/// Group ids the range table currently routes to, plus the next id it would
+/// assign to a not-yet-committed split. Read together under one lock so a
+/// caller filtering on both sees a consistent snapshot (issue #30).
+async fn referenced_group_ids(
+    range_table: &SharedRangeTable,
+) -> (std::collections::HashSet<u64>, u64) {
+    let t = range_table.read().await;
+    (
+        t.group_ids().into_iter().map(|g| g.0).collect(),
+        t.peek_next_group_id().0,
+    )
 }
 
 /// Live count of hosted groups no longer referenced by the range table
 /// (metrics gauge; issue #30). Not authoritative for the drain gate — a
-/// group can appear here briefly before it is safe to reclaim.
+/// group can appear here briefly before it is safe to reclaim. Excludes a
+/// pre-hosted, not-yet-committed split's group (see `reclaim_orphan_groups`)
+/// so the gauge does not flap on an in-flight split.
 pub(crate) async fn orphan_group_count(
     host: &SharedRaftHost,
     range_table: &SharedRangeTable,
 ) -> u64 {
-    let referenced = referenced_group_ids(range_table).await;
+    let (referenced, next_group_id) = referenced_group_ids(range_table).await;
     let guard = host.lock().unwrap();
     guard
         .group_ids()
-        .filter(|gid| gid.0 != 0 && !referenced.contains(&gid.0))
+        .filter(|gid| gid.0 != 0 && gid.0 < next_group_id && !referenced.contains(&gid.0))
         .count() as u64
 }
 
@@ -350,5 +368,90 @@ async fn apply_command(
             .map(|_| None)
             .map_err(|e| e.to_string()),
         Err(e) => Err(format!("corrupt command in log: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kaya_raft::{GroupId, MultiRaftHost, NodeId, StaticRangeTable};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::RwLock;
+
+    fn test_split_runtime(host: MultiRaftHost) -> SplitRuntime {
+        SplitRuntime {
+            raft: Arc::new(Mutex::new(host)),
+            persisters: Arc::new(Mutex::new(HashMap::new())),
+            apply_indexes: Arc::new(Mutex::new(HashMap::new())),
+            data_dir: std::env::temp_dir().join(format!(
+                "kaya-reclaim-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+            node_id: NodeId(1),
+            peers: vec![],
+            election_timeout_ticks: 10,
+            heartbeat_interval_ticks: 2,
+        }
+    }
+
+    /// Review fix (#51): SPLIT_RANGE pre-hosts its new group before the
+    /// RangeMeta command commits. That group's id always equals the table's
+    /// `peek_next_group_id()` until the split lands, so it must survive a
+    /// reclaim pass even though it looks unreferenced + trivially drained
+    /// (fresh node: commit_index == last_applied == 0) — reclaiming it would
+    /// strand the in-flight split.
+    #[tokio::test]
+    async fn reclaim_skips_group_pre_hosted_for_in_flight_split() {
+        let mut host = MultiRaftHost::new();
+        host.insert_single_node(GroupId::ZERO, NodeId(1));
+        let next_id = GroupId(1);
+        host.insert_single_node(next_id, NodeId(1)); // pre-hosted; split not committed
+
+        let split_rt = test_split_runtime(host);
+        let range_table: SharedRangeTable =
+            Arc::new(RwLock::new(StaticRangeTable::single_group(GroupId::ZERO)));
+        assert_eq!(
+            range_table.read().await.peek_next_group_id(),
+            next_id,
+            "test setup: pre-hosted group must equal the table's next id"
+        );
+        let reclaimed_total: SharedReclaimStats = Arc::new(AtomicU64::new(0));
+
+        reclaim_orphan_groups(&split_rt, &range_table, &reclaimed_total).await;
+
+        assert!(
+            split_rt.raft.lock().unwrap().get(next_id).is_some(),
+            "in-flight split's pre-hosted group must not be reclaimed"
+        );
+        assert_eq!(reclaimed_total.load(Ordering::Relaxed), 0);
+    }
+
+    /// Sanity check that the fix didn't disable reclaim: a group below
+    /// `next_group_id` and unreferenced (a real post-merge orphan) still goes.
+    #[tokio::test]
+    async fn reclaim_still_removes_a_real_orphan_below_next_id() {
+        let mut host = MultiRaftHost::new();
+        host.insert_single_node(GroupId::ZERO, NodeId(1));
+        host.insert_single_node(GroupId(1), NodeId(1)); // orphaned by a prior merge
+
+        let split_rt = test_split_runtime(host);
+        // next_group_id = 2 here, so group 1 (< 2, unreferenced) is a real orphan.
+        let mut table = StaticRangeTable::single_group(GroupId::ZERO);
+        table.split_at(b"m").unwrap();
+        table.merge_with_next(b"").unwrap(); // drops group 1 from the table again
+        assert_eq!(table.peek_next_group_id(), GroupId(2));
+        let range_table: SharedRangeTable = Arc::new(RwLock::new(table));
+        let reclaimed_total: SharedReclaimStats = Arc::new(AtomicU64::new(0));
+
+        reclaim_orphan_groups(&split_rt, &range_table, &reclaimed_total).await;
+
+        assert!(split_rt.raft.lock().unwrap().get(GroupId(1)).is_none());
+        assert_eq!(reclaimed_total.load(Ordering::Relaxed), 1);
     }
 }
