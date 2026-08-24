@@ -121,16 +121,113 @@ KayaDB formats are designed to be inspectable without external tooling.
 DATA=/tmp/kayadb-data
 
 # Inspect the WAL segment
-cargo run -p kayactl -- inspect wal $DATA/wal-000001.wal
+cargo run -p kayactl -- inspect wal $DATA/wal/0000000000000001.wal
 
 # Inspect an SSTable
-cargo run -p kayactl -- inspect sstable $DATA/sst-000001.sst
+cargo run -p kayactl -- inspect sstable $DATA/sst/0000000000000001.sst
 
 # Inspect the manifest
-cargo run -p kayactl -- inspect manifest $DATA/MANIFEST
+cargo run -p kayactl -- inspect manifest $DATA/MANIFEST-000001
 ```
 
-Each command prints records in human-readable format including offsets, CRC status, and entry payloads.
+Each command prints records in human-readable format including offsets, CRC status, and entry payloads. Add `--json` to emit structured JSON for automation.
+
+### JSON output examples
+
+**WAL inspection** (`inspect wal --json`):
+
+```json
+{
+  "segment": "0000000000000001.wal",
+  "records": [
+    {
+      "offset": 0,
+      "lsn": 1,
+      "sequence": 1,
+      "type": "PUT",
+      "key_len": 6,
+      "value_len": 5
+    },
+    {
+      "offset": 59,
+      "lsn": 2,
+      "sequence": 2,
+      "type": "PUT",
+      "key_len": 6,
+      "value_len": 3
+    }
+  ],
+  "warnings": []
+}
+```
+
+Fields: `offset` (byte position), `lsn` (log sequence number), `sequence` (write order), `type` (PUT/DEL), `key_len` / `value_len` (or `null` for DEL).
+
+**SSTable inspection** (`inspect sstable --json`):
+
+```json
+{
+  "path": "./data/sst/0000000000000001.sst",
+  "version": 4,
+  "mvcc": true,
+  "entry_count": 3,
+  "min_seq": 1,
+  "max_seq": 3,
+  "entries": [
+    {
+      "seq": 1,
+      "commit_ts": 1,
+      "type": "put",
+      "user_key": "user:1",
+      "key": "user:1",
+      "value": "alice"
+    },
+    {
+      "seq": 2,
+      "commit_ts": 2,
+      "type": "put",
+      "user_key": "user:2",
+      "key": "user:2",
+      "value": "bob"
+    },
+    {
+      "seq": 3,
+      "commit_ts": 3,
+      "type": "del",
+      "user_key": "user:3",
+      "key": "user:3"
+    }
+  ],
+  "warnings": []
+}
+```
+
+Fields: `version` (SSTable format), `mvcc` (multi-version), `entry_count`, `seq` (sequence at write), `commit_ts` (MVCC timestamp, present if `mvcc=true`), `type` (put/del), `value` (present only for PUT).
+
+**Manifest inspection** (`inspect manifest --json`):
+
+```json
+{
+  "path": "./data/MANIFEST-000001",
+  "last_sequence": 3,
+  "last_edit_seq": 2,
+  "live_tables": [
+    {
+      "table_id": 1,
+      "level": 0,
+      "path": "sst/0000000000000001.sst",
+      "entries": 3,
+      "min_seq": 1,
+      "max_seq": 3,
+      "smallest": "user:1",
+      "largest": "user:3"
+    }
+  ],
+  "warnings": []
+}
+```
+
+Fields: `last_sequence` (highest written key), `last_edit_seq` (manifest edit count), `live_tables` (active SSTables per level), `table_id`, `level` (LSM tree level).
 
 ---
 
