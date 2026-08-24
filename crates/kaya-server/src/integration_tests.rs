@@ -2544,6 +2544,165 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
+    /// #24: MOVE_RANGE cuts a range over to another group while puts/gets are
+    /// in flight; every key keeps its last written value.
+    #[serial]
+    #[tokio::test]
+    async fn test_range_move_under_concurrent_load() {
+        use kaya_net::{
+            decode_list_ranges_response, encode_move_range_request, encode_split_range_request,
+            LIST_RANGES_OPCODE, MOVE_RANGE_OPCODE, SPLIT_RANGE_OPCODE,
+        };
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_range_move_{}", test_id));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let r = get_free_port().await;
+        let c = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{}", r).parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{}", c).parse().unwrap();
+
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![]);
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "node should elect");
+
+        // Two ranges: [,m)→g0 and [m,)→g1.
+        let (status, _) = roundtrip(
+            client_addr,
+            SPLIT_RANGE_OPCODE,
+            &encode_split_range_request(b"m"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, STATUS_OK, "split should succeed");
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                break;
+            }
+        }
+
+        const KEYS: u8 = 8;
+        const ROUNDS: u8 = 6;
+        // Writer + reader hammering the range that is about to move.
+        let load = tokio::spawn(async move {
+            for round in 0..ROUNDS {
+                for i in 0..KEYS {
+                    let key = format!("m{i:02}");
+                    let value = format!("r{round}");
+                    let put = encode_put_payload(key.as_bytes(), value.as_bytes());
+                    let mut ok = false;
+                    for _ in 0..40 {
+                        // RANGE_MOVED / NOT_LEADER during cutover: refresh + retry.
+                        if let Ok((s, _)) = roundtrip(client_addr, 1, &put).await {
+                            if s == STATUS_OK {
+                                ok = true;
+                                break;
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    }
+                    assert!(ok, "put {key} round {round} never succeeded");
+
+                    let get = encode_key_payload(key.as_bytes());
+                    if let Ok((s, body)) = roundtrip(client_addr, 2, &get).await {
+                        if s == STATUS_OK {
+                            // A concurrent get never observes a value we never wrote.
+                            let v = decode_value_payload(&body).unwrap();
+                            assert!(
+                                v.starts_with(b"r"),
+                                "unexpected value for {key}: {:?}",
+                                String::from_utf8_lossy(&v)
+                            );
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+
+        // Cut [m,) over to a fresh group mid-load.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        let (status, body) = roundtrip(
+            client_addr,
+            MOVE_RANGE_OPCODE,
+            &encode_move_range_request(b"m", 9),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            status,
+            STATUS_OK,
+            "move should succeed: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let (meta_epoch, moved) = decode_list_ranges_response(&body).unwrap();
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].2, 9, "owner group after cutover");
+        assert_eq!(moved[0].3, b"m".to_vec());
+
+        load.await.expect("load task");
+
+        // Every key keeps its last written value after the cutover.
+        for i in 0..KEYS {
+            let key = format!("m{i:02}");
+            let mut seen = None;
+            for _ in 0..40 {
+                let (s, body) = roundtrip(client_addr, 2, &encode_key_payload(key.as_bytes()))
+                    .await
+                    .unwrap();
+                if s == STATUS_OK {
+                    seen = Some(decode_value_payload(&body).unwrap());
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            assert_eq!(
+                seen.as_deref(),
+                Some(format!("r{}", ROUNDS - 1).as_bytes()),
+                "final value for {key}"
+            );
+        }
+
+        // Meta table converged on the new owner; ranges still cover the keyspace.
+        let (status, body) = roundtrip(client_addr, LIST_RANGES_OPCODE, &[])
+            .await
+            .unwrap();
+        assert_eq!(status, STATUS_OK);
+        let (epoch2, ranges) = decode_list_ranges_response(&body).unwrap();
+        assert!(epoch2 >= meta_epoch);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[1].2, 9, "moved range owner in meta table");
+
+        // Moving to the owning group is rejected (no epoch churn).
+        let (status, _) = roundtrip(
+            client_addr,
+            MOVE_RANGE_OPCODE,
+            &encode_move_range_request(b"m", 9),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, STATUS_INVALID_ARGUMENT, "self-move rejected");
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
     /// M22: split then merge recombines to one range; keys remain readable.
     #[serial]
     #[tokio::test]

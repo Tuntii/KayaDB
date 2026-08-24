@@ -603,6 +603,25 @@ async fn apply_nemesis_action(
                 Err(e) => eprintln!("[Runner] MERGE_RANGE skipped (no leader): {e}"),
             }
         }
+        NemesisAction::MoveRange {
+            range_start,
+            target_group,
+        } => {
+            // Soft-fail: already-moved meta or non-leader of group 0 is expected under chaos.
+            match cluster.wait_for_leader(Duration::from_secs(10)).await {
+                Ok(leader) => match cluster
+                    .move_range(leader.client_addr, &range_start, target_group)
+                    .await
+                {
+                    Ok(()) => eprintln!(
+                        "[Runner] MOVE_RANGE ok start={:?} target={target_group}",
+                        String::from_utf8_lossy(&range_start)
+                    ),
+                    Err(e) => eprintln!("[Runner] MOVE_RANGE non-fatal: {e}"),
+                },
+                Err(e) => eprintln!("[Runner] MOVE_RANGE skipped (no leader): {e}"),
+            }
+        }
         NemesisAction::KillFollower => {
             let follower_id = cluster.find_follower_id().await?;
             eprintln!("[Runner] Killing follower node {follower_id}");

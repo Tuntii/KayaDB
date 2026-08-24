@@ -13,7 +13,7 @@
 | Area | M15 baseline | M22–M24 additions |
 |---|---|---|
 | Placement / ops | Static 3-node roster | Drain mode, leadership transfer, learners, advisory rebalance plan, Dashboard v1 |
-| Ranges | Single group / early multi-raft | LIST / SPLIT / MERGE range ops; shared-engine routing (no physical key migrate) |
+| Ranges | Single group / early multi-raft | LIST / SPLIT / MERGE / MOVE range ops; shared-engine routing (cutover moves ownership, not bytes) |
 | Transactions | Point KV | Single-group SI multi-key + cross-range 2PC (client-transparent) |
 | Security | Client/operator tokens, optional TLS, audit | Engine AES-GCM at rest, per-prefix ACL file |
 | Observability | Prometheus `/metrics` | Read-only JSON dashboard (`/health`, `/v1/ranges`, `/v1/raft`) |
@@ -145,7 +145,7 @@ This is key-space isolation, not multi-tenancy (no quotas, tenant IDs, or resour
 
 ## 3. Range operations (M21–M22)
 
-Ranges are **routing partitions** over a shared engine: split/merge update the meta table; keys are not physically moved between disks.
+Ranges are **routing partitions** over a shared engine: split / merge / move update the meta table; keys are not physically moved between disks.
 
 | Op | Wire | CLI |
 |---|---|---|
@@ -153,13 +153,22 @@ Ranges are **routing partitions** over a shared engine: split/merge update the m
 | Split at key | `SPLIT_RANGE` (16) | `kayactl --server HOST:PORT range split <key>` |
 | Merge with next | `MERGE_RANGE` (17) | `kayactl --server HOST:PORT range merge <left-start>` |
 | Advisory rebalance | `REBALANCE_PLAN` (20) | `kayactl --server HOST:PORT range rebalance-plan` |
+| Live migrate | `MOVE_RANGE` (21) | `kayactl --server HOST:PORT [--operator-token TOK] range move <start> <group>` |
 
 ```bash
 kayactl --server 127.0.0.1:7379 range list
 kayactl --server 127.0.0.1:7379 range split m
 kayactl --server 127.0.0.1:7379 range merge ""    # left start empty = first range
 kayactl --server 127.0.0.1:7379 range rebalance-plan
+kayactl --server 127.0.0.1:7379 range move m 5   # live cutover to group 5
 ```
+
+Live migrate (`MOVE_RANGE`, #24) reassigns one range to another Raft group under
+load: the cutover is a single committed meta entry, so a crash leaves either the
+old owner or the new one and never a partial state. It moves **placement**, not
+bytes, and it does not move leadership — pair it with `TRANSFER_LEADER` (18) to
+land the new group's leader on the intended node. Runbook:
+[runbooks/move-range.md](runbooks/move-range.md).
 
 Admin (operator token when configured):
 
@@ -167,7 +176,8 @@ Admin (operator token when configured):
 |---|---|---|
 | Transfer leader | `TRANSFER_LEADER` (18) | Leader steps down; free election (no TimeoutNow) |
 | Promote learner | `PROMOTE_LEARNER` (19) | Learner → voter |
-| Rebalance plan | `REBALANCE_PLAN` (20) | **Advisory only** — does not move ranges or leases |
+| Rebalance plan | `REBALANCE_PLAN` (20) | **Advisory only** — suggests moves for opcode 21 |
+| Move range | `MOVE_RANGE` (21) | Applies one placement change; refused while draining |
 
 Cross-range transactions: clients use the same TXN opcodes; the server coordinator runs 2PC when a commit spans more than one group. No client API change.
 
@@ -232,7 +242,7 @@ CI perf envelope (put/get + multi-key txn + multi-range 2PC smoke budgets): [BEN
 
 ## 6. Explicit non-goals (still out of path)
 
-- Live range migrate / MOVE_RANGE with physical key movement
+- Physical key movement on migrate (`MOVE_RANGE` cuts over routing; the engine is shared, so no bytes move)
 - Parallel-commit 2PC stretch and durable global decision log
 - Background re-encrypt after a key rotation (#28 ships an online dual-key read window; old files upgrade lazily on next write — see `docs/security.md` §7.1)
 - Full multi-tenancy beyond per-prefix ACL
@@ -246,6 +256,7 @@ CI perf envelope (put/get + multi-key txn + multi-range 2PC smoke budgets): [BEN
 - [deployment.md](deployment.md) — Docker Compose + Kubernetes
 - [security.md](security.md) — network model, tokens, encryption, accepted risks
 - [runbooks/decommission-node.md](runbooks/decommission-node.md) — drain workflow
+- [runbooks/move-range.md](runbooks/move-range.md) — live range migrate
 - [runbooks/rolling-restart.md](runbooks/rolling-restart.md) — rolling restart + transfer note
 - [slo-envelope.md](slo-envelope.md) — hard limits and design SLOs
 - [BENCHMARKS.md](../BENCHMARKS.md) — performance envelope v2 gates

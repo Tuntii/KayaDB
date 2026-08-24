@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use crate::nemesis::MemberSpec;
 use kaya_net::{
-    encode_member_payload, encode_merge_range_request, encode_remove_member_payload,
-    encode_split_range_request, roundtrip, MERGE_RANGE_OPCODE, SPLIT_RANGE_OPCODE,
-    STATUS_NOT_LEADER, STATUS_OK,
+    encode_member_payload, encode_merge_range_request, encode_move_range_request,
+    encode_remove_member_payload, encode_split_range_request, roundtrip, MERGE_RANGE_OPCODE,
+    MOVE_RANGE_OPCODE, SPLIT_RANGE_OPCODE, STATUS_NOT_LEADER, STATUS_OK,
 };
 use kaya_raft::{GroupId, StaticRange};
 use kaya_server::{ClusterConfig, ClusterNode};
@@ -142,6 +142,22 @@ impl ClusterController {
         );
         let payload = encode_merge_range_request(left_start);
         admin_roundtrip(leader, MERGE_RANGE_OPCODE, &payload, "MERGE_RANGE").await
+    }
+
+    /// MOVE_RANGE (opcode 21) on the leader (soft-fail at caller).
+    pub async fn move_range(
+        &self,
+        leader: SocketAddr,
+        range_start: &[u8],
+        target_group: u64,
+    ) -> Result<(), String> {
+        eprintln!(
+            "[ClusterController] MOVE_RANGE start={:?} target={target_group} via {}",
+            String::from_utf8_lossy(range_start),
+            leader
+        );
+        let payload = encode_move_range_request(range_start, target_group);
+        admin_roundtrip(leader, MOVE_RANGE_OPCODE, &payload, "MOVE_RANGE").await
     }
 
     /// Spawn a join-cluster node that discovers the roster via seed peers.

@@ -101,12 +101,14 @@ Decoder must reject oversized frames before allocation.
 | 5 | HEALTH | empty |
 | 6 | STATS | empty |
 
+Opcodes 7–21 (membership, TXN, CDC, range routing) are specified where they are
+implemented: `spec/docs/range-routing-spec.md` §4 covers 15–21
+(`LIST_RANGES` … `MOVE_RANGE`).
+
 Future:
 
 | Opcode | Command |
 |---:|---|
-| 20 | RAFT_PROPOSE |
-| 21 | SNAPSHOT_STATUS |
 | 30 | AUTH |
 
 ---

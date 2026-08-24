@@ -1,8 +1,8 @@
 # Range Metadata, Routing, Splits & Merges (M21/M22)
 
-**Status:** Production path v1.2 (M21/M22 + durable meta #25 + orphan group reclaim #30; 2026-08-24)  
-**Scope:** Meta range table with epochs, dynamic split/merge, client cache, RANGE_MOVED; advisory rebalance; Raft-replicated durable meta; orphan Raft group reclaim after merge; no live migrate  
-**Milestone:** M21 (split), M22 (merge, transfer, learners, advisory balancer, drain, dashboard v1), #25 (durable RangeMeta), #30 (orphan group reclaim)
+**Status:** Production path v1.3 (M21/M22 + durable meta #25 + live MOVE_RANGE #24 + orphan group reclaim #30; 2026-08-24)  
+**Scope:** Meta range table with epochs, dynamic split/merge, live range migrate, client cache, RANGE_MOVED; advisory rebalance; Raft-replicated durable meta; orphan Raft group reclaim after merge  
+**Milestone:** M21 (split), M22 (merge, transfer, learners, advisory balancer, drain, dashboard v1), #25 (durable RangeMeta), #24 (MOVE_RANGE), #30 (orphan group reclaim)
 
 ---
 
@@ -13,8 +13,9 @@ Partition the keyspace across Raft groups with:
 - Epoch’d range descriptors (meta table)
 - Dynamic split at a key (shared engine; routing-only split)
 - Dynamic merge of adjacent ranges (routing-only; no key moves)
+- Live range migrate (`MOVE_RANGE`): reassign a range to another group under load
 - Client `list_ranges` cache + `RANGE_MOVED` status
-- `kayactl range list|split|merge`
+- `kayactl range list|split|merge|move`
 
 Engine data is **shared** across groups in a process; split/merge do not
 physically move keys — they change which group commits future writes for a key
@@ -73,7 +74,7 @@ Lookup: linear scan; key `k` matches first range with `start ≤ k < end`
 4. Drop `R` from the table; bump `meta_epoch`.
 5. Do **not** tear down the Raft group that owned `R` in this path — the merge
    only updates routing. `R`'s group becomes an *orphan* (hosted, no longer
-   referenced by any range); see §3d for reclaim.
+   referenced by any range); see §3e for reclaim.
 6. Commit the merged table the same way as split (`RangeMeta` + disk file).
 
 ---
@@ -97,9 +98,108 @@ Clients may prefix PUT/GET/DELETE/SCAN with `MEPO | meta_epoch(u64 LE)`. If
 `client_epoch < server.meta_epoch`, the server returns `RANGE_MOVED` (11) with
 a full list-ranges body. `kaya-client` attaches the cached epoch automatically.
 
+## 3d. Live range migrate — `MOVE_RANGE` (#24)
+
+`move_range(range_start, target_group)` reassigns one range to another Raft
+group **while the cluster serves traffic**. It is the product-side answer to
+`REBALANCE_PLAN`: the plan suggests a move, `MOVE_RANGE` performs it.
+
+### Descriptor change
+
+```text
+before: { range_id: R, epoch: E, group_id: S, [start, end) }
+after:  { range_id: R, epoch: E+1, group_id: T, [start, end) }
+        meta_epoch += 1;  next_group_id = max(next_group_id, T+1)
+```
+
+`range_id` and the bounds are preserved — a move is not a split and not a
+merge. Both epochs advance so stale client caches take the `RANGE_MOVED`
+refresh path, and `next_group_id` advances past `T` so a later split cannot
+re-allocate the target id.
+
+### Protocol (leader of group 0)
+
+1. **Validate.** Exact `start_key` match; `T ≠ S`. A move onto the current
+   owner is rejected (`INVALID_ARGUMENT`) so the meta epoch never churns for a
+   no-op. Refused while the node is draining (same guard as `SPLIT_RANGE`).
+2. **Host target.** `ensure_group_hosted(T)` before the cutover commits, so a
+   write arriving immediately after cutover finds a hosted group instead of
+   bouncing on `RANGE_MOVED`.
+3. **Snapshot + delta catch-up.** See *Physical migration* below. In the
+   shared-engine deployment this step is a no-op: the target group already
+   reads and writes the same engine as the source.
+4. **Quiesce the source (barrier).** Commit and apply an empty entry on `S`, so
+   everything already committed on `S` is durable in the engine before
+   ownership flips. Skipped when this node is not `S`'s leader (best-effort —
+   see *Failure modes*).
+5. **Cutover.** Commit one `RaftCommand::RangeMeta` on group 0 with
+   `base_epoch = pre-move meta_epoch`. Apply is the same CAS + persist + host
+   path as split/merge (§3c): replace the table only if
+   `meta_epoch == base_epoch`, write `range-table.bin`, then host every group
+   in the snapshot. A concurrent split/merge/move with the same `base_epoch`
+   loses the CAS.
+6. **Respond** with the moved descriptor (list-ranges layout, `count=1`).
+
+The source group is **not** torn down; it may stay hosted and idle. That is the
+same orphan situation merge leaves behind (reclaim is §3e, issue #30).
+
+### Physical migration and dual-write
+
+Today every Raft group in a process shares **one** engine, and every node hosts
+every group in the table. A range's keys are therefore already present on the
+target group's replicas: nothing to copy, nothing to lose, nothing to
+duplicate. Copying keys through the target group's log would rewrite identical
+bytes into the same store and open a real clobber window (a scan-then-propose
+race can overwrite a newer concurrent write with the value read at scan time),
+so the copy phase is deliberately **not** implemented.
+
+When groups gain per-group engines, step 3 becomes:
+
+- **Dual-write window.** From cutover-prepare, a mutation of a key in
+  `[start, end)` is acknowledged only after it commits on **both** `S` and `T`.
+  `S` stays the read authority for the whole window.
+- **Snapshot.** Stream `[start, end)` from `S`'s engine to `T` in bounded
+  batches, applied on `T` as put-if-absent so a dual-write never loses to a
+  stale copied value.
+- **Delta catch-up.** Repeat over the keys mutated since the snapshot started
+  until the residue fits inside one short write fence.
+- **Cutover.** Fence writes on the range, drain `S`, commit the meta entry,
+  lift the fence. Reads move to `T` only after the meta entry applies.
+- **Cleanup.** Drop `[start, end)` from `S`'s engine after the cutover entry is
+  committed on a quorum — never before.
+
+### Failure modes
+
+| Failure | Outcome |
+|---|---|
+| Crash before the meta entry commits | Nothing changed: `S` still owns the range; retry the move |
+| Crash after commit, before apply | Replay applies the entry; `T` owns the range (idempotent re-apply, §3c) |
+| Crash between persist and apply-index | On-disk snapshot already matches the payload → re-apply is a no-op |
+| Concurrent split / merge / move | CAS on `base_epoch` — exactly one wins; the loser gets `STATUS_ERROR` and retries against the fresh table |
+| Move onto the current owner | `INVALID_ARGUMENT`; no epoch bump |
+| Node is draining | `STATUS_ERROR` (refuses to host a new group) |
+| Not leader of group 0 | `STATUS_NOT_LEADER` + leader hint |
+| Group-0 leader is not `S`'s leader | Barrier is skipped; the cutover is still safe (no keys move). A read served by `T`'s leader may briefly trail `S`'s last pre-cutover apply — the same shared-engine freshness bound that `split_at` already has |
+| Client holds a stale `meta_epoch` | `RANGE_MOVED` (11) + full list-ranges body; client refreshes and retries |
+
+### Invariants
+
+- **RANGE-INV-01 (single owner).** After every applied meta entry the table is
+  an ordered, gapless, non-overlapping cover of the keyspace; every key resolves
+  to exactly one range and one group.
+- **RANGE-INV-02 (no lost / duplicated keys).** A move never creates, drops, or
+  duplicates a user key. Verified in sim across a crash at every point
+  mid-migrate (`move_range_no_lost_or_duplicated_keys_across_crash`).
+- **RANGE-INV-03 (identity preserved).** `range_id` and `[start, end)` are
+  unchanged by a move; only `group_id` and the epochs move.
+- **RANGE-INV-04 (monotone epochs).** `meta_epoch` and the range `epoch`
+  strictly increase on an applied move and never advance on a rejected one.
+- **RANGE-INV-05 (total order).** All layout changes — split, merge, move — are
+  totally ordered by the group-0 log and CAS'd on `meta_epoch`.
+
 ---
 
-## 3d. Orphan Raft group reclaim (#30)
+## 3e. Orphan Raft group reclaim (#30)
 
 A merge (§3b) drops the right range from the table but does not tear down the
 Raft group that owned it — that group is now *orphaned*: still hosted, no
@@ -171,7 +271,8 @@ are read from the range table under one lock (`referenced_group_ids()` in
 | 15 | `LIST_RANGES` | Response: meta_epoch + descriptors |
 | 16 | `SPLIT_RANGE` | Request: split_key; response: two half descriptors |
 | 17 | `MERGE_RANGE` | Request: left_start; response: one merged descriptor |
-| 20 | `REBALANCE_PLAN` | **Advisory only.** Range-count heuristic; no live migrate |
+| 20 | `REBALANCE_PLAN` | **Advisory only.** Range-count heuristic; suggests moves for opcode 21 |
+| 21 | `MOVE_RANGE` | Live migrate: reassign a range to a target group (admin; operator token) |
 
 **Status `RANGE_MOVED` (11):** body is a list-ranges payload (count≥1) for the
 key’s current owner. Clients refresh cache and retry.
@@ -189,7 +290,7 @@ count(u32 LE) | repeated:
 Heuristic (`plan_range_count`): while `max_count - min_count > 1`, move one range
 from a richest node (group leader ownership) to a poorest node. **The plan does
 not move data, transfer leases, or change the meta table.** Operators may use
-it as a suggestion only; live placement / MOVE_RANGE is follow-on work.
+it as a suggestion only; apply a suggested move with `MOVE_RANGE` (21).
 
 ### LIST_RANGES response
 
@@ -214,6 +315,17 @@ left_start_len(u32 LE) | left_start
 Empty `left_start` is valid (left half after a whole-keyspace split). Response
 uses the list-ranges layout with `count=1` for the merged descriptor.
 
+### MOVE_RANGE request
+
+```text
+start_len(u32 LE) | start_key | target_group(u64 LE)
+```
+
+Admin opcode: operator token via `ADMIN\x00` framing when the server is started
+with `--operator-token`. `start_key` must match a range start exactly (empty is
+valid for the first range). Response uses the list-ranges layout with `count=1`
+for the moved descriptor.
+
 ---
 
 ## 5. CLI
@@ -222,6 +334,7 @@ uses the list-ranges layout with `count=1` for the merged descriptor.
 kayactl --server <addr> range list
 kayactl --server <addr> range split <key>
 kayactl --server <addr> range merge <left-start-hex-or-utf8>
+kayactl --server <addr> [--operator-token <tok>] range move <range-start> <target-group>
 kayactl --server <addr> [--operator-token <tok>] range rebalance-plan
 ```
 
@@ -243,7 +356,7 @@ raw bytes; otherwise UTF-8.
 | Client range cache API | Yes (`list_ranges` / `split_range`) |
 | No lost writes across split (IT) | Yes (`test_range_split_no_lost_writes`) |
 | Split+merge round-trip (IT) | Yes (`test_range_merge_recombines`) |
-| Multi-node range move / learner | Partial (learner + promote yes; live migrate no) |
+| Multi-node range move / learner | Yes (learner + promote + MOVE_RANGE) |
 | TRANSFER_LEADER (18) | Yes (step-down; no TimeoutNow) |
 | PROMOTE_LEARNER (19) | Yes |
 | Advisory REBALANCE_PLAN (20) | Yes (range-count; no live migrate) |
@@ -254,15 +367,20 @@ raw bytes; otherwise UTF-8.
 | Range table inside Raft snapshot payload | Yes (snapshot v2; sim catch-up) |
 | Stale client `meta_epoch` → RANGE_MOVED | Yes (`MEPO` prefix + IT) |
 | Sim crash / snapshot restore | Yes (`range_meta_replicates_and_survives_crash`) |
-| Orphan group reclaim after merge | Yes (§3d; `test_range_merge_reclaims_orphan_group`) |
+| Orphan group reclaim after merge | Yes (§3e; `test_range_merge_reclaims_orphan_group`) |
 | Auto size-threshold split | No (manual + API first) |
-| Live range migrate / MOVE_RANGE | No (follow-on) |
+| Live range migrate / MOVE_RANGE (21) | Yes (routing cutover; `range move`) |
+| No lost/duplicated keys across crash mid-migrate (sim) | Yes (`move_range_no_lost_or_duplicated_keys_across_crash`) |
+| Migrate under concurrent load (IT) | Yes (`test_range_move_under_concurrent_load`) |
+| Chaos: multi-range bank sum under move + kill | Yes (`bank-mr-move`, documented subset) |
+| Physical key copy (snapshot + delta + dual-write) | No — shared engine makes it a no-op; spec'd in §3d for per-group engines |
 
 ---
 
 ## 7. Related
 
 - `spec/docs/multi-raft-spec.md` (M20 foundation)
-- `kaya_raft::StaticRangeTable::split_at` / `merge_with_next`
-- `kaya-server` opcodes 15/16/17/18/19/20
-- `kaya_server::cluster::replication::reclaim_orphan_groups` (§3d, issue #30)
+- `kaya_raft::StaticRangeTable::split_at` / `merge_with_next` / `move_range`
+- `kaya-server` opcodes 15/16/17/18/19/20/21
+- `kaya_server::cluster::replication::reclaim_orphan_groups` (§3e, issue #30)
+- `docs/runbooks/move-range.md` (operator runbook)

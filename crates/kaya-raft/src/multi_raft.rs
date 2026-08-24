@@ -241,6 +241,41 @@ impl StaticRangeTable {
         Ok(merged)
     }
 
+    /// Move the range whose `start_key` equals `range_start` to `target_group`
+    /// (live `MOVE_RANGE` cutover, issue #24).
+    ///
+    /// Bounds and `range_id` are preserved; only ownership changes. The range
+    /// `epoch` and the table `meta_epoch` are bumped so stale client caches take
+    /// the `RANGE_MOVED` refresh path. `next_group_id` advances past
+    /// `target_group` so a later split cannot re-allocate the same id.
+    ///
+    /// The source group is **not** torn down here; it may stay hosted and idle
+    /// (same orphan situation as [`Self::merge_with_next`]).
+    pub fn move_range(
+        &mut self,
+        range_start: &[u8],
+        target_group: GroupId,
+    ) -> Result<StaticRange, String> {
+        let idx = self
+            .ranges
+            .iter()
+            .position(|r| r.start_key.as_slice() == range_start)
+            .ok_or_else(|| "no range with the given start_key".to_string())?;
+        if self.ranges[idx].group_id == target_group {
+            return Err("range already owned by the target group".into());
+        }
+
+        let moved = StaticRange {
+            group_id: target_group,
+            epoch: self.ranges[idx].epoch.saturating_add(1),
+            ..self.ranges[idx].clone()
+        };
+        self.ranges[idx] = moved.clone();
+        self.next_group_id = self.next_group_id.max(target_group.0.saturating_add(1));
+        self.meta_epoch = self.meta_epoch.saturating_add(1);
+        Ok(moved)
+    }
+
     /// Allocate the next free group id without splitting (tests / bootstrap).
     pub fn peek_next_group_id(&self) -> GroupId {
         GroupId(self.next_group_id)
@@ -698,6 +733,49 @@ mod tests {
         t.split_at(b"m").unwrap();
         // Right half has no neighbor.
         assert!(t.merge_with_next(b"m").is_err());
+    }
+
+    /// #24: MOVE_RANGE cutover keeps bounds + range_id, bumps both epochs.
+    #[test]
+    fn move_range_reassigns_owner_group() {
+        let mut t = StaticRangeTable::single_group(GroupId(0));
+        t.split_at(b"m").unwrap(); // [,m)→g0  [m,)→g1
+        let before = t.meta_epoch();
+        let right_epoch = t.lookup_range(b"m").unwrap().epoch;
+
+        let moved = t.move_range(b"m", GroupId(7)).unwrap();
+        assert_eq!(moved.group_id, GroupId(7));
+        assert_eq!(moved.range_id, 2);
+        assert_eq!(moved.start_key, b"m");
+        assert!(moved.end_key.is_empty());
+        assert_eq!(moved.epoch, right_epoch + 1);
+        assert_eq!(t.meta_epoch(), before + 1);
+        assert_eq!(t.ranges().len(), 2);
+        assert_eq!(t.lookup(b"a"), Some(GroupId(0)));
+        assert_eq!(t.lookup(b"z"), Some(GroupId(7)));
+        // A later split must not re-use the target id.
+        assert!(t.peek_next_group_id().0 > 7);
+    }
+
+    #[test]
+    fn move_range_rejects_unknown_start_and_same_group() {
+        let mut t = StaticRangeTable::single_group(GroupId(0));
+        t.split_at(b"m").unwrap();
+        assert!(t.move_range(b"nope", GroupId(3)).is_err());
+        assert!(t.move_range(b"m", GroupId(1)).is_err()); // already owner
+        assert_eq!(t.meta_epoch(), 2, "rejected move must not bump meta_epoch");
+    }
+
+    /// Move survives the durable-meta round trip (#25 encode/decode).
+    #[test]
+    fn move_range_round_trips_through_snapshot() {
+        let mut t = StaticRangeTable::single_group(GroupId::ZERO);
+        t.split_at(b"m").unwrap();
+        t.move_range(b"", GroupId(9)).unwrap();
+        let restored = StaticRangeTable::decode(&t.encode()).unwrap();
+        assert_eq!(restored.ranges(), t.ranges());
+        assert_eq!(restored.meta_epoch(), t.meta_epoch());
+        assert_eq!(restored.lookup(b"a"), Some(GroupId(9)));
     }
 
     #[test]

@@ -73,6 +73,10 @@ pub const PROMOTE_LEARNER_OPCODE: u8 = 19;
 /// Response: `count(u32 LE) | repeated (range_id|from_node|to_node u64 LE each)`.
 /// **Advisory only** — does not migrate data or transfer leases.
 pub const REBALANCE_PLAN_OPCODE: u8 = 20;
+/// MOVE_RANGE — live range migrate: reassign one range to a target group (#24 admin).
+/// Body: `start_len(u32 LE) | start_key | target_group(u64 LE)`. Requires operator
+/// token when configured. Response uses the LIST_RANGES layout with `count=1`.
+pub const MOVE_RANGE_OPCODE: u8 = 21;
 
 /// CDC event op: put.
 pub const CDC_EVENT_PUT: u8 = 1;
@@ -928,6 +932,31 @@ pub fn decode_merge_range_request(data: &[u8]) -> Result<Vec<u8>, String> {
     take_bytes(&mut cur, len)
 }
 
+/// Encode MOVE_RANGE request: `start_len(u32 LE) | start_key | target_group(u64 LE)`.
+/// Empty `range_start` is valid (first range of the keyspace).
+pub fn encode_move_range_request(range_start: &[u8], target_group: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12 + range_start.len());
+    push_u32(&mut out, range_start.len() as u32);
+    out.extend_from_slice(range_start);
+    push_u64(&mut out, target_group);
+    out
+}
+
+/// Decode MOVE_RANGE request → `(range_start, target_group)`.
+pub fn decode_move_range_request(data: &[u8]) -> Result<(Vec<u8>, u64), String> {
+    let mut cur = data;
+    let len = take_u32(&mut cur)? as usize;
+    let range_start = take_bytes(&mut cur, len)?;
+    let target_group = take_u64(&mut cur)?;
+    if !cur.is_empty() {
+        return Err(format!(
+            "trailing {} bytes after MOVE_RANGE request",
+            cur.len()
+        ));
+    }
+    Ok((range_start, target_group))
+}
+
 /// Encode REBALANCE_PLAN response: `count(u32 LE) | repeated moves`.
 /// Each move: `range_id(u64 LE) | from_node(u64 LE) | to_node(u64 LE)`.
 pub fn encode_rebalance_plan_response(moves: &[(u64, u64, u64)]) -> Vec<u8> {
@@ -1729,6 +1758,24 @@ mod tests {
         let decoded = decode_rebalance_plan_response(&body).unwrap();
         assert_eq!(decoded, vec![(10, 1, 2), (11, 1, 3)]);
         assert!(decode_rebalance_plan_response(&[1, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn move_range_request_roundtrips() {
+        assert_eq!(MOVE_RANGE_OPCODE, 21);
+        let payload = encode_move_range_request(b"m", 7);
+        assert_eq!(
+            decode_move_range_request(&payload).unwrap(),
+            (b"m".to_vec(), 7)
+        );
+        // Empty start (first range) is valid.
+        let empty = encode_move_range_request(b"", 3);
+        assert_eq!(decode_move_range_request(&empty).unwrap(), (vec![], 3));
+        // Truncated / trailing bytes are rejected.
+        assert!(decode_move_range_request(&payload[..payload.len() - 1]).is_err());
+        let mut extra = payload.clone();
+        extra.push(0);
+        assert!(decode_move_range_request(&extra).is_err());
     }
 
     #[test]

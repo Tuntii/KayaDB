@@ -33,6 +33,7 @@
 - [Runbooks](runbooks/rolling-restart.md)
   - [Add / Remove Node](runbooks/add-remove-node.md)
   - [Decommission Node](runbooks/decommission-node.md)
+  - [Move a Range](runbooks/move-range.md)
   - [Rolling Restart](runbooks/rolling-restart.md)
   - [Backup & Restore](runbooks/backup-restore.md)
   - [Detecting Split-Brain](runbooks/detecting-split-brain.md)
