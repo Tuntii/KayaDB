@@ -1,8 +1,8 @@
 # Range Metadata, Routing, Splits & Merges (M21/M22)
 
-**Status:** Production path v1.1 (M21/M22 + durable meta #25; 2026-08-13)  
-**Scope:** Meta range table with epochs, dynamic split/merge, client cache, RANGE_MOVED; advisory rebalance; Raft-replicated durable meta; no live migrate  
-**Milestone:** M21 (split), M22 (merge, transfer, learners, advisory balancer, drain, dashboard v1), #25 (durable RangeMeta)
+**Status:** Production path v1.2 (M21/M22 + durable meta #25 + orphan group reclaim #30; 2026-08-24)  
+**Scope:** Meta range table with epochs, dynamic split/merge, client cache, RANGE_MOVED; advisory rebalance; Raft-replicated durable meta; orphan Raft group reclaim after merge; no live migrate  
+**Milestone:** M21 (split), M22 (merge, transfer, learners, advisory balancer, drain, dashboard v1), #25 (durable RangeMeta), #30 (orphan group reclaim)
 
 ---
 
@@ -71,8 +71,9 @@ Lookup: linear scan; key `k` matches first range with `start ≤ k < end`
 3. Merged range: keep `L.group_id`, `L.range_id`,
    `epoch = max(L.epoch, R.epoch) + 1`, `end_key = R.end_key`.
 4. Drop `R` from the table; bump `meta_epoch`.
-5. Do **not** tear down the Raft group that owned `R` in this path — the orphan
-   group may stay hosted and idle. Reclaim / unhost is follow-on work.
+5. Do **not** tear down the Raft group that owned `R` in this path — the merge
+   only updates routing. `R`'s group becomes an *orphan* (hosted, no longer
+   referenced by any range); see §3d for reclaim.
 6. Commit the merged table the same way as split (`RangeMeta` + disk file).
 
 ---
@@ -95,6 +96,48 @@ On `ClusterNode` start:
 Clients may prefix PUT/GET/DELETE/SCAN with `MEPO | meta_epoch(u64 LE)`. If
 `client_epoch < server.meta_epoch`, the server returns `RANGE_MOVED` (11) with
 a full list-ranges body. `kaya-client` attaches the cached epoch automatically.
+
+---
+
+## 3d. Orphan Raft group reclaim (#30)
+
+A merge (§3b) drops the right range from the table but does not tear down the
+Raft group that owned it — that group is now *orphaned*: still hosted, no
+longer referenced by any range. Reclaim runs as part of the normal drain pass
+(`cluster::replication::drain_and_apply`, driven by the tick loop — no
+separate background task) and unhosts + deletes the group's on-disk data.
+
+**Candidate set:** `hosted_group_ids \ referenced_group_ids`, always excluding
+group 0 (meta / membership group, always live).
+
+**Invariants:**
+
+1. **Never reclaim while meta still references the group.** A group only
+   becomes a candidate after a committed `RangeMeta` snapshot has already
+   dropped it from the table (§3b step 4 happens before reclaim ever
+   considers the group; the CAS-apply in `apply_range_meta_entry` and the
+   reclaim pass both run under `drain_and_apply`, so a group is either fully
+   referenced or fully dropped from every reclaim pass's point of view — no
+   window where a range still resolves to a group mid-reclaim).
+2. **Never touch group 0.**
+3. **Drain gate:** a candidate is only reclaimed once it is quiescent
+   (`RaftStatus.commit_index == RaftStatus.last_applied` — nothing
+   replicated-but-unapplied left in flight for that group). A candidate that
+   isn't drained yet is skipped and retried on the next pass.
+4. **Idempotent / crash-safe:** reclaim (a) removes the group from
+   `MultiRaftHost`, (b) drops its `RaftPersister` / `RaftApplyIndex` map
+   entries, (c) `remove_dir_all`s `{data_dir}/groups/{id}`, then (d)
+   increments the reclaim counter. A crash between any of these steps is
+   harmless: on restart, `ClusterNode` startup only (re)hosts groups the
+   *persisted range table* still references (§3c step 2), so an orphan is
+   never rehosted regardless of how far reclaim got; the next drain pass
+   simply repeats step (c) (`remove_dir_all` on an already-missing directory
+   is not an error) and, if the host entry still exists, (a)-(b) as well.
+
+**Metrics** (`GET /metrics`, `kaya-server/src/metrics.rs`):
+- `kaya_range_orphan_groups` (gauge) — live count of the candidate set.
+- `kaya_range_orphan_groups_reclaimed_total` (counter) — cumulative reclaims
+  since process start.
 
 ---
 
@@ -188,9 +231,9 @@ raw bytes; otherwise UTF-8.
 | Range table inside Raft snapshot payload | Yes (snapshot v2; sim catch-up) |
 | Stale client `meta_epoch` → RANGE_MOVED | Yes (`MEPO` prefix + IT) |
 | Sim crash / snapshot restore | Yes (`range_meta_replicates_and_survives_crash`) |
+| Orphan group reclaim after merge | Yes (§3d; `test_range_merge_reclaims_orphan_group`) |
 | Auto size-threshold split | No (manual + API first) |
 | Live range migrate / MOVE_RANGE | No (follow-on) |
-| Orphan group reclaim after merge | No (follow-on) |
 
 ---
 
@@ -199,3 +242,4 @@ raw bytes; otherwise UTF-8.
 - `spec/docs/multi-raft-spec.md` (M20 foundation)
 - `kaya_raft::StaticRangeTable::split_at` / `merge_with_next`
 - `kaya-server` opcodes 15/16/17/18/19/20
+- `kaya_server::cluster::replication::reclaim_orphan_groups` (§3d, issue #30)

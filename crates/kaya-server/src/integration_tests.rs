@@ -41,6 +41,25 @@ mod tests {
         rest[..end].parse().ok()
     }
 
+    fn u64_field_from_json(json: &str, field: &str) -> Option<u64> {
+        let needle = format!("\"{field}\":");
+        let start = json.find(&needle)? + needle.len();
+        let rest = &json[start..];
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        rest[..end].parse().ok()
+    }
+
+    /// STATS (opcode 6) `raft_groups` field, or `None` if the request failed.
+    async fn raft_groups_from_stats(client_addr: SocketAddr) -> Option<u64> {
+        let (status, body) = roundtrip(client_addr, 6, &[]).await.ok()?;
+        if status != STATUS_OK {
+            return None;
+        }
+        u64_field_from_json(&String::from_utf8(body).ok()?, "raft_groups")
+    }
+
     #[serial]
     #[tokio::test]
     async fn test_real_cluster_correctness() {
@@ -2618,6 +2637,106 @@ mod tests {
             .unwrap();
         assert_eq!(status, STATUS_OK);
         assert_eq!(decode_value_payload(&body).unwrap(), b"v2");
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// Issue #30: merge orphans the right group's Raft host entry and data dir;
+    /// the reclaim pass frees both (raft_groups count drops, `groups/<id>` is gone).
+    #[serial]
+    #[tokio::test]
+    async fn test_range_merge_reclaims_orphan_group() {
+        use kaya_net::{
+            encode_merge_range_request, encode_split_range_request, MERGE_RANGE_OPCODE,
+            SPLIT_RANGE_OPCODE,
+        };
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("kayadb_range_reclaim_{}", test_id));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let r = get_free_port().await;
+        let c = get_free_port().await;
+        let raft_addr: SocketAddr = format!("127.0.0.1:{}", r).parse().unwrap();
+        let client_addr: SocketAddr = format!("127.0.0.1:{}", c).parse().unwrap();
+
+        let config = ClusterConfig::new(1, &data_dir, raft_addr, client_addr, vec![]);
+        let handle = tokio::spawn(async move {
+            let _ = ClusterNode::new(config).run().await;
+        });
+
+        let mut ready = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "node should elect");
+
+        let (status, _) = roundtrip(
+            client_addr,
+            SPLIT_RANGE_OPCODE,
+            &encode_split_range_request(b"m"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, STATUS_OK, "split should succeed");
+
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            if check_health(client_addr).await.as_deref() == Some("leader") {
+                break;
+            }
+        }
+
+        // Group 1 (the split-off right half) is hosted: raft_groups == 2, data dir exists.
+        let group1_dir = data_dir.join("groups").join("1");
+        let mut saw_two_groups = false;
+        for _ in 0..40 {
+            if let Some(n) = raft_groups_from_stats(client_addr).await {
+                if n == 2 {
+                    saw_two_groups = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(saw_two_groups, "expected 2 hosted raft groups after split");
+        assert!(
+            group1_dir.exists(),
+            "group 1 data dir should exist after split"
+        );
+
+        let (status, _) = roundtrip(
+            client_addr,
+            MERGE_RANGE_OPCODE,
+            &encode_merge_range_request(b""),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, STATUS_OK, "merge should succeed");
+
+        // Reclaim runs on the drain loop (every tick): host entry unhosted and
+        // the group's data dir removed without a restart.
+        let mut reclaimed = false;
+        for _ in 0..80 {
+            let groups = raft_groups_from_stats(client_addr).await;
+            if groups == Some(1) && !group1_dir.exists() {
+                reclaimed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            reclaimed,
+            "orphan group 1 should be unhosted and its data dir removed after merge"
+        );
 
         handle.abort();
         let _ = std::fs::remove_dir_all(&data_dir);

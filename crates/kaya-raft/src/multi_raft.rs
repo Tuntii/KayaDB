@@ -210,7 +210,9 @@ impl StaticRangeTable {
     /// The merged range keeps `L.group_id` and `L.range_id`, takes `R.end_key`, and
     /// sets `epoch = max(L.epoch, R.epoch) + 1`. `R` is dropped from the table and
     /// `meta_epoch` is bumped. The Raft group that owned `R` is **not** torn down
-    /// here (orphan group may stay hosted and idle; reclaim is follow-on work).
+    /// here — it becomes an orphan (unreferenced by the table) that
+    /// `kaya_server::cluster::replication::reclaim_orphan_groups` unhosts and
+    /// deletes on a later drain pass once it has nothing in flight (issue #30).
     pub fn merge_with_next(&mut self, left_start: &[u8]) -> Result<StaticRange, String> {
         let idx = self
             .ranges
@@ -404,6 +406,13 @@ impl MultiRaftHost {
 
     pub fn get_mut(&mut self, group_id: GroupId) -> Option<&mut RaftNode> {
         self.groups.get_mut(&group_id)
+    }
+
+    /// Stop hosting a group and return its node (issue #30: orphan group reclaim).
+    /// Callers must verify the group is safe to drop first (no longer referenced
+    /// by the range table, no in-flight applies) — this is an unconditional removal.
+    pub fn remove(&mut self, group_id: GroupId) -> Option<RaftNode> {
+        self.groups.remove(&group_id)
     }
 
     pub fn len(&self) -> usize {
@@ -689,6 +698,17 @@ mod tests {
         t.split_at(b"m").unwrap();
         // Right half has no neighbor.
         assert!(t.merge_with_next(b"m").is_err());
+    }
+
+    #[test]
+    fn multi_raft_host_remove_unhosts_group() {
+        let mut host = MultiRaftHost::new();
+        host.insert_single_node(GroupId(1), crate::types::NodeId(1));
+        assert!(host.get(GroupId(1)).is_some());
+        assert!(host.remove(GroupId(1)).is_some());
+        assert!(host.get(GroupId(1)).is_none());
+        // Idempotent: removing again is a no-op, not a panic.
+        assert!(host.remove(GroupId(1)).is_none());
     }
 
     #[test]
