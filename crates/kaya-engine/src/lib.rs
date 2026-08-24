@@ -102,6 +102,10 @@ pub struct RecoveryReport {
     pub txn2pc_aborted: u32,
     /// 2PC `Committing` records finished to `Committed` during open.
     pub txn2pc_finished_commits: u32,
+    /// `Prepared` records left in doubt: acked prepares with no locally durable
+    /// decision. Never aborted by the participant (see `transactions-spec.md`
+    /// §17.4); the recovering coordinator resolves them.
+    pub txn2pc_pending: u32,
 }
 
 #[derive(Debug)]
@@ -277,6 +281,7 @@ impl<D: Disk> Engine<D> {
             records_replayed: wal_records_replayed,
             txn2pc_aborted: 0,
             txn2pc_finished_commits: 0,
+            txn2pc_pending: 0,
         };
 
         let mut engine = Self {
@@ -308,6 +313,7 @@ impl<D: Disk> Engine<D> {
         let txn2pc = engine.recover_incomplete_2pc().await?;
         engine.last_recovery.txn2pc_aborted = txn2pc.aborted;
         engine.last_recovery.txn2pc_finished_commits = txn2pc.finished_commits;
+        engine.last_recovery.txn2pc_pending = txn2pc.undecided_prepared.len() as u32;
         Ok(engine)
     }
 

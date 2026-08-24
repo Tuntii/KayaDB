@@ -496,8 +496,8 @@ async fn dispatch(
         };
     }
 
-    // Handle admin opcodes 7/8/18/19/20/21
-    // (ADD/REMOVE/TRANSFER/PROMOTE/REBALANCE_PLAN/MOVE_RANGE)
+    // Handle admin opcodes 7/8/18/19/20/21/22
+    // (ADD/REMOVE/TRANSFER/PROMOTE/REBALANCE_PLAN/MOVE_RANGE/TXN_FORWARD)
     // with optional operator token enforcement. Supports backward-compat raw payloads
     // (no token configured) and ADMIN-prefixed payloads when clients present the
     // credential. If server has token set, must match.
@@ -548,7 +548,7 @@ async fn dispatch(
             }
         }
 
-        // TXN_FORWARD (21): a peer coordinator asks us, the leader of
+        // TXN_FORWARD (22): a peer coordinator asks us, the leader of
         // `group_id`, to replicate one 2PC command on that group (#26).
         if opcode == TXN_FORWARD_OPCODE {
             // The body is a raw replicated command, so it bypasses the data-path
@@ -1542,7 +1542,7 @@ async fn propose_cmd_result(
 /// Cross-group transactions are coordinated by the group-0 leader, but a
 /// participant range may be led elsewhere. Rather than failing the commit with
 /// NOT_LEADER, the coordinator ships the command to that leader over the
-/// existing client RPC (`TXN_FORWARD`, opcode 21) and waits for it to be
+/// existing client RPC (`TXN_FORWARD`, opcode 22) and waits for it to be
 /// committed and applied there.
 ///
 /// The forwarded body is a raw replicated command, so it carries the operator

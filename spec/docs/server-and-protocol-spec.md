@@ -101,9 +101,10 @@ Decoder must reject oversized frames before allocation.
 | 5 | HEALTH | empty |
 | 6 | STATS | empty |
 
-Opcodes 7–21 (membership, TXN, CDC, range routing) are specified where they are
-implemented: `spec/docs/range-routing-spec.md` §4 covers 15–21
-(`LIST_RANGES` … `MOVE_RANGE`).
+Admin / internal opcodes are allocated in `kaya_net::codec` and documented with
+their owning subsystem: 7–8 membership, 9–12 transactions, 13–14 CDC, 15–21
+range routing (`range-routing-spec.md` §4, including `MOVE_RANGE`), 22
+`TXN_FORWARD` (internal 2PC forwarding, `transactions-spec.md` §17.4).
 
 Future:
 

@@ -140,14 +140,21 @@ pub fn parse_rec_txn_id(key: &[u8]) -> Option<u64> {
 }
 
 /// Counts returned by [`Engine::recover_incomplete_2pc`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Txn2pcRecoveryStats {
-    /// Records that were `Preparing` / `Prepared` and aborted (explicit abort
-    /// decision, or fail-closed because no decision was durable locally).
+    /// Records aborted: `Preparing` (prepare never acked, so no commit decision
+    /// can exist), or any state carrying an explicit abort decision.
     pub aborted: u32,
     /// Records that were `Committing`, or `Preparing` / `Prepared` with a
     /// durable commit decision, and were finished to `Committed`.
     pub finished_commits: u32,
+    /// `Prepared` records with **no** locally durable decision. These are left
+    /// in doubt on purpose — a prepare that was acked may have been committed
+    /// globally, so a participant must never abort one unilaterally. They are
+    /// resolved when the decision reaches this node (see
+    /// [`Engine::apply_txn_decision`]) or when the recovering coordinator
+    /// records an abort decision for them.
+    pub undecided_prepared: Vec<u64>,
 }
 
 /// Encode an intent value: put or delete tombstone.
@@ -309,24 +316,48 @@ impl<D: Disk> Engine<D> {
     ///
     /// Written before any participant is told to commit. Idempotent; a second
     /// write with a conflicting decision is rejected — a 2PC decision is final.
+    ///
+    /// Applying a decision also **resolves any local in-doubt record**: this is
+    /// what unblocks a `Prepared` participant whose meta-group log was behind at
+    /// recovery time, without it ever having to guess.
     pub async fn apply_txn_decision(&mut self, txn_id: u64, commit: bool) -> Result<()> {
-        if let Some(prev) = self.read_txn_decision(txn_id)? {
-            if prev != commit {
+        match self.read_txn_decision(txn_id)? {
+            Some(prev) if prev != commit => {
                 return Err(KayaError::invalid_argument(format!(
                     "2PC decision for txn {txn_id} already durable as {} — cannot flip",
                     if prev { "commit" } else { "abort" }
                 )));
             }
-            return Ok(());
+            Some(_) => {}
+            None => {
+                let byte = if commit {
+                    DECISION_COMMIT
+                } else {
+                    DECISION_ABORT
+                };
+                self.write_put(encode_dec_key(txn_id), vec![byte], WriteOptions::default())
+                    .await?;
+            }
         }
-        let byte = if commit {
-            DECISION_COMMIT
-        } else {
-            DECISION_ABORT
-        };
-        self.write_put(encode_dec_key(txn_id), vec![byte], WriteOptions::default())
-            .await?;
-        Ok(())
+        self.resolve_local_2pc_record(txn_id, commit).await
+    }
+
+    /// Drive a local `Preparing` / `Prepared` record to the decided outcome.
+    ///
+    /// No-op when there is no local record (this node is not a participant, or
+    /// the prepare has not been applied here yet — the participant group's own
+    /// log still carries prepare *and* commit) or when it is already resolved.
+    async fn resolve_local_2pc_record(&mut self, txn_id: u64, commit: bool) -> Result<()> {
+        match self.read_txn2pc_state(txn_id)? {
+            Some(Txn2pcState::Preparing) | Some(Txn2pcState::Prepared) => {
+                if commit {
+                    self.apply_txn_commit_2pc(txn_id).await
+                } else {
+                    self.apply_txn_abort_2pc(txn_id).await
+                }
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Read the durable global 2PC decision: `Some(true)` = commit,
@@ -357,10 +388,15 @@ impl<D: Disk> Engine<D> {
 
     /// Crash recovery for incomplete 2PC participant records (run on open).
     ///
-    /// - `Preparing` / `Prepared` → consult the durable decision record
-    ///   (`\x00txn/dec/…`): commit decision → finish commit; abort decision or
-    ///   **no** decision → abort (fail-closed — no participant can have
-    ///   committed without the decision being durable first)
+    /// - any state **with** a durable decision (`\x00txn/dec/…`) → follow it
+    /// - `Preparing`, no decision → abort. The prepare was never acked, so the
+    ///   coordinator cannot have decided commit.
+    /// - `Prepared`, no decision → **leave in doubt** (intents kept). A prepare
+    ///   that was acked may have been committed globally while this node's
+    ///   meta-group log lagged; aborting it here would produce a partial
+    ///   user-visible commit. Reported in
+    ///   [`Txn2pcRecoveryStats::undecided_prepared`] and resolved when the
+    ///   decision arrives, or by the recovering coordinator writing an abort.
     /// - `Committing` → finish commit (decision was durable; never abort)
     /// - `Committed` / `Aborted` → leave untouched
     ///
@@ -381,12 +417,22 @@ impl<D: Disk> Engine<D> {
             let state = Txn2pcState::from_byte(kv.value[0])?;
             match state {
                 Txn2pcState::Preparing | Txn2pcState::Prepared => {
-                    if self.read_txn_decision(txn_id)? == Some(true) {
-                        self.apply_txn_commit_2pc(txn_id).await?;
-                        stats.finished_commits = stats.finished_commits.saturating_add(1);
-                    } else {
-                        self.apply_txn_abort_2pc(txn_id).await?;
-                        stats.aborted = stats.aborted.saturating_add(1);
+                    match self.read_txn_decision(txn_id)? {
+                        Some(true) => {
+                            self.apply_txn_commit_2pc(txn_id).await?;
+                            stats.finished_commits = stats.finished_commits.saturating_add(1);
+                        }
+                        Some(false) => {
+                            self.apply_txn_abort_2pc(txn_id).await?;
+                            stats.aborted = stats.aborted.saturating_add(1);
+                        }
+                        // Undecided: only a prepare that was never acked is safe
+                        // to abort here (TXN-2PC-8).
+                        None if state == Txn2pcState::Preparing => {
+                            self.apply_txn_abort_2pc(txn_id).await?;
+                            stats.aborted = stats.aborted.saturating_add(1);
+                        }
+                        None => stats.undecided_prepared.push(txn_id),
                     }
                 }
                 Txn2pcState::Committing => {
@@ -397,6 +443,28 @@ impl<D: Disk> Engine<D> {
             }
         }
         Ok(stats)
+    }
+
+    /// `Prepared` records with no durable decision — 2PC transactions left in
+    /// doubt on this node.
+    ///
+    /// A participant must never abort these on its own (TXN-2PC-8); the
+    /// recovering coordinator uses this list to close them out.
+    pub fn undecided_prepared_txns(&mut self) -> Result<Vec<u64>> {
+        let rows = self.scan_prefix_inner(TXN_REC_PREFIX, ScanOptions::default())?;
+        let mut out = Vec::new();
+        for kv in rows {
+            let Some(txn_id) = parse_rec_txn_id(&kv.key) else {
+                continue;
+            };
+            if kv.value.first().copied() != Some(Txn2pcState::Prepared.as_byte()) {
+                continue;
+            }
+            if self.read_txn_decision(txn_id)?.is_none() {
+                out.push(txn_id);
+            }
+        }
+        Ok(out)
     }
 
     fn load_durable_intents(&mut self, txn_id: u64) -> Result<Vec<(Bytes, Option<Bytes>)>> {
@@ -639,9 +707,10 @@ mod tests {
     }
 
     #[test]
-    fn prepare_without_commit_aborts_on_reopen() {
-        // Incomplete 2PC (Prepared, no durable commit decision) is fail-closed
-        // on Engine::open — intents and partial prepares must not leak.
+    fn prepare_without_decision_stays_in_doubt_on_reopen() {
+        // TXN-2PC-8: a prepare that was acked may have been committed globally,
+        // so a participant must never abort it on its own. It stays Prepared
+        // (intents held, nothing user-visible) until the decision arrives.
         block_on(async {
             let disk = Arc::new(SimDisk::new());
             {
@@ -658,21 +727,22 @@ mod tests {
                 );
             }
             let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
-            assert!(
-                engine.last_recovery().txn2pc_aborted >= 1,
-                "Prepared must abort on open"
+            assert_eq!(
+                engine.last_recovery().txn2pc_aborted,
+                0,
+                "Prepared must not abort on open"
             );
             assert_eq!(
                 engine.read_txn2pc_state(11).unwrap(),
-                Some(Txn2pcState::Aborted)
+                Some(Txn2pcState::Prepared)
             );
-            assert_eq!(
-                engine
-                    .get(&encode_intent_key(11, b"x"), ReadOptions::default())
-                    .await
-                    .unwrap(),
-                None
-            );
+            assert_eq!(engine.undecided_prepared_txns().unwrap(), vec![11]);
+            // Intents are held; the user key is still invisible.
+            assert!(engine
+                .get(&encode_intent_key(11, b"x"), ReadOptions::default())
+                .await
+                .unwrap()
+                .is_some());
             assert_eq!(
                 engine.get(b"x", ReadOptions::default()).await.unwrap(),
                 None
@@ -775,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn open_aborts_preparing_and_prepared_clears_intents() {
+    fn open_aborts_preparing_but_holds_prepared_in_doubt() {
         block_on(async {
             let disk = Arc::new(SimDisk::new());
             {
@@ -805,14 +875,21 @@ mod tests {
                     .unwrap();
             }
             let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
-            assert!(engine.last_recovery().txn2pc_aborted >= 2);
+            // 100 was never acked (Preparing) → safe to abort locally.
+            assert_eq!(engine.last_recovery().txn2pc_aborted, 1);
             assert_eq!(
                 engine.read_txn2pc_state(100).unwrap(),
                 Some(Txn2pcState::Aborted)
             );
+            // 101 was acked (Prepared) with no decision → stays in doubt.
             assert_eq!(
                 engine.read_txn2pc_state(101).unwrap(),
-                Some(Txn2pcState::Aborted)
+                Some(Txn2pcState::Prepared)
+            );
+            assert_eq!(
+                engine.last_recovery().txn2pc_pending,
+                1,
+                "Prepared without a decision must not be aborted"
             );
             assert_eq!(
                 engine
@@ -821,6 +898,12 @@ mod tests {
                     .unwrap(),
                 None
             );
+            // In-doubt intents are held, but never user-visible.
+            assert!(engine
+                .get(&encode_intent_key(101, b"prep"), ReadOptions::default())
+                .await
+                .unwrap()
+                .is_some());
             assert_eq!(
                 engine.get(b"prep", ReadOptions::default()).await.unwrap(),
                 None
@@ -948,13 +1031,13 @@ mod tests {
                 let mut engine = Engine::open(EngineConfig::default(), disk.clone())
                     .await
                     .unwrap();
+                // Meta-group decision replicated here before the participant
+                // group's prepare (independent Raft logs), then a crash.
+                engine.apply_txn_decision(400, true).await.unwrap();
                 engine
                     .apply_txn_prepare(400, &[(b"dk".to_vec(), Some(b"dv".to_vec()))])
                     .await
                     .unwrap();
-                // Coordinator wrote the global decision on the meta group, then died
-                // before this participant applied TxnCommit2pc.
-                engine.apply_txn_decision(400, true).await.unwrap();
             }
             let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
             assert_eq!(engine.last_recovery().txn2pc_finished_commits, 1);
@@ -970,9 +1053,51 @@ mod tests {
         });
     }
 
-    /// Explicit **abort** decision, and no decision at all, both fail closed.
+    /// An explicit **abort** decision releases a `Prepared` record; no decision
+    /// at all leaves it in doubt (TXN-2PC-8).
     #[test]
-    fn recovery_aborts_prepared_on_abort_decision_and_when_undecided() {
+    fn recovery_aborts_on_abort_decision_but_holds_undecided() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            {
+                let mut engine = Engine::open(EngineConfig::default(), disk.clone())
+                    .await
+                    .unwrap();
+                // Abort decision arrives before the prepare replicates here.
+                engine.apply_txn_decision(401, false).await.unwrap();
+                engine
+                    .apply_txn_prepare(401, &[(b"ak".to_vec(), Some(b"av".to_vec()))])
+                    .await
+                    .unwrap();
+                engine
+                    .apply_txn_prepare(402, &[(b"uk".to_vec(), Some(b"uv".to_vec()))])
+                    .await
+                    .unwrap();
+            }
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            assert_eq!(engine.last_recovery().txn2pc_aborted, 1);
+            assert_eq!(engine.last_recovery().txn2pc_finished_commits, 0);
+            assert_eq!(engine.last_recovery().txn2pc_pending, 1);
+            assert_eq!(
+                engine.read_txn2pc_state(401).unwrap(),
+                Some(Txn2pcState::Aborted)
+            );
+            assert_eq!(
+                engine.read_txn2pc_state(402).unwrap(),
+                Some(Txn2pcState::Prepared)
+            );
+            // Neither transaction is user-visible.
+            for key in [b"ak".as_slice(), b"uk".as_slice()] {
+                assert_eq!(engine.get(key, ReadOptions::default()).await.unwrap(), None);
+            }
+        });
+    }
+
+    /// The case the fail-closed rule used to break: `Prepared`, no decision at
+    /// open, then the COMMIT decision replicates → the record commits, and it
+    /// was never aborted in between (TXN-2PC-8).
+    #[test]
+    fn late_commit_decision_resolves_an_in_doubt_prepare() {
         block_on(async {
             let disk = Arc::new(SimDisk::new());
             {
@@ -980,25 +1105,54 @@ mod tests {
                     .await
                     .unwrap();
                 engine
-                    .apply_txn_prepare(401, &[(b"ak".to_vec(), Some(b"av".to_vec()))])
-                    .await
-                    .unwrap();
-                engine.apply_txn_decision(401, false).await.unwrap();
-                engine
-                    .apply_txn_prepare(402, &[(b"uk".to_vec(), Some(b"uv".to_vec()))])
+                    .apply_txn_prepare(403, &[(b"late".to_vec(), Some(b"v".to_vec()))])
                     .await
                     .unwrap();
             }
+            // Reopen with the meta-group log still behind: nothing decided here.
             let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
-            assert_eq!(engine.last_recovery().txn2pc_aborted, 2);
-            assert_eq!(engine.last_recovery().txn2pc_finished_commits, 0);
-            for (txn, key) in [(401u64, b"ak".as_slice()), (402, b"uk".as_slice())] {
-                assert_eq!(
-                    engine.read_txn2pc_state(txn).unwrap(),
-                    Some(Txn2pcState::Aborted)
-                );
-                assert_eq!(engine.get(key, ReadOptions::default()).await.unwrap(), None);
-            }
+            assert_eq!(engine.last_recovery().txn2pc_aborted, 0);
+            assert_eq!(
+                engine.read_txn2pc_state(403).unwrap(),
+                Some(Txn2pcState::Prepared)
+            );
+
+            // Meta-group catches up and delivers the commit decision.
+            engine.apply_txn_decision(403, true).await.unwrap();
+            assert_eq!(
+                engine.read_txn2pc_state(403).unwrap(),
+                Some(Txn2pcState::Committed)
+            );
+            assert_eq!(
+                engine.get(b"late", ReadOptions::default()).await.unwrap(),
+                Some(b"v".to_vec())
+            );
+            assert!(engine.undecided_prepared_txns().unwrap().is_empty());
+        });
+    }
+
+    /// The mirror case: a late ABORT decision releases the in-doubt prepare.
+    #[test]
+    fn late_abort_decision_releases_an_in_doubt_prepare() {
+        block_on(async {
+            let disk = Arc::new(SimDisk::new());
+            let mut engine = Engine::open(EngineConfig::default(), disk).await.unwrap();
+            engine
+                .apply_txn_prepare(404, &[(b"gone".to_vec(), Some(b"v".to_vec()))])
+                .await
+                .unwrap();
+            assert_eq!(engine.undecided_prepared_txns().unwrap(), vec![404]);
+
+            engine.apply_txn_decision(404, false).await.unwrap();
+            assert_eq!(
+                engine.read_txn2pc_state(404).unwrap(),
+                Some(Txn2pcState::Aborted)
+            );
+            assert_eq!(
+                engine.get(b"gone", ReadOptions::default()).await.unwrap(),
+                None
+            );
+            assert!(engine.undecided_prepared_txns().unwrap().is_empty());
         });
     }
 

@@ -520,12 +520,20 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     let mut engine = Engine::open(engine_cfg, disk)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    // 2PC crash recovery: abort Preparing/Prepared; finish Committing.
+    // 2PC crash recovery: follow the decision log; abort un-acked `Preparing`;
+    // finish `Committing`. `Prepared` with no decision stays in doubt until the
+    // coordinator resolves it (see `txn_coord::abort_orphaned_prepares`).
     match txn_coord::recover_incomplete_2pc(&mut engine).await {
-        Ok((0, 0)) => {}
-        Ok((aborted, finished)) => eprintln!(
-            "[node {}] 2PC recovery: aborted {aborted} in-doubt record(s), finished {finished} Committing",
-            config.node_id.0
+        Ok(stats)
+            if stats.aborted == 0
+                && stats.finished_commits == 0
+                && stats.undecided_prepared.is_empty() => {}
+        Ok(stats) => eprintln!(
+            "[node {}] 2PC recovery: aborted {}, finished {} Committing, {} prepared record(s) in doubt",
+            config.node_id.0,
+            stats.aborted,
+            stats.finished_commits,
+            stats.undecided_prepared.len()
         ),
         Err(e) => eprintln!(
             "[node {}] warning: 2PC recovery scan failed: {e}",

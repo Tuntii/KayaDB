@@ -253,20 +253,67 @@ where
     }
 }
 
+/// Coordinator recovery: abort 2PC transactions left in doubt (#26).
+///
+/// Participants never abort a `Prepared` record on their own (TXN-2PC-8), so
+/// somebody has to close them out. This runs when the node **gains** meta-group
+/// leadership — including its first election after a restart. At that instant any
+/// earlier coordinator has lost its term, so a transaction with no durable
+/// decision is orphaned and can only be aborted.
+///
+/// Safe even if a commit decision is still in flight: decisions are ordered by
+/// the group-0 log, that entry precedes ours, and
+/// [`kaya_engine::Engine::apply_txn_decision`] refuses to flip a durable
+/// decision — so the commit wins and our abort is discarded.
+pub async fn abort_orphaned_prepares(
+    host: &super::SharedRaftHost,
+    engine: &super::SharedEngine,
+    node_id: kaya_raft::NodeId,
+) {
+    let orphans = match engine.lock().await.undecided_prepared_txns() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!(
+                "[node {}] warning: in-doubt 2PC scan failed: {e}",
+                node_id.0
+            );
+            return;
+        }
+    };
+    if orphans.is_empty() {
+        return;
+    }
+    eprintln!(
+        "[node {}] 2PC coordinator recovery: aborting {} in-doubt txn(s)",
+        node_id.0,
+        orphans.len()
+    );
+    let mut guard = host.lock().unwrap();
+    for txn_id in orphans {
+        let cmd = RaftCommand::TxnDecision {
+            txn_id,
+            commit: false,
+        }
+        .encode();
+        guard.propose_group(DECISION_GROUP, cmd);
+    }
+}
+
 /// Crash recovery for incomplete 2PC participant records.
 ///
 /// Delegates to [`kaya_engine::Engine::recover_incomplete_2pc`] (also run on
-/// every engine open). Returns `(aborted, finished_commits)`.
+/// every engine open).
 ///
 /// Called at node startup for operator logging before the Raft event loop runs.
+/// `Prepared` records left undecided are reported, not aborted — see
+/// [`abort_orphaned_prepares`].
 pub async fn recover_incomplete_2pc<D: Disk>(
     engine: &mut kaya_engine::Engine<D>,
-) -> Result<(u32, u32), String> {
-    let stats = engine
+) -> Result<kaya_engine::Txn2pcRecoveryStats, String> {
+    engine
         .recover_incomplete_2pc()
         .await
-        .map_err(|e| e.to_string())?;
-    Ok((stats.aborted, stats.finished_commits))
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -436,7 +483,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recover_aborts_prepared_leaves_committed() {
+    async fn recover_holds_prepared_in_doubt_leaves_committed() {
         use std::sync::Arc;
 
         use kaya_core::EngineConfig;
@@ -452,7 +499,7 @@ mod tests {
         };
         let mut engine = Engine::open(cfg, disk).await.unwrap();
 
-        // Prepared → abort on recovery.
+        // Prepared, undecided → held in doubt, reported to the coordinator.
         engine
             .apply_txn_prepare(1, &[(b"prep".to_vec(), Some(b"1".to_vec()))])
             .await
@@ -464,16 +511,22 @@ mod tests {
             .unwrap();
         engine.apply_txn_commit_2pc(2).await.unwrap();
 
-        let (aborted, finished) = recover_incomplete_2pc(&mut engine).await.unwrap();
-        assert_eq!(aborted, 1, "txn 1 Prepared must abort");
-        assert_eq!(finished, 0);
+        let stats = recover_incomplete_2pc(&mut engine).await.unwrap();
+        assert_eq!(stats.aborted, 0, "an acked prepare must not be aborted");
+        assert_eq!(stats.finished_commits, 0);
+        assert_eq!(
+            stats.undecided_prepared,
+            vec![1],
+            "txn 1 must be reported in doubt"
+        );
         assert_eq!(
             engine.read_txn2pc_state(1).unwrap(),
-            Some(Txn2pcState::Aborted)
+            Some(Txn2pcState::Prepared)
         );
         assert_eq!(
             engine.get(b"prep", ReadOptions::default()).await.unwrap(),
-            None
+            None,
+            "an in-doubt prepare is never user-visible"
         );
         assert_eq!(
             engine.read_txn2pc_state(2).unwrap(),
@@ -483,41 +536,14 @@ mod tests {
             engine.get(b"fin", ReadOptions::default()).await.unwrap(),
             Some(b"2".to_vec())
         );
-    }
 
-    #[tokio::test]
-    async fn recover_finishes_committing_via_wrapper() {
-        use std::sync::Arc;
-
-        use kaya_core::EngineConfig;
-        use kaya_engine::{Engine, ReadOptions, Txn2pcState};
-        use kaya_io::SimDisk;
-
-        let disk = Arc::new(SimDisk::new());
-        // SimDisk is in-memory, but the directory lock is not: these tests all
-        // share the default data_dir, so skip it rather than serialize them.
-        let cfg = EngineConfig {
-            disable_locking: true,
-            ..EngineConfig::default()
-        };
-        let mut engine = Engine::open(cfg, disk).await.unwrap();
-        engine
-            .apply_txn_prepare(3, &[(b"x".to_vec(), Some(b"v".to_vec()))])
-            .await
-            .unwrap();
-        // Engine-level tests cover Committing reopen; here ensure the server
-        // wrapper aborts Prepared via the same recover_incomplete_2pc path.
-        let (aborted, finished) = recover_incomplete_2pc(&mut engine).await.unwrap();
-        assert_eq!(aborted, 1);
-        assert_eq!(finished, 0);
+        // The coordinator's abort decision releases it.
+        engine.apply_txn_decision(1, false).await.unwrap();
         assert_eq!(
-            engine.read_txn2pc_state(3).unwrap(),
+            engine.read_txn2pc_state(1).unwrap(),
             Some(Txn2pcState::Aborted)
         );
-        assert_eq!(
-            engine.get(b"x", ReadOptions::default()).await.unwrap(),
-            None
-        );
+        assert!(engine.undecided_prepared_txns().unwrap().is_empty());
     }
 
     #[tokio::test]

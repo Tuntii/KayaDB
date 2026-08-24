@@ -79,6 +79,7 @@ pub async fn recover<D: Disk>(config: EngineConfig, disk: Arc<D>) -> Result<Reco
         records_replayed: wal_records_replayed,
         txn2pc_aborted: 0,
         txn2pc_finished_commits: 0,
+        txn2pc_pending: 0,
     })
 }
 

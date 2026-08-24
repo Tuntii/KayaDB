@@ -3,7 +3,7 @@
 //! Before #26 a cross-range `TXN_COMMIT` could only be served by a node that led
 //! *every* participant group; otherwise the commit failed `NOT_LEADER`. The
 //! coordinator now ships each 2PC command to that group's own leader over the
-//! client RPC (`TXN_FORWARD`, opcode 21) — the wire path exercised here.
+//! client RPC (`TXN_FORWARD`, opcode 22) — the wire path exercised here.
 //!
 //! Note on coverage: this harness cannot pin per-group leadership on distinct
 //! nodes. Election timeouts are staggered by node id (`15 + offset`) and

@@ -235,6 +235,13 @@ pub(crate) async fn raft_event_loop(
                 let _ = tx.send(Err("not_leader".to_owned()));
             }
         }
+        // Gained meta-group leadership → this node is now the 2PC coordinator and
+        // must close out transactions left in doubt by the previous one (#26).
+        if current_leaders.contains(&kaya_raft::GroupId::ZERO.0)
+            && !leader_groups.contains(&kaya_raft::GroupId::ZERO.0)
+        {
+            super::txn_coord::abort_orphaned_prepares(&host, &engine, self_id).await;
+        }
         leader_groups = current_leaders;
     }
 }

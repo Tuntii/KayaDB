@@ -79,6 +79,8 @@ pub const REBALANCE_PLAN_OPCODE: u8 = 20;
 pub const MOVE_RANGE_OPCODE: u8 = 21;
 /// TXN_FORWARD — internal node-to-node 2PC forwarding (#26).
 ///
+/// Opcode 21 is `MOVE_RANGE` (#24); this is 22.
+///
 /// Sent by a cross-group transaction coordinator to the **leader of a
 /// participant Raft group** when that leader is a different node. Body:
 /// `group_id(u64 LE) | raft_command_bytes`. The receiver proposes the command on
@@ -86,7 +88,6 @@ pub const MOVE_RANGE_OPCODE: u8 = 21;
 ///
 /// Treated as an admin opcode: when an operator token is configured it must be
 /// presented via the `ADMIN` framing, since the body is a raw replicated command.
-/// Opcode 22 (21 is `MOVE_RANGE`).
 pub const TXN_FORWARD_OPCODE: u8 = 22;
 
 /// Encode a TXN_FORWARD body: `group_id(u64 LE) | raft_command_bytes`.
