@@ -98,6 +98,10 @@ pub struct ClusterConfig {
     /// Optional per-prefix ACL. When set, PUT/GET/DELETE/SCAN/TXN_* authorize the
     /// presented client token via longest-prefix match. Empty ACL denies all data ops.
     pub acl: Option<crate::acl::PrefixAcl>,
+    /// Optional named-tenant isolation. When set, the presented client token maps
+    /// to one tenant and keyed ops must stay under that tenant's exclusive prefix.
+    /// Combined with `acl` as AND when both are set.
+    pub tenants: Option<crate::acl::TenantAcl>,
     /// TLS configuration. If Some, both Raft and client listeners (and outbound peer connections)
     /// will use TLS. See kaya_net::TlsConfig.
     pub tls: Option<kaya_net::TlsConfig>,
@@ -182,6 +186,7 @@ impl ClusterConfig {
             operator_token: None,
             client_token: None,
             acl: None,
+            tenants: None,
             tls: None,
             network_partitioned: None,
             audit_log: false,
@@ -253,6 +258,14 @@ impl ClusterConfig {
     /// a CLIENT-framed token that matches the longest prefix rule for the key.
     pub fn with_acl(mut self, acl: crate::acl::PrefixAcl) -> Self {
         self.acl = Some(acl);
+        self
+    }
+
+    /// Install named-tenant isolation (#29). When set, the presented token maps
+    /// to one tenant; keyed ops must start with that tenant's exclusive prefix.
+    /// If [`Self::acl`] is also set, both gates must pass.
+    pub fn with_tenants(mut self, tenants: crate::acl::TenantAcl) -> Self {
+        self.tenants = Some(tenants);
         self
     }
 
@@ -823,6 +836,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
     let operator_token = config.operator_token.clone();
     let client_token = config.client_token.clone();
     let acl = config.acl.clone();
+    let tenants = config.tenants.clone();
     let drain = config.drain;
     if drain {
         eprintln!(
@@ -881,6 +895,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         operator_token,
         client_token,
         acl,
+        tenants,
         shared_audit,
         config.network_partitioned.clone(),
         config.max_client_connections,

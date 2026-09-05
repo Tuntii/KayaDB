@@ -1,14 +1,20 @@
-//! Per-prefix ACL (M24): map key prefixes to client tokens.
+//! Per-prefix ACL (M24) and named-tenant isolation (#29).
 //!
-//! Config is a JSON object `prefix -> token`. Prefix keys may be UTF-8 text or
-//! hex-encoded bytes (`0x…` / `hex:…`). When an ACL file is configured, data-path
-//! ops (PUT/GET/DELETE/SCAN/TXN_*) authorize the presented client token against
-//! the **longest** prefix that is a prefix of the request key. Keyless ops
-//! (TXN_BEGIN/COMMIT/ROLLBACK, CDC_POLL/CHECKPOINT, SPLIT/MERGE) accept any
-//! token that appears on at least one rule via [`PrefixAcl::authorize_token`].
-//! An empty ACL map denies every such op.
+//! [`PrefixAcl`]: JSON object `prefix -> token`. Prefix keys may be UTF-8 text
+//! or hex-encoded bytes (`0x…` / `hex:…`). When an ACL file is configured,
+//! data-path ops (PUT/GET/DELETE/SCAN/TXN_*) authorize the presented client
+//! token against the **longest** prefix that is a prefix of the request key.
+//! Keyless ops (TXN_BEGIN/COMMIT/ROLLBACK, CDC_POLL/CHECKPOINT, SPLIT/MERGE)
+//! accept any token that appears on at least one rule via
+//! [`PrefixAcl::authorize_token`]. An empty ACL map denies every such op.
+//!
+//! [`TenantAcl`]: JSON `{ "tenants": [ { "id", "token", "prefix" }, ... ] }`.
+//! Each tenant owns an exclusive key prefix. The presented token maps to at
+//! most one tenant; keyed ops require the key to start with that tenant's
+//! prefix. Keyless ops require the token to belong to some tenant. When both
+//! PrefixAcl and TenantAcl are configured, both must pass (AND).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -91,6 +97,179 @@ impl PrefixAcl {
         }
         self.rules.iter().any(|(_, t)| t == token)
     }
+}
+
+/// One named tenant: unique id, unique token, exclusive key prefix.
+#[derive(Debug, Clone)]
+struct TenantEntry {
+    id: String,
+    prefix: Vec<u8>,
+}
+
+/// Named-tenant isolation (#29): token → exclusive key prefix.
+///
+/// Loaded from JSON `{ "tenants": [ { "id", "token", "prefix" }, ... ] }`.
+/// Prefixes may be UTF-8 text or hex (`0x…` / `hex:…`), same as [`PrefixAcl`].
+#[derive(Debug, Clone, Default)]
+pub struct TenantAcl {
+    /// `token → (id, prefix_bytes)`. Tokens are unique by construction.
+    by_token: HashMap<String, TenantEntry>,
+}
+
+impl TenantAcl {
+    /// Load tenants from a JSON file.
+    pub fn load_file(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let raw = fs::read_to_string(path)
+            .map_err(|e| format!("read tenant file {}: {e}", path.display()))?;
+        Self::from_json(&raw)
+    }
+
+    /// Parse tenants from a JSON object string.
+    pub fn from_json(raw: &str) -> Result<Self, String> {
+        let value: serde_json::Value =
+            serde_json::from_str(raw.trim()).map_err(|e| format!("parse tenant JSON: {e}"))?;
+        let Some(arr) = value.get("tenants").and_then(|v| v.as_array()) else {
+            return Err("tenant file must be a JSON object with a \"tenants\" array".to_owned());
+        };
+
+        let mut by_token: HashMap<String, TenantEntry> = HashMap::new();
+        let mut seen_ids: HashSet<String> = HashSet::new();
+        let mut prefixes: Vec<(String, Vec<u8>)> = Vec::with_capacity(arr.len());
+
+        for (i, entry) in arr.iter().enumerate() {
+            let obj = entry
+                .as_object()
+                .ok_or_else(|| format!("tenants[{i}] must be an object with id, token, prefix"))?;
+            let id = obj
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("tenants[{i}].id must be a string"))?
+                .to_owned();
+            if id.is_empty() {
+                return Err(format!("tenants[{i}].id must be non-empty"));
+            }
+            let token = obj
+                .get("token")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("tenant {id:?} token must be a string"))?
+                .to_owned();
+            if token.is_empty() {
+                return Err(format!("tenant {id:?} token must be non-empty"));
+            }
+            let prefix_s = obj
+                .get("prefix")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("tenant {id:?} prefix must be a string"))?;
+            let prefix = parse_prefix_key(prefix_s)?;
+            if prefix.is_empty() {
+                return Err(format!("tenant {id:?} prefix must be non-empty"));
+            }
+            if seen_ids.contains(&id) {
+                return Err(format!("duplicate tenant id {id:?}"));
+            }
+            if by_token.contains_key(&token) {
+                return Err(format!("duplicate tenant token (id {id:?})"));
+            }
+            seen_ids.insert(id.clone());
+            prefixes.push((id.clone(), prefix.clone()));
+            by_token.insert(token, TenantEntry { id, prefix });
+        }
+
+        assert_exclusive_prefixes(&prefixes)?;
+        Ok(Self { by_token })
+    }
+
+    /// Number of tenants.
+    pub fn len(&self) -> usize {
+        self.by_token.len()
+    }
+
+    /// True when no tenants are configured (deny-all for tenant-gated ops).
+    pub fn is_empty(&self) -> bool {
+        self.by_token.is_empty()
+    }
+
+    /// Tenant id for a presented token, if any.
+    pub fn tenant_id(&self, token: Option<&str>) -> Option<&str> {
+        token.and_then(|t| self.by_token.get(t).map(|e| e.id.as_str()))
+    }
+
+    /// Keyed data-path authorize: token maps to one tenant and `key` starts
+    /// with that tenant's exclusive prefix. Missing token or unknown token
+    /// denies. Empty tenant list denies.
+    pub fn authorize(&self, key: &[u8], token: Option<&str>) -> bool {
+        let Some(token) = token else {
+            return false;
+        };
+        let Some(entry) = self.by_token.get(token) else {
+            return false;
+        };
+        key.starts_with(&entry.prefix)
+    }
+
+    /// Keyless authorize: token must belong to some tenant. Empty list denies.
+    pub fn authorize_token(&self, token: Option<&str>) -> bool {
+        let Some(token) = token else {
+            return false;
+        };
+        self.by_token.contains_key(token)
+    }
+}
+
+/// Combined PrefixAcl + TenantAcl gate. When both are set, both must pass
+/// (AND). When only one is set, that layer is the ACL. When neither is set,
+/// the call is open (the caller still applies `--client-token` separately).
+pub fn authorize_key(
+    acl: Option<&PrefixAcl>,
+    tenants: Option<&TenantAcl>,
+    key: &[u8],
+    token: Option<&str>,
+) -> bool {
+    if let Some(tenants) = tenants {
+        if !tenants.authorize(key, token) {
+            return false;
+        }
+    }
+    if let Some(acl) = acl {
+        if !acl.authorize(key, token) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Combined keyless authorize (TXN_BEGIN/COMMIT/ROLLBACK, CDC, SPLIT/MERGE).
+pub fn authorize_token(
+    acl: Option<&PrefixAcl>,
+    tenants: Option<&TenantAcl>,
+    token: Option<&str>,
+) -> bool {
+    if let Some(tenants) = tenants {
+        if !tenants.authorize_token(token) {
+            return false;
+        }
+    }
+    if let Some(acl) = acl {
+        if !acl.authorize_token(token) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Reject overlapping tenant prefixes: no prefix may be a prefix of another.
+fn assert_exclusive_prefixes(prefixes: &[(String, Vec<u8>)]) -> Result<(), String> {
+    for (i, (id_a, pre_a)) in prefixes.iter().enumerate() {
+        for (id_b, pre_b) in prefixes.iter().skip(i + 1) {
+            if pre_a.starts_with(pre_b) || pre_b.starts_with(pre_a) {
+                return Err(format!(
+                    "tenant prefixes must be exclusive: {id_a:?} and {id_b:?} overlap"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Decode a JSON map key into raw prefix bytes.
@@ -210,5 +389,171 @@ mod tests {
     fn empty_token_rejected() {
         let err = PrefixAcl::from_json(r#"{ "a/": "" }"#).unwrap_err();
         assert!(err.contains("non-empty"), "{err}");
+    }
+
+    fn two_tenants() -> TenantAcl {
+        TenantAcl::from_json(
+            r#"{
+                "tenants": [
+                    {"id": "acme", "token": "tok-acme", "prefix": "acme/"},
+                    {"id": "globex", "token": "tok-globex", "prefix": "globex/"}
+                ]
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn tenant_exclusive_prefixes_rejected() {
+        let err = TenantAcl::from_json(
+            r#"{
+                "tenants": [
+                    {"id": "acme", "token": "t1", "prefix": "acme/"},
+                    {"id": "acme-east", "token": "t2", "prefix": "acme/east/"}
+                ]
+            }"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("exclusive"), "{err}");
+    }
+
+    #[test]
+    fn tenant_equal_prefixes_rejected() {
+        let err = TenantAcl::from_json(
+            r#"{
+                "tenants": [
+                    {"id": "a", "token": "t1", "prefix": "shared/"},
+                    {"id": "b", "token": "t2", "prefix": "shared/"}
+                ]
+            }"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("exclusive"), "{err}");
+    }
+
+    #[test]
+    fn tenant_duplicate_id_rejected() {
+        let err = TenantAcl::from_json(
+            r#"{
+                "tenants": [
+                    {"id": "acme", "token": "t1", "prefix": "a/"},
+                    {"id": "acme", "token": "t2", "prefix": "b/"}
+                ]
+            }"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("duplicate tenant id"), "{err}");
+    }
+
+    #[test]
+    fn tenant_empty_token_rejected() {
+        let err = TenantAcl::from_json(
+            r#"{ "tenants": [ {"id": "acme", "token": "", "prefix": "acme/"} ] }"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("non-empty"), "{err}");
+    }
+
+    #[test]
+    fn tenant_missing_token_denies() {
+        let t = two_tenants();
+        assert!(!t.authorize(b"acme/k", None));
+        assert!(!t.authorize_token(None));
+        assert!(!t.authorize(b"acme/k", Some("unknown")));
+        assert!(!t.authorize_token(Some("unknown")));
+        assert!(t.tenant_id(None).is_none());
+        assert!(t.tenant_id(Some("unknown")).is_none());
+    }
+
+    #[test]
+    fn tenant_denies_other_tenants_key() {
+        let t = two_tenants();
+        assert!(t.authorize(b"acme/k", Some("tok-acme")));
+        assert!(!t.authorize(b"globex/k", Some("tok-acme")));
+        assert!(t.authorize(b"globex/k", Some("tok-globex")));
+        assert!(!t.authorize(b"acme/k", Some("tok-globex")));
+        assert!(!t.authorize(b"other/k", Some("tok-acme")));
+        assert_eq!(t.tenant_id(Some("tok-acme")), Some("acme"));
+        assert_eq!(t.tenant_id(Some("tok-globex")), Some("globex"));
+        assert!(t.authorize_token(Some("tok-acme")));
+        assert!(t.authorize_token(Some("tok-globex")));
+    }
+
+    #[test]
+    fn tenant_empty_list_denies() {
+        let t = TenantAcl::from_json(r#"{ "tenants": [] }"#).unwrap();
+        assert!(t.is_empty());
+        assert!(!t.authorize(b"any", Some("tok")));
+        assert!(!t.authorize_token(Some("tok")));
+    }
+
+    #[test]
+    fn tenant_and_prefix_acl_both_must_pass() {
+        let tenants = two_tenants();
+        let mut map = HashMap::new();
+        map.insert("acme/".into(), "tok-acme".into());
+        map.insert("globex/".into(), "other-tok".into());
+        let acl = PrefixAcl::from_map(map).unwrap();
+
+        // Token is a tenant and matches PrefixAcl for acme/.
+        assert!(authorize_key(
+            Some(&acl),
+            Some(&tenants),
+            b"acme/k",
+            Some("tok-acme")
+        ));
+        // Tenant ok for globex/, but PrefixAcl token is "other-tok" not "tok-globex".
+        assert!(!authorize_key(
+            Some(&acl),
+            Some(&tenants),
+            b"globex/k",
+            Some("tok-globex")
+        ));
+        // Tenant-only: globex token is enough.
+        assert!(authorize_key(
+            None,
+            Some(&tenants),
+            b"globex/k",
+            Some("tok-globex")
+        ));
+        // Neither layer configured: open (client-token is a separate gate).
+        assert!(authorize_key(None, None, b"any", None));
+        assert!(authorize_token(None, None, None));
+        assert!(authorize_token(
+            Some(&acl),
+            Some(&tenants),
+            Some("tok-acme")
+        ));
+        assert!(!authorize_token(
+            Some(&acl),
+            Some(&tenants),
+            Some("tok-globex")
+        ));
+    }
+
+    #[test]
+    fn tenant_load_file_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "kaya_tenant_ut_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tenants.json");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            write!(
+                f,
+                r#"{{"tenants":[{{"id":"acme","token":"tok-acme","prefix":"acme/"}}]}}"#
+            )
+            .unwrap();
+        }
+        let t = TenantAcl::load_file(&path).unwrap();
+        assert_eq!(t.len(), 1);
+        assert!(t.authorize(b"acme/x", Some("tok-acme")));
+        assert!(!t.authorize(b"other/x", Some("tok-acme")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

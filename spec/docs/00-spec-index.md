@@ -45,6 +45,7 @@ KayaDB'nin ana tezi:
 | `configuration-spec.md` | Config files, defaults, validation | P2 |
 | `observability-spec.md` | Logs, metrics, traces, future eBPF | P2 |
 | `security-and-safety-spec.md` | Parser safety, unsafe policy, threat limits | P2 |
+| `tenant-isolation-spec.md` | Named tenants, exclusive prefixes, AND with PrefixAcl (#29) | P2 |
 | `benchmarking-spec.md` | Benchmarks and performance reporting policy | P2 |
 | `format-versioning-spec.md` | Persistent format compatibility and migration policy | P2 |
 | `raft-and-distributed-roadmap-spec.md` | Future Raft and network simulation boundaries | P3 |

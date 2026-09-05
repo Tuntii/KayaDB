@@ -84,6 +84,7 @@ For local demos, bind to `127.0.0.1`. For multi-host experiments, bind to a priv
 | Data-dir exclusive lock | on | `EngineConfig.disable_locking` | `KAYA_LOCK` file (share-mode 0 on Windows, `flock` on Unix) prevents two processes corrupting one data dir | ✅ `crates/kaya-engine/src/lib.rs` |
 | Encryption at rest (engine Disk) | off | `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE` (32 raw bytes) | Engine files sealed with AES-256-GCM via `EncryptedDisk` | ✅ (M24) `kaya-io` + server open path |
 | Per-prefix ACL | off | `--acl-file` / `KAYA_ACL_FILE` (JSON `prefix → token`) | Longest-prefix authorize on PUT/GET/DELETE/SCAN/TXN_OP; any-rule token on TXN_BEGIN/COMMIT/ROLLBACK, CDC_POLL/CHECKPOINT, SPLIT/MERGE; empty map denies all; HEALTH stays open | ✅ (M24) `crates/kaya-server/src/acl.rs` + `client_ops` |
+| Named-tenant isolation | off | `--tenant-file` / `KAYA_TENANT_FILE` (JSON `tenants[]` with `id`/`token`/`prefix`) | Token maps to one tenant; keyed ops must stay under that exclusive prefix (hard deny otherwise); keyless ops need a known tenant token; AND with PrefixAcl when both set; audit JSONL `"tenant"` when resolved | ✅ (#29) `TenantAcl` in `acl.rs` + `client_ops` |
 
 `kayadb-server` calls security checks before binding listeners. See `crates/kaya-server/src/security.rs` and `cluster.rs` (snapshot load + compaction, TLS listener setup).
 
@@ -298,10 +299,11 @@ ufw allow from 10.0.0.2 to any port 8379
 3. **Data At Rest Encryption:**
    * **M24 engine-level AES-256-GCM:** pass `--encryption-key-file <path>` (or `KAYA_ENCRYPTION_KEY_FILE`) where the file is exactly **32 raw bytes**. The server wraps the engine `Disk` with `EncryptedDisk` so WAL/SST/manifest bytes are sealed as `KAYAENC1 | plain_len | nonce | ciphertext+tag`. v1 uses the same key as KEK and DEK; key rotation is a follow-on.
    * Still recommended for full-volume protection (Raft peer state and non-engine files): filesystem-level encryption (DM-Crypt/LUKS, BitLocker, or encrypted block volumes).
-4. **Per-prefix ACL (M24):**
+4. **Per-prefix ACL (M24) and named tenants (#29):**
    * Optional JSON file via `--acl-file` / `KAYA_ACL_FILE`: object mapping key prefix → client token. Prefix keys may be UTF-8 text or hex (`0x…` / `hex:…`).
    * When configured, data-path ops authorize with **longest-prefix** match against the presented client token; an empty ACL map denies every data op. TXN_BEGIN/COMMIT/ROLLBACK accept any token that appears on at least one rule. HEALTH stays open.
-   * This is key-space isolation only — not full multi-tenancy (no tenant IDs, quotas, or resource accounting).
+   * Optional `--tenant-file` / `KAYA_TENANT_FILE`: named tenants with exclusive prefixes. The presented token maps to one tenant; keyed ops must start with that prefix (hard deny otherwise). Both flags may be set; then **both** gates must pass. See `spec/docs/tenant-isolation-spec.md`.
+   * First tenant isolation is shipped (#29). Quotas, RBAC, and billing are still residual.
 
 ---
 
@@ -361,7 +363,7 @@ M15 closed data-path authZ and structured audit; M24 closes engine encryption-at
 | Structured audit logging (local JSONL) | ✅ Implemented | Enable `--audit-log` (default on when any token configured); rotate/archive `{data_dir}/audit.jsonl` | `crates/kaya-server/src/audit.rs` |
 | Data at rest encryption | ✅ Optional engine-level AES-GCM (M24) | Set `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE` (32-byte key, non-rotating) or `--encryption-keyring-file` / `KAYA_ENCRYPTION_KEYRING_FILE` for rotation (#28); combine with volume encryption for Raft/non-Disk files | `EncryptedDisk` / `Keyring` in `crates/kaya-io/src/encrypted.rs`; server open path in `cluster/mod.rs` |
 | Per-prefix ACL | ✅ Optional when `--acl-file` set (M24) | JSON `prefix → token`; longest-prefix on PUT/GET/DELETE/SCAN/TXN_OP; any-rule token on TXN_BEGIN/COMMIT/ROLLBACK + CDC_POLL/CHECKPOINT + SPLIT/MERGE; empty map denies all data/admin-range ops | `PrefixAcl` in `crates/kaya-server/src/acl.rs`; enforcement in `client_ops` |
-| Multi-tenant isolation | Partial via per-prefix ACL; full tenancy still accepted risk | Use `--acl-file` for key-space isolation, or one cluster per tenant + network segmentation; no tenant IDs, quotas, or resource accounting in engine/protocol | `acl.rs`; ROADMAP: full multi-tenancy out of M16–M25 scope |
+| Multi-tenant isolation | ✅ First version (#29): named tenants, exclusive prefixes, hard deny, audit `tenant` field. Residual: quotas / RBAC / billing | Set `--tenant-file` / `KAYA_TENANT_FILE`; combine with `--acl-file` (AND) if both are used. One cluster per tenant remains valid for stronger isolation. | `TenantAcl` in `crates/kaya-server/src/acl.rs`; `spec/docs/tenant-isolation-spec.md` |
 | Encryption key rotation (KEK/DEK) | ✅ Implemented (#28): online dual-key read window, no background rewrite | Use `kayactl encryption init/rotate/list/verify` against a `--encryption-keyring-file`; old keys stay readable until every file naturally rewrites under the active key (see §7.1 and `docs/runbooks/key-rotation.md`) | `Keyring` in `crates/kaya-io/src/encrypted.rs`; `crates/kayactl/src/encryption_cmd.rs` |
 | Client cert enforcement on every connection | Accepted risk (partial impl.) | Enable native TLS with CA (`require_client_cert: true` when `--tls-ca` set); or ghostunnel `--allow-cn` | `crates/kaya-server/src/main.rs`, `crates/kaya-net/src/transport.rs` |
 | Compliance-grade audit export to SIEM | ✅ Optional built-in UDP syslog sink | Set `--audit-syslog <host:port>` / `KAYA_AUDIT_SYSLOG` (RFC 5424 over UDP, requires `--audit-log`); for TCP/TLS transport or delivery guarantees, front with a local syslog agent (rsyslog/vector) | `SyslogSink` in `crates/kaya-server/src/audit.rs`; UDP best-effort, no on-wire encryption |

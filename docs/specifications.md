@@ -23,6 +23,7 @@ These documents define formats, invariants, recovery rules, and boundaries. They
 - [Server & Protocol](spec/docs/server-and-protocol-spec.md)
 - [Raft & Distributed Roadmap](spec/docs/raft-and-distributed-roadmap-spec.md)
 - [Security & Safety](spec/docs/security-and-safety-spec.md)
+- [Tenant isolation](spec/docs/tenant-isolation-spec.md)
 - [Observability](spec/docs/observability-spec.md)
 - [Configuration](spec/docs/configuration-spec.md)
 - [CLI UX](spec/docs/cli-ux-spec.md)

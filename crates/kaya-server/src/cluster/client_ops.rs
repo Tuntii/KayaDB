@@ -50,7 +50,7 @@ use crate::raft_persister::RaftPersister;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
-use crate::acl::PrefixAcl;
+use crate::acl::{authorize_key, authorize_token, PrefixAcl, TenantAcl};
 use crate::audit::AuditLog;
 use crate::client_auth::{decode_client_auth_payload, CLIENT_AUTH_PREFIX};
 use crate::command::RaftCommand;
@@ -113,6 +113,75 @@ fn acl_denied(auth_kind: &'static str, key_len: Option<usize>) -> DispatchOutcom
     )
 }
 
+fn tenant_denied(auth_kind: &'static str, key_len: Option<usize>) -> DispatchOutcome {
+    outcome(
+        STATUS_ERROR,
+        encode_error_payload("tenant denied"),
+        auth_kind,
+        key_len,
+    )
+}
+
+/// Deny when TenantAcl and/or PrefixAcl reject a keyed op. Tenant is checked
+/// first so a cross-tenant key is reported as `tenant denied` even if ACL
+/// would also fail.
+fn deny_key(
+    acl: Option<&PrefixAcl>,
+    tenants: Option<&TenantAcl>,
+    key: &[u8],
+    token: Option<&str>,
+    auth_kind: &'static str,
+) -> Option<DispatchOutcome> {
+    if tenants.is_some() && !authorize_key(None, tenants, key, token) {
+        return Some(tenant_denied(auth_kind, Some(key.len())));
+    }
+    if acl.is_some() && !authorize_key(acl, None, key, token) {
+        return Some(acl_denied(auth_kind, Some(key.len())));
+    }
+    None
+}
+
+fn deny_token(
+    acl: Option<&PrefixAcl>,
+    tenants: Option<&TenantAcl>,
+    token: Option<&str>,
+    auth_kind: &'static str,
+    key_len: Option<usize>,
+) -> Option<DispatchOutcome> {
+    if tenants.is_some() && !authorize_token(None, tenants, token) {
+        return Some(tenant_denied(auth_kind, key_len));
+    }
+    if acl.is_some() && !authorize_token(acl, None, token) {
+        return Some(acl_denied(auth_kind, key_len));
+    }
+    None
+}
+
+fn data_auth_configured(
+    client_token: &Option<String>,
+    acl: &Option<PrefixAcl>,
+    tenants: &Option<TenantAcl>,
+) -> bool {
+    client_token.is_some() || acl.is_some() || tenants.is_some()
+}
+
+fn resolve_tenant_for_audit(
+    tenants: Option<&TenantAcl>,
+    opcode: u8,
+    payload: &[u8],
+) -> Option<String> {
+    let tenants = tenants?;
+    if !matches!(opcode, 1..=4 | 6 | 9..=17) {
+        return None;
+    }
+    if payload.len() >= CLIENT_AUTH_PREFIX.len() && payload.starts_with(CLIENT_AUTH_PREFIX) {
+        if let Ok((_, tok)) = decode_client_auth_payload(payload) {
+            return tenants.tenant_id(tok.as_deref()).map(str::to_owned);
+        }
+    }
+    None
+}
+
 /// Message sent from a client handler to the Raft loop to propose a write.
 pub struct ProposeReq {
     /// Target Raft group (0 for single-group / membership).
@@ -146,6 +215,7 @@ pub(crate) async fn client_accept_loop(
     operator_token: Option<String>,
     client_token: Option<String>,
     acl: Option<PrefixAcl>,
+    tenants: Option<TenantAcl>,
     audit_log: SharedAuditLog,
     network_partitioned: Option<Arc<AtomicBool>>,
     max_connections: usize,
@@ -183,6 +253,7 @@ pub(crate) async fn client_accept_loop(
         let op_tok = operator_token.clone();
         let cli_tok = client_token.clone();
         let acl_rules = acl.clone();
+        let tenant_rules = tenants.clone();
         let audit = audit_log.clone();
         let dash_errors = dashboard_errors.clone();
         tokio::spawn(async move {
@@ -206,6 +277,7 @@ pub(crate) async fn client_accept_loop(
                 op_tok,
                 cli_tok,
                 acl_rules,
+                tenant_rules,
                 audit,
                 drain,
                 dash_errors,
@@ -235,6 +307,7 @@ async fn handle_connection<S>(
     operator_token: Option<String>,
     client_token: Option<String>,
     acl: Option<PrefixAcl>,
+    tenants: Option<TenantAcl>,
     audit_log: SharedAuditLog,
     drain: bool,
     dashboard_errors: DashboardErrors,
@@ -246,6 +319,7 @@ async fn handle_connection<S>(
             Ok(f) => f,
             Err(_) => break,
         };
+        let tenant = resolve_tenant_for_audit(tenants.as_ref(), opcode, &payload);
         let result = dispatch(
             &raft,
             &engine,
@@ -263,6 +337,7 @@ async fn handle_connection<S>(
             operator_token.clone(),
             client_token.clone(),
             acl.clone(),
+            tenants.clone(),
             drain,
         )
         .await;
@@ -277,12 +352,13 @@ async fn handle_connection<S>(
             record_error(&dashboard_errors, kind, message);
         }
         if let Some(audit) = audit_log.as_ref() {
-            audit.record(
+            audit.record_with_tenant(
                 peer,
                 opcode,
                 result.status,
                 result.auth_kind,
                 result.key_len,
+                tenant.as_deref(),
             );
         }
         if write_client_response(&mut stream, result.status, &result.body)
@@ -472,6 +548,7 @@ async fn dispatch(
     operator_token: Option<String>,
     client_token: Option<String>,
     acl: Option<PrefixAcl>,
+    tenants: Option<TenantAcl>,
     drain: bool,
 ) -> DispatchOutcome {
     let operator_auth = if operator_token.is_some() {
@@ -479,7 +556,7 @@ async fn dispatch(
     } else {
         "none"
     };
-    let client_auth = if client_token.is_some() || acl.is_some() {
+    let client_auth = if data_auth_configured(&client_token, &acl, &tenants) {
         "client"
     } else {
         "none"
@@ -568,11 +645,11 @@ async fn dispatch(
         if opcode == TXN_FORWARD_OPCODE {
             // The body is a raw replicated command, so it bypasses the data-path
             // ACL. A cluster that authorizes data ops must also gate forwarding.
-            if operator_token.is_none() && (client_token.is_some() || acl.is_some()) {
+            if operator_token.is_none() && data_auth_configured(&client_token, &acl, &tenants) {
                 return outcome(
                     STATUS_ERROR,
                     encode_error_payload(
-                        "TXN_FORWARD requires an operator token when client auth or an ACL is configured",
+                        "TXN_FORWARD requires an operator token when client auth, an ACL, or tenants are configured",
                     ),
                     operator_auth,
                     None,
@@ -729,7 +806,8 @@ async fn dispatch(
     // Data-path opcodes 1-4, 6 (STATS), 9-17 (TXN/CDC/ranges) with optional client token
     // enforcement. HEALTH (5) stays open for liveness probes.
     // SPLIT_RANGE (16) / MERGE_RANGE (17) also accept operator token via admin path when configured.
-    // Per-prefix ACL (M24) is applied later per-op once the key is known (PUT/GET/DELETE/SCAN/TXN_*).
+    // Per-prefix ACL (M24) and tenant isolation (#29) are applied later per-op
+    // once the key is known (PUT/GET/DELETE/SCAN/TXN_*).
     let (payload, presented_token) = if matches!(opcode, 1..=4 | 6 | 9..=17) {
         let (clean_payload, presented) = if payload.len() >= CLIENT_AUTH_PREFIX.len()
             && payload.starts_with(CLIENT_AUTH_PREFIX)
@@ -797,10 +875,14 @@ async fn dispatch(
         1 => match decode_put_payload(&payload) {
             Ok((key, value)) => {
                 let key_len = key.len();
-                if let Some(acl) = &acl {
-                    if !acl.authorize(&key, presented_token.as_deref()) {
-                        return acl_denied(client_auth, Some(key_len));
-                    }
+                if let Some(denied) = deny_key(
+                    acl.as_ref(),
+                    tenants.as_ref(),
+                    &key,
+                    presented_token.as_deref(),
+                    client_auth,
+                ) {
+                    return denied;
                 }
                 let group_id = {
                     let t = range_table.read().await;
@@ -829,10 +911,14 @@ async fn dispatch(
         // GET
         2 => match decode_key_payload(&payload) {
             Ok(key) => {
-                if let Some(acl) = &acl {
-                    if !acl.authorize(&key, presented_token.as_deref()) {
-                        return acl_denied(client_auth, Some(key.len()));
-                    }
+                if let Some(denied) = deny_key(
+                    acl.as_ref(),
+                    tenants.as_ref(),
+                    &key,
+                    presented_token.as_deref(),
+                    client_auth,
+                ) {
+                    return denied;
                 }
                 let group_id = {
                     let t = range_table.read().await;
@@ -877,10 +963,14 @@ async fn dispatch(
         3 => match decode_key_payload(&payload) {
             Ok(key) => {
                 let key_len = key.len();
-                if let Some(acl) = &acl {
-                    if !acl.authorize(&key, presented_token.as_deref()) {
-                        return acl_denied(client_auth, Some(key_len));
-                    }
+                if let Some(denied) = deny_key(
+                    acl.as_ref(),
+                    tenants.as_ref(),
+                    &key,
+                    presented_token.as_deref(),
+                    client_auth,
+                ) {
+                    return denied;
                 }
                 let group_id = {
                     let t = range_table.read().await;
@@ -908,10 +998,14 @@ async fn dispatch(
         // SCAN
         4 => match decode_scan_payload(&payload) {
             Ok(prefix) => {
-                if let Some(acl) = &acl {
-                    if !acl.authorize(&prefix, presented_token.as_deref()) {
-                        return acl_denied(client_auth, Some(prefix.len()));
-                    }
+                if let Some(denied) = deny_key(
+                    acl.as_ref(),
+                    tenants.as_ref(),
+                    &prefix,
+                    presented_token.as_deref(),
+                    client_auth,
+                ) {
+                    return denied;
                 }
                 let group_id = {
                     let t = range_table.read().await;
@@ -985,10 +1079,14 @@ async fn dispatch(
 
         // TXN_BEGIN
         TXN_BEGIN_OPCODE => {
-            if let Some(acl) = &acl {
-                if !acl.authorize_token(presented_token.as_deref()) {
-                    return acl_denied(client_auth, None);
-                }
+            if let Some(denied) = deny_token(
+                acl.as_ref(),
+                tenants.as_ref(),
+                presented_token.as_deref(),
+                client_auth,
+                None,
+            ) {
+                return denied;
             }
             if !is_leader_of(raft, GroupId::ZERO) {
                 let hint = get_leader_hint(raft, &roster_snapshot);
@@ -1007,10 +1105,14 @@ async fn dispatch(
         TXN_OP_OPCODE => match decode_txn_op_payload(&payload) {
             Ok((txn_id, op, key, value)) => {
                 let key_len = key.len();
-                if let Some(acl) = &acl {
-                    if !acl.authorize(&key, presented_token.as_deref()) {
-                        return acl_denied(client_auth, Some(key_len));
-                    }
+                if let Some(denied) = deny_key(
+                    acl.as_ref(),
+                    tenants.as_ref(),
+                    &key,
+                    presented_token.as_deref(),
+                    client_auth,
+                ) {
+                    return denied;
                 }
                 if !is_leader_of(raft, GroupId::ZERO) {
                     let hint = get_leader_hint(raft, &roster_snapshot);
@@ -1065,10 +1167,14 @@ async fn dispatch(
         // TXN_COMMIT
         TXN_COMMIT_OPCODE => match decode_txn_id_payload(&payload) {
             Ok(txn_id) => {
-                if let Some(acl) = &acl {
-                    if !acl.authorize_token(presented_token.as_deref()) {
-                        return acl_denied(client_auth, None);
-                    }
+                if let Some(denied) = deny_token(
+                    acl.as_ref(),
+                    tenants.as_ref(),
+                    presented_token.as_deref(),
+                    client_auth,
+                    None,
+                ) {
+                    return denied;
                 }
                 let (status, body) = txn_commit_via_raft(
                     raft,
@@ -1093,10 +1199,14 @@ async fn dispatch(
         // TXN_ROLLBACK
         TXN_ROLLBACK_OPCODE => match decode_txn_id_payload(&payload) {
             Ok(txn_id) => {
-                if let Some(acl) = &acl {
-                    if !acl.authorize_token(presented_token.as_deref()) {
-                        return acl_denied(client_auth, None);
-                    }
+                if let Some(denied) = deny_token(
+                    acl.as_ref(),
+                    tenants.as_ref(),
+                    presented_token.as_deref(),
+                    client_auth,
+                    None,
+                ) {
+                    return denied;
                 }
                 if !is_leader_of(raft, GroupId::ZERO) {
                     let hint = get_leader_hint(raft, &roster_snapshot);
@@ -1118,11 +1228,14 @@ async fn dispatch(
         // CDC_POLL (13) — leader-local changefeed poll (events from Raft apply path).
         CDC_POLL_OPCODE => match decode_cdc_poll_request(&payload) {
             Ok((consumer_id, from_seq, limit)) => {
-                if let Some(acl) = &acl {
-                    // Same as TXN_BEGIN: any configured rule token is accepted.
-                    if !acl.authorize_token(presented_token.as_deref()) {
-                        return acl_denied(client_auth, None);
-                    }
+                if let Some(denied) = deny_token(
+                    acl.as_ref(),
+                    tenants.as_ref(),
+                    presented_token.as_deref(),
+                    client_auth,
+                    None,
+                ) {
+                    return denied;
                 }
                 if !is_leader_of(raft, GroupId::ZERO) {
                     let hint = get_leader_hint(raft, &roster_snapshot);
@@ -1181,10 +1294,14 @@ async fn dispatch(
         // CDC_CHECKPOINT (14)
         CDC_CHECKPOINT_OPCODE => match decode_cdc_checkpoint_request(&payload) {
             Ok(consumer_id) => {
-                if let Some(acl) = &acl {
-                    if !acl.authorize_token(presented_token.as_deref()) {
-                        return acl_denied(client_auth, None);
-                    }
+                if let Some(denied) = deny_token(
+                    acl.as_ref(),
+                    tenants.as_ref(),
+                    presented_token.as_deref(),
+                    client_auth,
+                    None,
+                ) {
+                    return denied;
                 }
                 if !is_leader_of(raft, GroupId::ZERO) {
                     let hint = get_leader_hint(raft, &roster_snapshot);
@@ -1228,13 +1345,18 @@ async fn dispatch(
         // SPLIT_RANGE (16) — propose RangeMeta on group 0; apply hosts + persists.
         SPLIT_RANGE_OPCODE => match decode_split_range_request(&payload) {
             Ok(split_key) => {
-                // When PrefixAcl is configured, require a known client token so
-                // ACL-only deployments cannot reconfigure ranges anonymously.
-                // (Operator-token admin path still covers TRANSFER_LEADER etc.)
-                if let Some(acl) = &acl {
-                    if !acl.authorize_token(presented_token.as_deref()) {
-                        return acl_denied(client_auth, Some(split_key.len()));
-                    }
+                // When PrefixAcl / TenantAcl is configured, require a known
+                // client token so ACL-only deployments cannot reconfigure
+                // ranges anonymously. (Operator-token admin path still covers
+                // TRANSFER_LEADER etc.)
+                if let Some(denied) = deny_token(
+                    acl.as_ref(),
+                    tenants.as_ref(),
+                    presented_token.as_deref(),
+                    client_auth,
+                    Some(split_key.len()),
+                ) {
+                    return denied;
                 }
                 if drain {
                     return outcome(
@@ -1328,10 +1450,14 @@ async fn dispatch(
         // MERGE_RANGE (17) — propose RangeMeta; orphan right group stays hosted.
         MERGE_RANGE_OPCODE => match decode_merge_range_request(&payload) {
             Ok(left_start) => {
-                if let Some(acl) = &acl {
-                    if !acl.authorize_token(presented_token.as_deref()) {
-                        return acl_denied(client_auth, Some(left_start.len()));
-                    }
+                if let Some(denied) = deny_token(
+                    acl.as_ref(),
+                    tenants.as_ref(),
+                    presented_token.as_deref(),
+                    client_auth,
+                    Some(left_start.len()),
+                ) {
+                    return denied;
                 }
                 if !is_leader_of(raft, GroupId::ZERO) {
                     let hint = get_leader_hint(raft, &roster_snapshot);

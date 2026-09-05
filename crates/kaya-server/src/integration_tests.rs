@@ -1218,6 +1218,158 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir3);
     }
 
+    /// #29 tenant isolation: two named tenants, exclusive prefixes; cross-tenant GET denied.
+    #[serial]
+    #[tokio::test]
+    async fn cross_tenant_access_denied() {
+        use crate::acl::TenantAcl;
+
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_dir1 = std::env::temp_dir().join(format!("kayadb_tenant_n1_{}", test_id));
+        let data_dir2 = std::env::temp_dir().join(format!("kayadb_tenant_n2_{}", test_id));
+        let data_dir3 = std::env::temp_dir().join(format!("kayadb_tenant_n3_{}", test_id));
+
+        let r1 = get_free_port().await;
+        let c1 = get_free_port().await;
+        let r2 = get_free_port().await;
+        let c2 = get_free_port().await;
+        let r3 = get_free_port().await;
+        let c3 = get_free_port().await;
+
+        let raft_addr1: SocketAddr = format!("127.0.0.1:{}", r1).parse().unwrap();
+        let client_addr1: SocketAddr = format!("127.0.0.1:{}", c1).parse().unwrap();
+        let raft_addr2: SocketAddr = format!("127.0.0.1:{}", r2).parse().unwrap();
+        let client_addr2: SocketAddr = format!("127.0.0.1:{}", c2).parse().unwrap();
+        let raft_addr3: SocketAddr = format!("127.0.0.1:{}", r3).parse().unwrap();
+        let client_addr3: SocketAddr = format!("127.0.0.1:{}", c3).parse().unwrap();
+
+        let peers1 = vec![(2, raft_addr2, client_addr2), (3, raft_addr3, client_addr3)];
+        let peers2 = vec![(1, raft_addr1, client_addr1), (3, raft_addr3, client_addr3)];
+        let peers3 = vec![(1, raft_addr1, client_addr1), (2, raft_addr2, client_addr2)];
+
+        let tenants = TenantAcl::from_json(
+            r#"{
+                "tenants": [
+                    {"id": "acme", "token": "tok-acme", "prefix": "acme/"},
+                    {"id": "globex", "token": "tok-globex", "prefix": "globex/"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let config1 = ClusterConfig::new(1, &data_dir1, raft_addr1, client_addr1, peers1)
+            .with_tenants(tenants.clone())
+            .with_audit_log(true);
+        let config2 = ClusterConfig::new(2, &data_dir2, raft_addr2, client_addr2, peers2)
+            .with_tenants(tenants.clone())
+            .with_audit_log(true);
+        let config3 = ClusterConfig::new(3, &data_dir3, raft_addr3, client_addr3, peers3)
+            .with_tenants(tenants)
+            .with_audit_log(true);
+
+        let handle1 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config1).run().await;
+        });
+        let handle2 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config2).run().await;
+        });
+        let handle3 = tokio::spawn(async move {
+            let _ = ClusterNode::new(config3).run().await;
+        });
+
+        let mut leader_addr = None;
+        let mut leader_dir = None;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if check_health(client_addr1).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr1);
+                leader_dir = Some(data_dir1.clone());
+                break;
+            }
+            if check_health(client_addr2).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr2);
+                leader_dir = Some(data_dir2.clone());
+                break;
+            }
+            if check_health(client_addr3).await.as_deref() == Some("leader") {
+                leader_addr = Some(client_addr3);
+                leader_dir = Some(data_dir3.clone());
+                break;
+            }
+        }
+        let leader_addr = leader_addr.expect("no leader elected in tenant-isolated cluster");
+        let leader_dir = leader_dir.expect("leader data dir");
+
+        let put_acme = encode_put_payload(b"acme/k1", b"va");
+        let put_globex = encode_put_payload(b"globex/k1", b"vg");
+
+        // No token -> denied
+        let (status, _) = roundtrip(leader_addr, 1, &put_acme).await.unwrap();
+        assert_ne!(status, 0, "put without token must be tenant-denied");
+
+        // Same tenant PUT + GET OK
+        let framed = encode_client_auth_payload(&put_acme, Some("tok-acme"));
+        let (status, body) = roundtrip(leader_addr, 1, &framed).await.unwrap();
+        assert_eq!(
+            status,
+            0,
+            "tok-acme put acme/ should succeed: {:?}",
+            String::from_utf8_lossy(&body)
+        );
+
+        let get_acme = encode_key_payload(b"acme/k1");
+        let framed = encode_client_auth_payload(&get_acme, Some("tok-acme"));
+        let (status, body) = roundtrip(leader_addr, 2, &framed).await.unwrap();
+        assert_eq!(status, 0, "same-tenant GET should succeed");
+        assert_eq!(decode_value_payload(&body).unwrap(), b"va".to_vec());
+
+        // Cross-tenant GET denied
+        let framed = encode_client_auth_payload(&get_acme, Some("tok-globex"));
+        let (status, body) = roundtrip(leader_addr, 2, &framed).await.unwrap();
+        assert_ne!(status, 0, "cross-tenant GET must be denied");
+        assert!(
+            String::from_utf8_lossy(&body).contains("tenant denied"),
+            "cross-tenant GET body should say tenant denied: {:?}",
+            String::from_utf8_lossy(&body)
+        );
+
+        // globex cannot write acme keys
+        let framed = encode_client_auth_payload(&put_acme, Some("tok-globex"));
+        let (status, _) = roundtrip(leader_addr, 1, &framed).await.unwrap();
+        assert_ne!(status, 0, "cross-tenant PUT must be denied");
+
+        // globex can write its own prefix
+        let framed = encode_client_auth_payload(&put_globex, Some("tok-globex"));
+        let (status, body) = roundtrip(leader_addr, 1, &framed).await.unwrap();
+        assert_eq!(
+            status,
+            0,
+            "tok-globex put globex/ should succeed: {:?}",
+            String::from_utf8_lossy(&body)
+        );
+
+        // HEALTH stays open
+        let (status, _) = roundtrip(leader_addr, 5, &[]).await.unwrap();
+        assert_eq!(status, 0, "health stays open under tenant isolation");
+
+        // Audit JSONL records the resolved tenant id on the same-tenant PUT.
+        let audit = std::fs::read_to_string(leader_dir.join("audit.jsonl")).unwrap_or_default();
+        assert!(
+            audit.contains(r#""tenant":"acme""#),
+            "audit JSONL should include tenant acme: {audit}"
+        );
+
+        handle1.abort();
+        handle2.abort();
+        handle3.abort();
+        let _ = std::fs::remove_dir_all(&data_dir1);
+        let _ = std::fs::remove_dir_all(&data_dir2);
+        let _ = std::fs::remove_dir_all(&data_dir3);
+    }
+
     #[cfg(feature = "tls")]
     #[serial]
     #[tokio::test]

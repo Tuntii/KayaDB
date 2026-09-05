@@ -131,7 +131,38 @@ Example `acl.json`:
   --client-token token-users
 ```
 
-This is key-space isolation, not multi-tenancy (no quotas, tenant IDs, or resource accounting).
+This is longest-prefix key-space isolation. For named tenants with exclusive prefixes, use `--tenant-file` (below). The two flags are independent; if both are set, **both** must pass.
+
+### 2.4.1 Named tenants (#29)
+
+| Flag / env | Purpose |
+|---|---|
+| `--tenant-file PATH` / `KAYA_TENANT_FILE` | JSON `{ "tenants": [ { "id", "token", "prefix" } ] }` |
+
+Rules:
+
+- Unique tenant `id`, unique non-empty `token`, exclusive `prefix` (no prefix may be a prefix of another).
+- Keyed ops (PUT/GET/DELETE/SCAN/TXN_OP): token maps to one tenant; the key must start with that prefix (hard deny otherwise).
+- Keyless ops (TXN_BEGIN/COMMIT/ROLLBACK, CDC, SPLIT/MERGE): token must belong to some tenant.
+- HEALTH stays open.
+- Combine with `--acl-file`: AND. Tenant-only is enough if you do not need longest-prefix rules.
+
+Example `tenants.json`:
+
+```json
+{
+  "tenants": [
+    {"id": "acme", "token": "tok-acme", "prefix": "acme/"},
+    {"id": "globex", "token": "tok-globex", "prefix": "globex/"}
+  ]
+}
+```
+
+```bash
+./kayadb-server ... --tenant-file /etc/kaya/tenants.json
+```
+
+Quotas, RBAC, and billing are not in this version. Spec: `spec/docs/tenant-isolation-spec.md`.
 
 ### 2.5 Still available (M15 baseline)
 
@@ -250,7 +281,7 @@ CI perf envelope (put/get + multi-key txn + multi-range 2PC smoke budgets): [BEN
 - Physical key movement on migrate (`MOVE_RANGE` cuts over routing; the engine is shared, so no bytes move)
 - Parallel-commit 2PC stretch and durable global decision log
 - Background re-encrypt after a key rotation (#28 ships an online dual-key read window; old files upgrade lazily on next write — see `docs/security.md` §7.1)
-- Full multi-tenancy beyond per-prefix ACL
+- Resource quotas / RBAC / billing (first named-tenant isolation is shipped: `--tenant-file`, #29)
 - Dashboard v2 Phase B/C (eBPF/fsync attribution, profiling CI; Phase A HTTP JSON shipped, #31)
 - Contractual latency SLA or north-star production claim before M25 exit proof
 
