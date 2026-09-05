@@ -11,12 +11,20 @@
 //
 // When concurrent check fails, `minimal_counterexample` greedily shrinks the
 // history to a small non-linearizable subset for operator diagnosis.
+// `minimal_unsatisfiable_subsets` enumerates all inclusion-minimal failing
+// subsets (MUSs) under an op cap (WGL bound, default 14).
 //
 // This module is the foundation for future Jepsen-style test drivers
 // (spec/docs/testing-and-invariants-spec.md §2).
 
 use std::collections::BTreeMap;
 use std::fmt;
+
+/// Maximum history length [`LinearizabilityChecker::check_concurrent`] will search.
+///
+/// WGL is exponential in the number of overlapping ops; Jepsen full-gate
+/// recording uses the same bound (`kaya-jepsen-test::WGL_VERIFY_MAX_OPS`).
+pub const WGL_MAX_OPS: usize = 14;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -43,7 +51,7 @@ pub enum OpResult {
 }
 
 /// A single entry in the operation history with wall-clock tick ordering.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryEntry {
     /// Logical tick when the operation was invoked.
     pub start_tick: u64,
@@ -211,6 +219,11 @@ impl LinearizabilityChecker {
         self.history.len()
     }
 
+    /// Recorded operations in insertion order.
+    pub fn entries(&self) -> &[HistoryEntry] {
+        &self.history
+    }
+
     /// Returns `true` if no operations have been recorded.
     pub fn is_empty(&self) -> bool {
         self.history.is_empty()
@@ -322,10 +335,9 @@ impl LinearizabilityChecker {
     /// in any valid linearization. Returns `Ok(())` when at least one linearization
     /// matches all observed GET/SCAN results.
     pub fn check_concurrent(&self) -> Result<(), Vec<String>> {
-        const MAX_OPS: usize = 14;
-        if self.history.len() > MAX_OPS {
+        if self.history.len() > WGL_MAX_OPS {
             return Err(vec![format!(
-                "concurrent check supports at most {MAX_OPS} ops (have {})",
+                "concurrent check supports at most {WGL_MAX_OPS} ops (have {})",
                 self.history.len()
             )]);
         }
@@ -446,24 +458,13 @@ impl LinearizabilityChecker {
     /// matching Jepsen's per-key WGL checks, so shrink stays inside the failing
     /// partition and does not invent unrelated single-op failures on other keys.
     ///
-    /// Complexity is acceptable under the WGL op cap (≤14).
+    /// Complexity is acceptable under the WGL op cap (≤[`WGL_MAX_OPS`]).
     pub fn minimal_counterexample(&self) -> Option<MinimalCounterexample> {
         if self.check_concurrent().is_ok() {
             return None;
         }
 
-        // Build per-key / scan partitions of original indices.
-        let mut by_key: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
-        let mut scan_idxs: Vec<usize> = Vec::new();
-        for (i, e) in self.history.iter().enumerate() {
-            match &e.op {
-                Op::Put { key, .. } | Op::Get { key } | Op::Delete { key } => {
-                    by_key.entry(key.clone()).or_default().push(i);
-                }
-                Op::Scan { .. } => scan_idxs.push(i),
-            }
-        }
-
+        let (by_key, scan_idxs) = key_and_scan_partitions(&self.history);
         let mut best: Option<MinimalCounterexample> = None;
 
         for (_key, idxs) in by_key {
@@ -483,6 +484,56 @@ impl LinearizabilityChecker {
             best = shrink_indices_to_minimal(&self.history, &all);
         }
         best
+    }
+
+    /// Enumerate inclusion-minimal non-linearizable subsets (MUSs).
+    ///
+    /// A MUS is a failing subset such that dropping any one op makes it
+    /// linearizable. Unlike [`minimal_counterexample`], this returns every such
+    /// subset, not only the greedy one.
+    ///
+    /// `cap` is the maximum universe size to brute-force (clamped to
+    /// [`WGL_MAX_OPS`]). Histories at most `cap` ops are enumerated in full.
+    /// Larger histories are partitioned by key (and scan-related ops) the same
+    /// way as greedy shrink; partitions bigger than `cap` are skipped.
+    ///
+    /// Returns an empty vec when the history is linearizable, or when every
+    /// failing partition exceeds `cap`.
+    pub fn minimal_unsatisfiable_subsets(&self, cap: usize) -> Vec<MinimalCounterexample> {
+        let cap = cap.min(WGL_MAX_OPS);
+        if cap == 0 || self.history.is_empty() {
+            return Vec::new();
+        }
+
+        let mut found: Vec<MinimalCounterexample> = Vec::new();
+
+        if self.history.len() <= cap {
+            let all: Vec<usize> = (0..self.history.len()).collect();
+            found = enumerate_mus_in(&self.history, &all, cap);
+            sort_mus(&mut found);
+            return found;
+        }
+
+        let (by_key, scan_idxs) = key_and_scan_partitions(&self.history);
+        for idxs in by_key.values() {
+            for cex in enumerate_mus_in(&self.history, idxs, cap) {
+                push_unique_cex(&mut found, cex);
+            }
+        }
+        if !scan_idxs.is_empty() {
+            for cex in enumerate_mus_in(&self.history, &scan_idxs, cap) {
+                push_unique_cex(&mut found, cex);
+            }
+            let mixed = scan_related_indices(&self.history);
+            if mixed.len() <= cap {
+                for cex in enumerate_mus_in(&self.history, &mixed, cap) {
+                    push_unique_cex(&mut found, cex);
+                }
+            }
+        }
+
+        sort_mus(&mut found);
+        found
     }
 
     /// Build a checker from an explicit entry list (preserves ticks/clients).
@@ -634,7 +685,7 @@ fn verify_linearization(history: &[HistoryEntry], order: &[usize]) -> Result<(),
     }
 }
 
-fn hex_enc(b: &[u8]) -> String {
+pub(crate) fn hex_enc(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
@@ -712,6 +763,122 @@ fn pick_smaller(
         Some(b) if cand.ops.len() < b.ops.len() => cand,
         Some(b) => b,
     }
+}
+
+fn key_and_scan_partitions(
+    history: &[HistoryEntry],
+) -> (BTreeMap<Vec<u8>, Vec<usize>>, Vec<usize>) {
+    let mut by_key: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
+    let mut scan_idxs: Vec<usize> = Vec::new();
+    for (i, e) in history.iter().enumerate() {
+        match &e.op {
+            Op::Put { key, .. } | Op::Get { key } | Op::Delete { key } => {
+                by_key.entry(key.clone()).or_default().push(i);
+            }
+            Op::Scan { .. } => scan_idxs.push(i),
+        }
+    }
+    (by_key, scan_idxs)
+}
+
+/// Scans plus KV ops whose keys fall under at least one scan prefix.
+fn scan_related_indices(history: &[HistoryEntry]) -> Vec<usize> {
+    let prefixes: Vec<&[u8]> = history
+        .iter()
+        .filter_map(|e| match &e.op {
+            Op::Scan { prefix } => Some(prefix.as_slice()),
+            _ => None,
+        })
+        .collect();
+    history
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| match &e.op {
+            Op::Scan { .. } => true,
+            Op::Put { key, .. } | Op::Get { key } | Op::Delete { key } => {
+                prefixes.iter().any(|p| key.starts_with(p))
+            }
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+fn subset_unsat_why(history: &[HistoryEntry], indices: &[usize]) -> Option<Vec<String>> {
+    if indices.is_empty() || indices.len() > WGL_MAX_OPS {
+        return None;
+    }
+    let sub = LinearizabilityChecker::from_entries(keep_entries(history, indices));
+    sub.check_concurrent().err()
+}
+
+/// All inclusion-minimal failing subsets of `seed` (seed length must be ≤ `cap`).
+fn enumerate_mus_in(
+    history: &[HistoryEntry],
+    seed: &[usize],
+    cap: usize,
+) -> Vec<MinimalCounterexample> {
+    let n = seed.len();
+    if n == 0 || n > cap || n > WGL_MAX_OPS {
+        return Vec::new();
+    }
+    if subset_unsat_why(history, seed).is_none() {
+        return Vec::new();
+    }
+
+    let mut mus_masks: Vec<u32> = Vec::new();
+    let limit = 1u32 << n;
+    for size in 1..=n {
+        for mask in 1..limit {
+            if mask.count_ones() as usize != size {
+                continue;
+            }
+            if mus_masks.iter().copied().any(|mus| (mask & mus) == mus) {
+                continue;
+            }
+            let subset: Vec<usize> = (0..n)
+                .filter(|i| (mask & (1u32 << i)) != 0)
+                .map(|i| seed[i])
+                .collect();
+            if subset_unsat_why(history, &subset).is_some() {
+                mus_masks.push(mask);
+            }
+        }
+    }
+
+    mus_masks
+        .into_iter()
+        .map(|mask| {
+            let keep: Vec<usize> = (0..n)
+                .filter(|i| (mask & (1u32 << i)) != 0)
+                .map(|i| seed[i])
+                .collect();
+            let why = subset_unsat_why(history, &keep).unwrap_or_default();
+            MinimalCounterexample {
+                original_indices: keep.clone(),
+                ops: keep_entries(history, &keep),
+                why,
+            }
+        })
+        .collect()
+}
+
+fn push_unique_cex(found: &mut Vec<MinimalCounterexample>, cex: MinimalCounterexample) {
+    if found
+        .iter()
+        .any(|e| e.original_indices == cex.original_indices)
+    {
+        return;
+    }
+    found.push(cex);
+}
+
+fn sort_mus(found: &mut [MinimalCounterexample]) {
+    found.sort_by(|a, b| {
+        a.ops
+            .len()
+            .cmp(&b.ops.len())
+            .then_with(|| a.original_indices.cmp(&b.original_indices))
+    });
 }
 
 fn format_op(op: &Op) -> String {
@@ -1021,5 +1188,197 @@ mod tests {
             OpResult::Scan(vec![(b"pfx:a".to_vec(), b"1".to_vec())]),
         );
         assert!(checker.check_sequential().is_err());
+    }
+
+    /// PUT then GET-miss: each op alone linearizes, the pair does not.
+    fn put_then_miss(checker: &mut LinearizabilityChecker, key: &[u8], t0: u64, client: u32) {
+        checker.record_interval(
+            t0,
+            t0 + 1,
+            Some(client),
+            Op::Put {
+                key: key.to_vec(),
+                value: b"v".to_vec(),
+            },
+            OpResult::Ok,
+        );
+        checker.record_interval(
+            t0 + 2,
+            t0 + 3,
+            Some(client + 1),
+            Op::Get { key: key.to_vec() },
+            OpResult::Value(None),
+        );
+    }
+
+    fn mus_keys(cex: &MinimalCounterexample) -> Vec<Vec<u8>> {
+        let mut keys: Vec<Vec<u8>> = cex
+            .ops
+            .iter()
+            .filter_map(|e| match &e.op {
+                Op::Put { key, .. } | Op::Get { key } | Op::Delete { key } => Some(key.clone()),
+                Op::Scan { .. } => None,
+            })
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    #[test]
+    fn mus_empty_on_linearizable_history() {
+        let mut checker = LinearizabilityChecker::new();
+        checker.record_next(
+            Op::Put {
+                key: b"k".to_vec(),
+                value: b"v".to_vec(),
+            },
+            OpResult::Ok,
+        );
+        checker.record_next(
+            Op::Get { key: b"k".to_vec() },
+            OpResult::Value(Some(b"v".to_vec())),
+        );
+        assert!(checker
+            .minimal_unsatisfiable_subsets(WGL_MAX_OPS)
+            .is_empty());
+        assert!(checker.minimal_counterexample().is_none());
+    }
+
+    #[test]
+    fn mus_enumerates_independent_multi_key_violations() {
+        let mut checker = LinearizabilityChecker::new();
+        put_then_miss(&mut checker, b"k1", 0, 1);
+        put_then_miss(&mut checker, b"k2", 10, 10);
+        // Noise: a write-only key and a miss on an untouched key both linearize alone.
+        checker.record_interval(
+            20,
+            21,
+            Some(20),
+            Op::Put {
+                key: b"ok".to_vec(),
+                value: b"x".to_vec(),
+            },
+            OpResult::Ok,
+        );
+        checker.record_interval(
+            22,
+            23,
+            Some(21),
+            Op::Get {
+                key: b"absent".to_vec(),
+            },
+            OpResult::Value(None),
+        );
+
+        assert!(checker.check_concurrent().is_err());
+        let muss = checker.minimal_unsatisfiable_subsets(WGL_MAX_OPS);
+        assert_eq!(
+            muss.len(),
+            2,
+            "two independent per-key MUSs, got {}:\n{}",
+            muss.len(),
+            muss.iter()
+                .map(|m| m.report())
+                .collect::<Vec<_>>()
+                .join("\n---\n")
+        );
+        let mut keys: Vec<Vec<u8>> = muss.iter().flat_map(mus_keys).collect();
+        keys.sort();
+        assert_eq!(keys, vec![b"k1".to_vec(), b"k2".to_vec()]);
+        for mus in &muss {
+            assert_eq!(mus.ops.len(), 2, "put-then-miss MUS is the pair");
+            let ks = mus_keys(mus);
+            assert_eq!(ks.len(), 1, "each MUS stays inside one key");
+        }
+
+        let greedy = checker
+            .minimal_counterexample()
+            .expect("history is non-linearizable");
+        assert!(
+            muss.iter()
+                .any(|m| m.original_indices == greedy.original_indices),
+            "greedy shrink should itself be a MUS"
+        );
+    }
+
+    #[test]
+    fn mus_scan_missing_put_is_mixed_partition() {
+        let mut checker = LinearizabilityChecker::new();
+        checker.record_interval(
+            0,
+            1,
+            Some(1),
+            Op::Put {
+                key: b"pfx:a".to_vec(),
+                value: b"1".to_vec(),
+            },
+            OpResult::Ok,
+        );
+        checker.record_interval(
+            2,
+            3,
+            Some(2),
+            Op::Scan {
+                prefix: b"pfx:".to_vec(),
+            },
+            OpResult::Scan(vec![]),
+        );
+
+        assert!(checker.check_sequential().is_err());
+        let muss = checker.minimal_unsatisfiable_subsets(WGL_MAX_OPS);
+        assert_eq!(
+            muss.len(),
+            1,
+            "one mixed put+scan MUS, got {}:\n{}",
+            muss.len(),
+            muss.iter()
+                .map(|m| m.report())
+                .collect::<Vec<_>>()
+                .join("\n---\n")
+        );
+        assert_eq!(muss[0].ops.len(), 2);
+        assert!(matches!(muss[0].ops[0].op, Op::Put { .. }));
+        assert!(matches!(muss[0].ops[1].op, Op::Scan { .. }));
+        assert_eq!(muss[0].original_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn mus_scan_fabricated_pair_is_scan_only() {
+        let mut checker = LinearizabilityChecker::new();
+        checker.record_interval(
+            0,
+            1,
+            Some(1),
+            Op::Put {
+                key: b"other".to_vec(),
+                value: b"x".to_vec(),
+            },
+            OpResult::Ok,
+        );
+        checker.record_interval(
+            2,
+            3,
+            Some(2),
+            Op::Scan {
+                prefix: b"pfx:".to_vec(),
+            },
+            OpResult::Scan(vec![(b"pfx:ghost".to_vec(), b"1".to_vec())]),
+        );
+
+        let muss = checker.minimal_unsatisfiable_subsets(WGL_MAX_OPS);
+        assert_eq!(muss.len(), 1, "fabricated scan is a size-1 MUS");
+        assert_eq!(muss[0].ops.len(), 1);
+        assert!(matches!(muss[0].ops[0].op, Op::Scan { .. }));
+        assert_eq!(muss[0].original_indices, vec![1]);
+    }
+
+    #[test]
+    fn mus_cap_skips_oversize_universe() {
+        let mut checker = LinearizabilityChecker::new();
+        put_then_miss(&mut checker, b"k", 0, 1);
+        // cap=1 cannot brute-force a 2-op universe, so no MUS is enumerated.
+        assert!(checker.minimal_unsatisfiable_subsets(1).is_empty());
+        assert_eq!(checker.minimal_unsatisfiable_subsets(2).len(), 1);
     }
 }

@@ -6,13 +6,17 @@ pub mod model;
 mod rng;
 mod runner;
 mod trace;
+pub mod wgl_jsonl;
 
 pub use clock_skew::advance_node_clock;
 pub use cluster::{ClusterSim, ClusterSimReport, SimNetwork, SimNetworkConfig};
 pub use control::NodeController;
 pub use kaya_raft::RaftApplyCommand;
-pub use linear::{HistoryEntry, LinearizabilityChecker, MinimalCounterexample, Op, OpResult};
+pub use linear::{
+    HistoryEntry, LinearizabilityChecker, MinimalCounterexample, Op, OpResult, WGL_MAX_OPS,
+};
 pub use model::RefModel;
+pub use wgl_jsonl::{parse_history_jsonl, report_json};
 
 pub use kaya_io::{FaultKind, FaultRule, FaultSchedule, SimDisk, SimSeed};
 
