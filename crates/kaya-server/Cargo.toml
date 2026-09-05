@@ -19,9 +19,9 @@ kaya-io.workspace = true
 kaya-net.workspace = true
 kaya-raft = { workspace = true, features = ["disk-storage"] }
 kaya-ebpf = { workspace = true, optional = true }
-opentelemetry = { version = "0.28", optional = true }
-opentelemetry_sdk = { version = "0.28", features = ["trace", "testing"], optional = true }
-opentelemetry-stdout = { version = "0.28", features = ["trace"], optional = true }
+opentelemetry = { version = "0.32.0", optional = true }
+opentelemetry_sdk = { version = "0.32.1", features = ["trace", "testing"], optional = true }
+opentelemetry-stdout = { version = "0.32.0", features = ["trace"], optional = true }
 parking_lot = "0.12"
 serde_json = "1"
 tokio.workspace = true

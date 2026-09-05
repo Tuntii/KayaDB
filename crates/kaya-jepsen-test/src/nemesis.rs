@@ -2,7 +2,11 @@
 
 use kaya_net::{encode_member_payload, encode_remove_member_payload, roundtrip, STATUS_OK};
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
+
+fn thread_std_rng() -> StdRng {
+    StdRng::from_rng(&mut rand::rng())
+}
 use std::net::SocketAddr;
 use std::process::Command;
 use std::time::Duration;
@@ -126,14 +130,14 @@ impl Nemesis {
 
     /// Run the nemesis, injecting failures periodically via shell scripts.
     pub async fn run(&self, stop_signal: tokio::sync::watch::Receiver<bool>) {
-        let mut rng = StdRng::from_entropy();
+        let mut rng = thread_std_rng();
 
         loop {
             if self.wait_interval_or_stop(&stop_signal).await {
                 break;
             }
 
-            if rng.gen::<f64>() > self.config.probability {
+            if rng.random::<f64>() > self.config.probability {
                 continue;
             }
 
@@ -148,14 +152,14 @@ impl Nemesis {
         client_endpoints: Vec<SocketAddr>,
         stop_signal: tokio::sync::watch::Receiver<bool>,
     ) {
-        let mut rng = StdRng::from_entropy();
+        let mut rng = thread_std_rng();
 
         loop {
             if self.wait_interval_or_stop(&stop_signal).await {
                 break;
             }
 
-            if rng.gen::<f64>() > self.config.probability {
+            if rng.random::<f64>() > self.config.probability {
                 continue;
             }
 
@@ -206,7 +210,7 @@ impl Nemesis {
     ) {
         match nemesis_type {
             NemesisType::KillNode => {
-                let node_id = rng.gen_range(1..=3);
+                let node_id = rng.random_range(1..=3);
                 Self::kill_node_script(node_id, cluster_dir).await;
                 sleep(failure_duration).await;
                 Self::restart_node_script(node_id, cluster_dir).await;
@@ -222,7 +226,7 @@ impl Nemesis {
                 );
             }
             NemesisType::Partition => {
-                let node_id = rng.gen_range(1..=3);
+                let node_id = rng.random_range(1..=3);
                 Self::partition_node_script(node_id, cluster_dir).await;
                 sleep(failure_duration).await;
                 Self::heal_partition_script(node_id, cluster_dir).await;
@@ -313,7 +317,7 @@ impl Nemesis {
     ) {
         match nemesis_type {
             NemesisType::KillNode => {
-                let node_id = rng.gen_range(1..=3) as u64;
+                let node_id = rng.random_range(1..=3) as u64;
                 let _ = cmd_tx.send(NemesisAction::KillNode(node_id));
                 let _ = cmd_tx.send(NemesisAction::Sleep(failure_duration));
                 let _ = cmd_tx.send(NemesisAction::RestartNode(node_id));
@@ -330,7 +334,7 @@ impl Nemesis {
                 let _ = cmd_tx.send(NemesisAction::RestartFollower);
             }
             NemesisType::Partition => {
-                let node_id = rng.gen_range(1..=3) as u64;
+                let node_id = rng.random_range(1..=3) as u64;
                 let _ = cmd_tx.send(NemesisAction::PartitionNode(node_id));
                 let _ = cmd_tx.send(NemesisAction::Sleep(failure_duration));
                 let _ = cmd_tx.send(NemesisAction::HealPartition(node_id));
@@ -544,13 +548,12 @@ async fn find_leader(endpoints: &[SocketAddr]) -> Option<SocketAddr> {
 #[cfg(test)]
 mod rich_nemesis_tests {
     use super::*;
-    use rand::SeedableRng;
     use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn clock_skew_and_disk_latency_emit_actions() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut rng = StdRng::from_entropy();
+        let mut rng = thread_std_rng();
 
         Nemesis::emit_controller_action_one(
             &NemesisType::ClockSkew {
