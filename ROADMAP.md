@@ -1,7 +1,7 @@
 # KayaDB Development Roadmap
 
 **Status:** Living roadmap  
-**Last updated:** 2026-07-17 (M16–M25 production path complete; v0.2.0 candidate)
+**Last updated:** 2026-09-05 (TS TXN + RetryPolicy #32; Zig client wontfix/deferred)
 
 > **"Geniş ve yaşayan yol haritası"** — Bu belge hem tarihi başarıları arşivler, hem şu anki odak noktalarını gösterir, hem de uzun vadeli vizyonu (birden fazla paralel track ile) detaylandırır. Tasarım-öncelikli ve correctness-öncelikli felsefe korunur.
 
@@ -99,7 +99,7 @@ Her milestone değişmez disiplini korur: **spec → sim → gerçek implementas
 ### Faz 3 — Hardening + kanıt
 
 9. **M24 — Production hardening ✅ production path** — Complete (2026-07-17): **EncryptedDisk** AES-256-GCM Disk wrapper (`KAYAENC1`|plain_len|nonce|ct+tag; single 32-byte key as KEK=DEK via `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE`); **per-prefix ACL** (`--acl-file` / `KAYA_ACL_FILE` JSON prefix→token, longest-prefix authorize on PUT/GET/DELETE/SCAN/TXN_*). `docs/security.md` §7 re-justified (encryption + ACL closed; key rotation + full multi-tenancy still accepted risk). *Not in this path (deferred):* full kernel+userspace fsync attribution, io_uring completion tracing, stap/perf privileged CI, Dashboard v2 (trace timeline + eBPF + range health — v1 remains day-2 ops), online KEK/DEK rotation.
-10. **M25 — Scale proof & ecosystem close-out ✅ production path** — Complete (2026-07-17): Go client TXN + `RetryPolicy` parity; TypeScript client (`clients/kaya-ts/`); conformance vectors v3 (MERGE/SPLIT + txn edges); **perf envelope v2** (multi-key SI + multi-range 2PC smoke budgets in `kaya-bench`/`BENCHMARKS.md`); **deployment guide v2** (`docs/deployment-guide-v2.md`, M22–M24 flags + range ops) + SLO notes. *Not in this path (honest residuals):* scheduled profiling CI (needs Linux perf runner), full Jepsen grand matrix under combined chaos, linearizability minimal-counterexample printer, Zig client (optional stretch skipped).
+10. **M25 — Scale proof & ecosystem close-out ✅ production path** — Complete (2026-07-17): Go client TXN + `RetryPolicy` parity; TypeScript client (`clients/kaya-ts/`); conformance vectors v3 (MERGE/SPLIT + txn edges); **perf envelope v2** (multi-key SI + multi-range 2PC smoke budgets in `kaya-bench`/`BENCHMARKS.md`); **deployment guide v2** (`docs/deployment-guide-v2.md`, M22–M24 flags + range ops) + SLO notes. *Not in this path (honest residuals):* scheduled profiling CI (needs Linux perf runner), full Jepsen grand matrix under combined chaos, linearizability minimal-counterexample printer. Zig client is **wontfix / deferred** for this train (#32; optional stretch, no skeleton). TS TXN + `RetryPolicy` shipped in #32.
 
 **Kapsam dışı (bilinçli):** SQL katmanı (post-arc v2 adayı), tam multi-tenancy (yalnızca per-prefix ACL), geo-replication/follower reads, kanıtsız production SLA iddiası.
 
@@ -119,7 +119,7 @@ The M16–M25 arc has closed its **documented production path**: operators can r
 | Linearizability minimal counterexample | **Shipped:** WGL `minimal_counterexample` + Jepsen violation report; residual is richer MUSes / interactive explorer |
 | Full multi-tenancy | **Encryption key rotation shipped (#28):** `Keyring`-backed `EncryptedDisk`, `kayactl encryption init/rotate/list/verify`, online dual-key read window (no background re-encrypt — see `docs/security.md` §7.1). ACL is still prefix-token isolation only, not full tenancy |
 | Observability gaps | Kernel+userspace fsync attribution, io_uring completion tracing, stap/perf privileged CI, Dashboard v2, scheduled profiling CI |
-| Client gaps | Zig client not shipped; TS client is minimal (put/get/delete/health/hello) |
+| Client gaps | **TS TXN + RetryPolicy shipped (#32).** Zig client is **wontfix / deferred** for this train (optional stretch, no skeleton) |
 
 **Next cut after v0.2.0 candidate:** pick residual rows that matter for the next release train (per-group engines + physical key copy on migrate, 2PC recovery hardening, chaos grand matrix in CI) rather than reopening the whole arc.
 
@@ -726,8 +726,8 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 - Go client gerçek implementasyon + conformance — ✅ M15 (`clients/kaya-go/`)
 - Protocol conformance vectors + Rust runner — ✅ M15 (`docs/clients/conformance/vectors.json`); **v3** ✅ M25 (MERGE/SPLIT + txn edges)
 - HELLO protocol version handshake (opcode 0) — ✅ M15
-- Python, TypeScript/JavaScript, Zig native client'lar — 🟡 Python ✅ v0.1.47 (`clients/kaya-py/`); TypeScript ✅ M25 (`clients/kaya-ts/`, minimal put/get/delete/health/hello); Zig ⬜ **post-M25 residual** (optional stretch, not required for arc close)
-- Yüksek seviye özellikler: retry policy'leri, observability hook'lar, connection pooling — 🟡 Rust ✅ v0.1.47 (`RetryPolicy` backoff+jitter+timeout, keep-alive connection reuse, `ClientObserver` hook); Go TXN + `RetryPolicy` ✅ M25
+- Python, TypeScript/JavaScript, Zig native client'lar — 🟡 Python ✅ v0.1.47 (`clients/kaya-py/`); TypeScript ✅ M25 + **TXN + RetryPolicy (#32)** (`clients/kaya-ts/`); Zig ⬜ **wontfix / deferred** for this train (optional stretch, no skeleton)
+- Yüksek seviye özellikler: retry policy'leri, observability hook'lar, connection pooling — 🟡 Rust ✅ v0.1.47 (`RetryPolicy` backoff+jitter+timeout, keep-alive connection reuse, `ClientObserver` hook); Go TXN + `RetryPolicy` ✅ M25; TS TXN + `RetryPolicy` ✅ #32
 
 ### Track E: Operations, Security & Production
 

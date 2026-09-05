@@ -77,5 +77,18 @@ jobs:
         if: steps.changes.outputs.crates == 'true'
         run: bash scripts/ci_publish_dry_run.sh
 
+  kaya-ts:
+    name: TypeScript client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Test TypeScript client
+        working-directory: clients/kaya-ts
+        run: npm test
 
 
