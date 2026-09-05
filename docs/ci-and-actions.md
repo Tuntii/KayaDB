@@ -10,13 +10,25 @@ KayaDB uses [GitHub Actions](https://github.com/Tuntii/KayaDB/actions) for conti
 
 | Workflow | File | Triggers | Purpose |
 |---|---|---|---|
-| **CI** | [`ci.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/ci.yml) | `push` to `main`, all `pull_request` | `fmt`, `clippy`, tests (excludes `kaya-jepsen-test` in PR path), smoke bench, `perf_gate` |
-| **Audit** | [`audit.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/audit.yml) | `push` to `main`, `pull_request`, weekly cron | `cargo audit` + `cargo deny` |
-| **Chaos matrix** | [`chaos-matrix.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/chaos-matrix.yml) | PR smoke, nightly cron | DiskFull / NetworkPartition / ClockSkew axes |
-| **Jepsen** | [`jepsen.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/jepsen.yml) | PR smoke, nightly + tags | Rust-native T1–T7 full gate |
-| **Docs (Pages)** | [`docs.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/docs.yml) | `push` to `main` (docs + companion files), `workflow_dispatch` | Deploy Docsify site to GitHub Pages |
+| **CI** | [`ci.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/ci.yml) | `push` `main`, `pull_request`, **`workflow_dispatch`** | `fmt`, `clippy`, tests (excludes `kaya-jepsen-test` in PR path), smoke bench, `perf_gate` |
+| **Audit** | [`audit.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/audit.yml) | `push` `main`, `pull_request`, weekly cron, **`workflow_dispatch`** | `cargo audit` + `cargo deny` |
+| **Chaos matrix** | [`chaos-matrix.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/chaos-matrix.yml) | PR smoke, nightly cron, **`workflow_dispatch`** | DiskFull / NetworkPartition / ClockSkew axes |
+| **Jepsen** | [`jepsen.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/jepsen.yml) | PR smoke, `push` `main` (smoke), nightly + tags (full), **`workflow_dispatch`** (`smoke`/`full`) | Rust-native T1–T7 full gate |
+| **Docs (Pages)** | [`docs.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/docs.yml) | `push` `main` (docs + companion files), **`workflow_dispatch`** | Deploy Docsify site to GitHub Pages |
 | **Release** | [`release.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/release.yml) | `push` tags `v*` | Multi-platform binaries + release assets |
 | **Publish** | [`publish.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/publish.yml) | Manual / after Release | crates.io publish helper |
+
+`workflow_dispatch` is the supported workaround when a `push` event does not create a check suite (org Actions enablement, billing, or GitHub delivery gaps). Keep it on CI, Jepsen, chaos, audit, and docs. Do not remove it.
+
+### Trigger matrix (who runs when)
+
+| Event | CI | Audit | Jepsen smoke | Jepsen full | Chaos smoke | Chaos full | Docs |
+|---|---|---|---|---|---|---|---|
+| `pull_request` | yes | yes | yes | no | yes | no | no |
+| `push` to `main` | yes | yes | yes | no | no | no | path-filtered |
+| `push` tag `v*` | no | no | no | yes | no | no | no |
+| `schedule` | no | weekly | no | nightly | no | nightly | no |
+| `workflow_dispatch` | yes | yes | input=`smoke` | input=`full` | no | yes | yes |
 
 Badges in the [repository README](https://github.com/Tuntii/KayaDB/blob/main/README.md) link to the CI workflow.
 
@@ -61,6 +73,17 @@ cargo test --workspace -j 1 -- --test-threads=1
 2. **Actions disabled** — Repository → Settings → Actions → General → allow actions.
 3. **Pages source** — Settings → Pages → Source: **GitHub Actions** (not “Deploy from branch” only).
 4. **First-time Pages** — Run **Deploy Documentation** via Actions → workflow_dispatch once after enabling Pages.
+
+## Troubleshooting: `push` to `main` did not start CI
+
+Symptom: a commit lands on `main` (or a PR branch) but the Actions tab shows no new **CI** / **Jepsen** run, while **schedule** and **workflow_dispatch** still work.
+
+1. Confirm the workflow `on:` block still lists `push` (CI and Jepsen do). A missing `push:` is the only in-repo cause.
+2. GitHub org/repo: Settings → Actions → General → allow GitHub Actions; check billing minutes.
+3. If GitHub dropped the `push` delivery, run the workflow manually: Actions → **CI** → Run workflow (`workflow_dispatch`). Same for **Jepsen** (suite `smoke` or `full`).
+4. Optional hardening: branch protection on `main` requiring the `rust` check. This repo currently documents squash-merge only (no merge commits); required checks are operator-configured, not in-tree.
+
+`workflow_dispatch` stays on CI and Jepsen as the supported retry path. Do not treat a missing push suite as a reason to drop `push:` triggers.
 
 ---
 
