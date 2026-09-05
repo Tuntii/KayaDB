@@ -1,7 +1,7 @@
 # KayaDB Jepsen-Style Test Design
 
 **Status:** Living  
-**Last updated:** 2026-08-06
+**Last updated:** 2026-09-05
 
 This document defines the workloads, nemeses, and test scenarios for Jepsen-style correctness testing of KayaDB clusters.
 
@@ -352,7 +352,7 @@ Build a Rust-based test harness in `crates/kaya-jepsen-test/`:
 - **Workload generators** - Concurrent clients running W1-W4 (Register/Counter/Set/Map)
 - **Nemesis injectors** - Kill (via scripts or `ClusterController`), **Partition** (cross-platform: `partition-node.ps1` + `heal-partition.ps1` using Windows Firewall `New-NetFirewallRule`, Linux `iptables` with comments; falls back gracefully). Restart also completed for Windows symmetry (`restart-node.ps1`).
 - **History recorder** - Thread-safe `History` + `Operation` recording with `kaya_sim` Op/OpResult
-- **Linearizability checker** - Sequential (`check_sequential`) for PR smoke; WGL concurrent (`check_concurrent`) for nightly full gate
+- **Linearizability checker** - Sequential (`check_sequential`) for PR smoke; WGL concurrent (`check_concurrent`) for nightly full gate; greedy `minimal_counterexample` on violation; `kaya-wgl` explorer for offline JSONL histories
 - **Test runner** - `TestRunner` + `TestConfig` + `TestResult` (duration-based orchestration, nemesis + workload, post-run verification + trace export on failure)
 - **Scenario registry** - Declarative `smoke` + T1–T7 scenarios in `scenario.rs`; `run_scenario()` drives workloads, hooks, and nemeses against an in-process cluster
 - **`ClusterController`** - Programmatic cluster lifecycle for CI: spawns in-process `ClusterNode` instances on **dynamic ports** (`127.0.0.1:0`), kill/restart, `ADD_MEMBER` / `REMOVE_MEMBER`, and port-aware partition (see below). Existing `scripts/` remain for manual operator demos.
@@ -386,6 +386,35 @@ Chaos gates live in `.github/workflows/jepsen.yml`. `cargo test --workspace` in 
 
 ---
 
+## WGL explorer (`kaya-wgl`)
+
+When a concurrent history fails linearizability, the Jepsen harness already appends the greedy `minimal_counterexample` report to the violation list. For offline diagnosis (a saved JSONL history, a reduced seed, a hand-written case), use the `kaya-wgl` binary in `kaya-sim`:
+
+```bash
+cargo run -p kaya-sim --bin kaya-wgl -- history.jsonl
+cargo run -p kaya-sim --bin kaya-wgl -- --mus --json history.jsonl
+cat history.jsonl | cargo run -p kaya-sim --bin kaya-wgl -- --mus -
+```
+
+- Default output is the greedy inclusion-minimal failing subset (same as `LinearizabilityChecker::minimal_counterexample`).
+- `--mus` enumerates **all** inclusion-minimal unsatisfiable subsets for histories or per-key / scan partitions of at most `--mus-cap` ops (default 14, the WGL bound). Independent keys can yield more than one MUS.
+- `--json` prints a machine report (`linearizable`, `greedy`, optional `mus`).
+- Exit status: `0` linearizable, `1` not linearizable, `2` usage or parse error.
+
+JSONL schema (one object per op; unknown fields are errors). Byte fields are UTF-8, or hex if prefixed `0x`. `start`/`end` are a half-open tick interval; omit both to auto-assign.
+
+```json
+{"client":0,"start":1,"end":2,"op":"put","key":"k","value":"v","result":"ok"}
+{"client":1,"start":1,"end":3,"op":"get","key":"k","result":"v"}
+{"op":"get","key":"k","result":null}
+{"op":"delete","key":"k","result":"ok"}
+{"op":"scan","prefix":"a","result":[["a1","v"]]}
+```
+
+Library: `LinearizabilityChecker::minimal_unsatisfiable_subsets(cap)`. This does not replace WGL; it only shrinks and enumerates residuals of a failing WGL check. Full schema: `crates/kaya-sim/src/wgl_jsonl.rs` and `crates/kaya-sim/README.md`.
+
+---
+
 ## Related Work
 
 - [Jepsen](https://jepsen.io/) - Distributed systems testing framework (Clojure)
@@ -398,7 +427,8 @@ KayaDB's approach: build a lightweight Rust-native test harness instead of using
 
 ## References
 
-- `crates/kaya-sim/src/linear.rs` - Sequential linearizability checker
+- `crates/kaya-sim/src/linear.rs` - Sequential + WGL checker, greedy counterexample, MUS enumeration
+- `crates/kaya-sim/src/bin/wgl.rs` - `kaya-wgl` JSONL explorer (`--mus`, `--json`)
 - `crates/kaya-server/src/integration_tests.rs` - Existing cluster tests
 - `crates/kaya-jepsen-test/examples/jepsen_demo.rs` - Runnable full demo (Partition + runner)
 - `crates/kaya-jepsen-test/src/cluster_controller.rs` - In-process cluster spawn, dynamic ports, port-aware partition

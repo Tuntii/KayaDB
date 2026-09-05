@@ -10,7 +10,8 @@ Deterministic simulation runner, fault injection harness, and linearizability to
 - `SimulationConfig` and `SimulationReport`
 - trace replay with `replay_trace(...)`
 - cluster simulation helpers such as `ClusterSim`
-- a linearizability checker and history types
+- a linearizability checker and history types (`check_concurrent`, greedy `minimal_counterexample`, MUS enumeration)
+- `kaya-wgl` CLI explorer: JSONL history in, greedy counterexample (and optional MUSs) out
 - re-exports of `SimDisk` fault scheduling types from `kaya-io`
 - `NodeController` utilities used for process-level control in tests
 
@@ -55,6 +56,35 @@ The simulator exercises the same engine and consensus code paths used elsewhere 
 2. Capture the returned JSONL trace.
 3. Replay the trace to verify deterministic reproduction.
 4. Reduce the failing seed or trace into a regression test.
+
+## WGL explorer (`kaya-wgl`)
+
+Offline diagnosis of a recorded KV history. Input is JSONL (file or stdin); output is the greedy minimal counterexample, and optionally every inclusion-minimal unsatisfiable subset (MUS) under the WGL op cap (14).
+
+```bash
+# greedy report (exit 1 if not linearizable)
+cargo run -p kaya-sim --bin kaya-wgl -- history.jsonl
+
+# enumerate MUSs + machine JSON
+cargo run -p kaya-sim --bin kaya-wgl -- --mus --json history.jsonl
+
+# stdin
+cat history.jsonl | cargo run -p kaya-sim --bin kaya-wgl -- --mus -
+```
+
+JSONL: one object per op. Unknown fields are errors. Byte fields are UTF-8, or hex if prefixed `0x`.
+
+```json
+{"client":0,"start":1,"end":2,"op":"put","key":"k","value":"v","result":"ok"}
+{"client":1,"start":1,"end":3,"op":"get","key":"k","result":"v"}
+{"op":"get","key":"k","result":null}
+{"op":"delete","key":"k","result":"ok"}
+{"op":"scan","prefix":"a","result":[["a1","v"]]}
+```
+
+`start`/`end` are a half-open tick interval; omit both to auto-assign sequential ticks. `put`/`delete` result is `"ok"` or `{"error":"..."}`. Flags: `--mus`, `--mus-cap N` (default 14), `--json`, `--help`.
+
+Library API: `LinearizabilityChecker::minimal_counterexample` (greedy) and `minimal_unsatisfiable_subsets(cap)` (all MUSs). See [jepsen-design.md](../../docs/jepsen-design.md#wgl-explorer-kaya-wgl).
 
 ## Related crates
 
