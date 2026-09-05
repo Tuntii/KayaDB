@@ -58,7 +58,21 @@ impl AuditLog {
         auth_kind: &str,
         key_len: Option<usize>,
     ) {
-        let _ = self.record_inner(peer, opcode, status, auth_kind, key_len);
+        self.record_with_tenant(peer, opcode, status, auth_kind, key_len, None);
+    }
+
+    /// Same as [`record`], plus an optional tenant id when tenant isolation
+    /// resolved the presented client token.
+    pub fn record_with_tenant(
+        &self,
+        peer: SocketAddr,
+        opcode: u8,
+        status: u16,
+        auth_kind: &str,
+        key_len: Option<usize>,
+        tenant: Option<&str>,
+    ) {
+        let _ = self.record_inner(peer, opcode, status, auth_kind, key_len, tenant);
     }
 
     fn record_inner(
@@ -68,9 +82,19 @@ impl AuditLog {
         status: u16,
         auth_kind: &str,
         key_len: Option<usize>,
+        tenant: Option<&str>,
     ) -> io::Result<()> {
         let ts = utc_timestamp_ms();
-        let line = format_audit_line(&ts, self.node_id, peer, opcode, status, auth_kind, key_len);
+        let line = format_audit_line(
+            &ts,
+            self.node_id,
+            peer,
+            opcode,
+            status,
+            auth_kind,
+            key_len,
+            tenant,
+        );
         let mut guard = self
             .file
             .lock()
@@ -95,6 +119,7 @@ fn format_syslog_5424(ts: &str, node_id: u64, json: &str) -> String {
     format!("<134>1 {ts} - kayadb {node_id} audit - {json}")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn format_audit_line(
     ts: &str,
     node_id: u64,
@@ -103,6 +128,7 @@ fn format_audit_line(
     status: u16,
     auth_kind: &str,
     key_len: Option<usize>,
+    tenant: Option<&str>,
 ) -> String {
     let mut line = match key_len {
         Some(len) => format!(
@@ -112,6 +138,12 @@ fn format_audit_line(
             r#"{{"ts":"{ts}","node_id":{node_id},"peer":"{peer}","opcode":{opcode},"status":{status},"auth":"{auth_kind}"}}"#,
         ),
     };
+    if let Some(id) = tenant {
+        if let Some(pos) = line.rfind('}') {
+            let escaped = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".to_owned());
+            line.insert_str(pos, &format!(r#","tenant":{escaped}"#));
+        }
+    }
     line.push('\n');
     line
 }
@@ -251,8 +283,26 @@ mod tests {
             0,
             "none",
             None,
+            None,
         );
         assert!(!line.contains("key_len"));
         assert!(line.contains(r#""auth":"none""#));
+        assert!(!line.contains("tenant"));
+    }
+
+    #[test]
+    fn audit_jsonl_includes_tenant_when_resolved() {
+        let line = format_audit_line(
+            "2026-06-30T12:00:00.000Z",
+            1,
+            "127.0.0.1:7379".parse().unwrap(),
+            1,
+            0,
+            "client",
+            Some(7),
+            Some("acme"),
+        );
+        assert_eq!(extract_json_str(line.trim(), "tenant").unwrap(), "acme");
+        assert_eq!(extract_json_u64(line.trim(), "key_len").unwrap(), 7);
     }
 }

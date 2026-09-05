@@ -222,6 +222,11 @@ fn run() -> Result<(), String> {
     // --acl-file <path> / KAYA_ACL_FILE — JSON map prefix -> token (M24 per-prefix ACL).
     let acl_file = take_value(&mut args, "--acl-file").or_else(|| env::var("KAYA_ACL_FILE").ok());
 
+    // --tenant-file <path> / KAYA_TENANT_FILE — named tenants with exclusive prefixes (#29).
+    // May be combined with --acl-file; both gates must pass (AND).
+    let tenant_file =
+        take_value(&mut args, "--tenant-file").or_else(|| env::var("KAYA_TENANT_FILE").ok());
+
     // --encryption-key-file <path> / KAYA_ENCRYPTION_KEY_FILE — 32 raw bytes AES-256 key
     // (single, non-rotating key). Mutually exclusive with --encryption-keyring-file.
     let encryption_key_file = take_value(&mut args, "--encryption-key-file")
@@ -264,6 +269,11 @@ fn run() -> Result<(), String> {
             .map_err(|e| format!("--acl-file {path}: {e}"))?;
         config = config.with_acl(acl);
     }
+    if let Some(path) = tenant_file {
+        let tenants = kaya_server::acl::TenantAcl::load_file(&path)
+            .map_err(|e| format!("--tenant-file {path}: {e}"))?;
+        config = config.with_tenants(tenants);
+    }
     match (encryption_key_file, encryption_keyring_file) {
         (Some(_), Some(_)) => {
             return Err(
@@ -285,7 +295,10 @@ fn run() -> Result<(), String> {
     }
 
     let audit_log = audit_log_flag.unwrap_or_else(|| {
-        config.operator_token.is_some() || config.client_token.is_some() || config.acl.is_some()
+        config.operator_token.is_some()
+            || config.client_token.is_some()
+            || config.acl.is_some()
+            || config.tenants.is_some()
     });
     config = config.with_audit_log(audit_log);
     config = config.with_audit_syslog(audit_syslog);
