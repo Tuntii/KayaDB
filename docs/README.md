@@ -70,7 +70,7 @@ KayaDB completed **M13–M25** (productization through distributed transactional
 ### Distributed operation
 
 - [Jepsen-style testing](jepsen-design.md) — failure injection, linearizability, scenario registry
-- [Runbooks](runbooks/rolling-restart.md) — add/remove node, rolling restart, backup/restore, split-brain, mTLS sidecar
+- [Runbooks](runbooks/rolling-restart.md) — add/remove node, dashboard HTTP JSON, rolling restart, backup/restore, split-brain, mTLS sidecar
 
 ### Correctness & development
 

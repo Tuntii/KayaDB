@@ -98,7 +98,7 @@ Her milestone değişmez disiplini korur: **spec → sim → gerçek implementas
 
 ### Faz 3 — Hardening + kanıt
 
-9. **M24 — Production hardening ✅ production path** — Complete (2026-07-17): **EncryptedDisk** AES-256-GCM Disk wrapper (`KAYAENC1`|plain_len|nonce|ct+tag; single 32-byte key as KEK=DEK via `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE`); **per-prefix ACL** (`--acl-file` / `KAYA_ACL_FILE` JSON prefix→token, longest-prefix authorize on PUT/GET/DELETE/SCAN/TXN_*). `docs/security.md` §7 re-justified (encryption + ACL closed; key rotation + full multi-tenancy still accepted risk). *Not in this path (deferred):* full kernel+userspace fsync attribution, io_uring completion tracing, stap/perf privileged CI, Dashboard v2 (trace timeline + eBPF + range health — v1 remains day-2 ops), online KEK/DEK rotation.
+9. **M24 — Production hardening ✅ production path** — Complete (2026-07-17): **EncryptedDisk** AES-256-GCM Disk wrapper (`KAYAENC1`|plain_len|nonce|ct+tag; single 32-byte key as KEK=DEK via `--encryption-key-file` / `KAYA_ENCRYPTION_KEY_FILE`); **per-prefix ACL** (`--acl-file` / `KAYA_ACL_FILE` JSON prefix→token, longest-prefix authorize on PUT/GET/DELETE/SCAN/TXN_*). `docs/security.md` §7 re-justified (encryption + ACL closed; key rotation + full multi-tenancy still accepted risk). *Not in this path (deferred):* full kernel+userspace fsync attribution, io_uring completion tracing, stap/perf privileged CI (**Dashboard v2 Phase B/C**; Phase A HTTP JSON shipped in #31), online KEK/DEK rotation.
 10. **M25 — Scale proof & ecosystem close-out ✅ production path** — Complete (2026-07-17): Go client TXN + `RetryPolicy` parity; TypeScript client (`clients/kaya-ts/`); conformance vectors v3 (MERGE/SPLIT + txn edges); **perf envelope v2** (multi-key SI + multi-range 2PC smoke budgets in `kaya-bench`/`BENCHMARKS.md`); **deployment guide v2** (`docs/deployment-guide-v2.md`, M22–M24 flags + range ops) + SLO notes. *Not in this path (honest residuals):* scheduled profiling CI (needs Linux perf runner), full Jepsen grand matrix under combined chaos, linearizability minimal-counterexample printer. Zig client is **wontfix / deferred** for this train (#32; optional stretch, no skeleton). TS TXN + `RetryPolicy` shipped in #32.
 
 **Kapsam dışı (bilinçli):** SQL katmanı (post-arc v2 adayı), tam multi-tenancy (yalnızca per-prefix ACL), geo-replication/follower reads, kanıtsız production SLA iddiası.
@@ -118,7 +118,7 @@ The M16–M25 arc has closed its **documented production path**: operators can r
 | Jepsen grand matrix residual | Multi-range bank `bank-mr` is **nightly CI** (split+merge+kill+partition, sum invariant); `bank-mr-move` adds MOVE_RANGE+kill as a **documented subset** — the full move × split × merge × partition cross-product is not run |
 | Linearizability minimal counterexample | **Shipped:** WGL `minimal_counterexample` + Jepsen violation report; residual is richer MUSes / interactive explorer |
 | Full multi-tenancy | **Encryption key rotation shipped (#28):** `Keyring`-backed `EncryptedDisk`, `kayactl encryption init/rotate/list/verify`, online dual-key read window (no background re-encrypt — see `docs/security.md` §7.1). ACL is still prefix-token isolation only, not full tenancy |
-| Observability gaps | Kernel+userspace fsync attribution, io_uring completion tracing, stap/perf privileged CI, Dashboard v2, scheduled profiling CI |
+| Observability gaps | **Dashboard v2 Phase A shipped (#31):** `/v1/cluster`, `/v1/leadership`, range `healthy`, `/v1/errors` on `--dashboard-addr`. **Phase B** (kernel+userspace fsync attribution, io_uring completion tracing) and **Phase C** (scheduled profiling CI, stap/perf privileged CI) deferred: they need a Linux perf/`CAP_PERFMON` (or bpf/stap) runner |
 | Client gaps | **TS TXN + RetryPolicy shipped (#32).** Zig client is **wontfix / deferred** for this train (optional stretch, no skeleton) |
 
 **Next cut after v0.2.0 candidate:** pick residual rows that matter for the next release train (per-group engines + physical key copy on migrate, 2PC recovery hardening, chaos grand matrix in CI) rather than reopening the whole arc.
@@ -696,7 +696,7 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 **Uzun vadeli / İleri seviye** — ⬜ **deferred past M24 production path** (building blocks — histograms, USDT markers, flamegraphs, correlate, per-file trace — hazır; M24 closed on encryption + ACL only):
 - Kernel + userspace birleşik attribution (hangi fsync'in ne kadarını kernel'da geçirdiğini net raporla) → **post-M24 / open**
 - Production-grade tracing (trace correlation across cluster nodes + client) → **M20 (v1) ✅ / full still open**
-- GUI / web dashboard — ✅ M22 v1 (read-only cluster/range/raft JSON via `--dashboard-addr`); full trace timeline + eBPF histogram → **Dashboard v2 deferred past M24**
+- GUI / web dashboard — ✅ M22 v1 + **#31 Phase A** (read-only JSON via `--dashboard-addr`: `/health`, `/v1/cluster`, `/v1/ranges`+healthy, `/v1/raft`, `/v1/leadership`, `/v1/errors`); full trace timeline + eBPF histogram → **Dashboard v2 Phase B/C deferred** (need Linux perf/cap runner)
 - io_uring completion tracing (Track B ile birleşik) → **post-M24 / open**
 
 **Non-goals (değişmez):**
@@ -745,14 +745,14 @@ Aşağıdaki track'ler **paralel** ilerleyebilir. Her biri kendi içinde önceli
 
 - Latency histogram'ları her yerde (WAL, read path, compaction) — ✅ v0.1.47 (`kaya_core::LatencyHistogram` p50/p99; `Engine::histograms()` for get/scan/fsync/flush/compaction; read-path now measured; Prometheus latency metrics expanded)
 - CI regression gate'leri + BENCHMARKS.md otomasyonu — ✅ (`kaya-bench/tests/perf_gate.rs` release-mode assertion, `scripts/bench-report.{sh,ps1}`, CI step in `.github/workflows/ci.yml`, `BENCHMARKS.md`)
-- Linux perf + eBPF ile düzenli profiling — 🟡 bpftrace/eBPF tooling ✅ (Track A); scheduled/automated profiling runs ⬜ **post-M25 residual** (needs a Linux perf CI runner)
+- Linux perf + eBPF ile düzenli profiling — 🟡 bpftrace/eBPF tooling ✅ (Track A); scheduled/automated profiling runs ⬜ **Dashboard v2 Phase C deferred** (needs a Linux perf/`CAP_PERFMON` CI runner)
 - Large value, high concurrency, mixed workload benchmark'ları — ✅ v0.1.47 (`kaya-bench/benches/mixed_workload.rs`: 64 KiB large-value, 5 000-key flush+cold-read, interleaved put/get/delete/scan)
 - Perf envelope v2 (multi-key SI + multi-range 2PC smoke budgets) — ✅ M25 (`kaya-bench` / `BENCHMARKS.md` / `perf_gate`)
 
 ### Track G: DX, Tooling & Documentation
 
 - `kayactl` interactive / watch modları — ✅ M15 `kayactl watch status`
-- Trace + cluster görselleştirme (dashboard) — 🟡 M22 v1 ✅ (`GET /health|/v1/ranges|/v1/raft`); full timeline + eBPF ⬜ **Dashboard v2 post-M25 residual**
+- Trace + cluster görselleştirme (dashboard) — ✅ M22 v1 + **#31 Phase A** (`GET /health|/v1/cluster|/v1/ranges|/v1/raft|/v1/leadership|/v1/errors`); full timeline + eBPF ⬜ **Dashboard v2 Phase B deferred** (need Linux perf/cap runner)
 - Deployment guide v2 (M22–M24 flags + range ops) — ✅ M25 (`docs/deployment-guide-v2.md`)
 - Daha iyi hata mesajları ve recovery rehberliği — ✅ v0.1.47 (`KayaError::guidance()` actionable hints; structural `LockConflict`; `kayactl` prints `HINT:` lines)
 - Katkı deneyimini iyileştirme (eBPF "good first issue" etiketleri vs.) — ✅ `CONTRIBUTING.md` "Good first issues" now lists eBPF-script and language-client-porting areas

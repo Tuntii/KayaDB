@@ -59,6 +59,7 @@ Compare `last_sequence` in manifest output and recent WAL records across nodes.
 
 See also:
 - `docs/runbooks/add-remove-node.md`
+- `docs/runbooks/dashboard.md` (`GET /v1/leadership` and per-range `healthy` on each node's `--dashboard-addr`)
 - `docs/security.md` (TLS and operator token sections)
 - `docs/runbooks/mtls-sidecar.md`
 - Chaos tests in `kaya-jepsen-test` (they exercise these scenarios).

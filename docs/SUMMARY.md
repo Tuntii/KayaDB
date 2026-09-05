@@ -56,6 +56,7 @@
 * [Add / remove node](runbooks/add-remove-node.md)
 * [Decommission node](runbooks/decommission-node.md)
 * [Move a range](runbooks/move-range.md)
+* [Dashboard (HTTP JSON)](runbooks/dashboard.md)
 * [Rolling restart](runbooks/rolling-restart.md)
 * [Backup & restore](runbooks/backup-restore.md)
 * [Detecting split-brain](runbooks/detecting-split-brain.md)
