@@ -1,6 +1,6 @@
 # Deployment
 
-KayaDB **v0.1.113** ships example deployment layouts under `deploy/` in the repository (and a full [deployment guide v2](deployment-guide-v2.md) for M22–M24 flags). These are **reference configurations** for local/staging — not a managed cloud product.
+KayaDB **v0.2.0** ships example deployment layouts under `deploy/` in the repository (and a full [deployment guide v2](deployment-guide-v2.md) for M22–M24 flags). These are **reference configurations** for local/staging — not a managed cloud product.
 
 **M22–M24 operators:** see **[Deployment guide v2](deployment-guide-v2.md)** for drain, dashboard, encryption, ACL, and range ops flags layered on these layouts.
 

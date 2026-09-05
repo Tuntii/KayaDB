@@ -4,7 +4,7 @@
 
 **Live site:** [https://tuntii.github.io/KayaDB/](https://tuntii.github.io/KayaDB/)
 
-**Current release:** [v0.1.113](releases.md) (M16–M25 production path · **v0.2.0 candidate**)
+**Current release:** [v0.2.0](releases.md) (M16–M25 production path + post-candidate residuals)
 
 ---
 
@@ -26,7 +26,7 @@ Core properties:
 - **Raft cluster** with leader redirection, dynamic membership, and day-2 runbooks
 - **Correctness culture** — simulation, Jepsen-style harness, fuzz targets, chaos-matrix CI
 
-KayaDB completed **M13–M25** (productization through distributed transactional KV). **v0.1.113** is a **v0.2.0 candidate** with documented residuals (live range migrate). Range meta is Raft-replicated + disk-backed (#25); encryption key rotation is online, dual-key-window based (#28). Not a fully hardened multi-tenant SaaS database. Read [security](security.md) before any production-like deployment.
+KayaDB completed **M13–M25** (productization through distributed transactional KV). **v0.2.0** ships that path plus post-candidate residuals (`MOVE_RANGE`, parallel 2PC, tenant isolation, Dashboard v2 Phase A, TypeScript TXN, WGL explorer). Not a fully hardened multi-tenant SaaS database. Read [security](security.md) before any production-like deployment.
 
 ---
 

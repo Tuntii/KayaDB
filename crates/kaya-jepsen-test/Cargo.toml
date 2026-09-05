@@ -13,7 +13,7 @@ categories.workspace = true
 kaya-client.workspace = true
 kaya-core.workspace = true
 kaya-net.workspace = true
-kaya-raft = { path = "../kaya-raft", version = "0.1.113" }
+kaya-raft = { path = "../kaya-raft", version = "0.2.0" }
 kaya-server = { path = "../kaya-server" }
 kaya-sim.workspace = true
 tokio.workspace = true

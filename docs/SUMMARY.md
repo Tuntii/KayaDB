@@ -10,7 +10,7 @@
 
 * [Installation](installation.md) — crates.io, release binaries, build from source
 * [Getting Started](getting-started.md) — first server, first commands, cluster quick-start
-* [Releases & Versioning](releases.md) — tags, v0.1.113, upgrade notes
+* [Releases & Versioning](releases.md) — tags, v0.2.0, upgrade notes
 * [Deployment](deployment.md) — Docker Compose + Kubernetes
 * [Deployment guide v2](deployment-guide-v2.md) — M22–M24 flags, ranges, encryption, ACL
 * [SLO envelope](slo-envelope.md) — hard limits and design SLOs
