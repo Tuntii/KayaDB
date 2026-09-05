@@ -10,7 +10,7 @@ KayaDB uses [GitHub Actions](https://github.com/Tuntii/KayaDB/actions) for conti
 
 | Workflow | File | Triggers | Purpose |
 |---|---|---|---|
-| **CI** | [`ci.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/ci.yml) | `push` `main`, `pull_request`, **`workflow_dispatch`** | `fmt`, `clippy`, tests (excludes `kaya-jepsen-test` in PR path), smoke bench, `perf_gate` |
+| **CI** | [`ci.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/ci.yml) | `push` `main`, `pull_request`, **`workflow_dispatch`** | `fmt`, `clippy`, tests (excludes `kaya-jepsen-test` in PR path), smoke bench, `perf_gate`, TypeScript client `npm test` |
 | **Audit** | [`audit.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/audit.yml) | `push` `main`, `pull_request`, weekly cron, **`workflow_dispatch`** | `cargo audit` + `cargo deny` |
 | **Chaos matrix** | [`chaos-matrix.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/chaos-matrix.yml) | PR smoke, nightly cron, **`workflow_dispatch`** | DiskFull / NetworkPartition / ClockSkew axes |
 | **Jepsen** | [`jepsen.yml`](https://github.com/Tuntii/KayaDB/blob/main/.github/workflows/jepsen.yml) | PR smoke, `push` `main` (smoke), nightly + tags (full), **`workflow_dispatch`** (`smoke`/`full`) | Rust-native T1–T7 full gate |
@@ -36,7 +36,7 @@ Badges in the [repository README](https://github.com/Tuntii/KayaDB/blob/main/REA
 
 ## What runs on every `main` push
 
-1. **CI** — format, clippy, unit/integration tests, smoke benchmark, performance regression gate.
+1. **CI** — format, clippy, unit/integration tests, smoke benchmark, performance regression gate, TypeScript client tests (`clients/kaya-ts`).
 2. **Audit** — dependency vulnerability scan.
 3. **Jepsen smoke** — scenario smoke on `main` pushes.
 4. **Docs** — when `docs/**`, `ROADMAP.md`, `CHANGELOG.md`, deploy READMEs, or `spec/docs/**` change; rebuilds [https://tuntii.github.io/KayaDB/](https://tuntii.github.io/KayaDB/).
