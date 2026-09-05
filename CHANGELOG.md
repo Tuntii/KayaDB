@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **README Quick start (#44):** lead with crates.io `kayactl` 60-second put/get/inspect; keep the from-source workspace/cluster walkthrough as step 2
 - **Release hygiene:** align `workspace.dependencies` path crate versions with `workspace.package` (`0.1.113`); refresh README/docs install pins and release pages to the current line
+- **Dependencies:** `io-uring` 0.6 → 0.7.13 (Linux `io_uring` Disk); OpenTelemetry 0.28 → 0.32 (`opentelemetry` 0.32.0, `opentelemetry_sdk` 0.32.1, `opentelemetry-stdout` 0.32.0); `rand` 0.8 → 0.10.2 in `kaya-jepsen-test` (`gen*` → `random*`, `from_entropy` → `from_os_rng`)
+- **CI Actions:** `actions/checkout` v4 → v7, `actions/cache` v4 → v6, `actions/download-artifact` v4 → v8
+- **CI triggers (#35):** document the full push/PR/schedule/dispatch matrix in `docs/ci-and-actions.md`; keep `workflow_dispatch` on CI, Jepsen, chaos, docs, and audit (added to `audit.yml`)
 
 ---
 

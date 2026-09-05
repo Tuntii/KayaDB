@@ -1,5 +1,6 @@
 //! Linux io_uring-backed Disk prototype (feature `io_uring`).
 
+use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
@@ -11,10 +12,17 @@ use kaya_core::Result;
 use crate::{DirEntry, Disk, RelativePath};
 
 /// File-backed disk using io_uring for read/write/fsync hot paths.
-#[derive(Debug)]
 pub struct IoUringDisk {
     root: PathBuf,
     ring: Mutex<IoUring>,
+}
+
+impl fmt::Debug for IoUringDisk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IoUringDisk")
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
 }
 
 impl IoUringDisk {

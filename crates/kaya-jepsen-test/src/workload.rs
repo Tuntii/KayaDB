@@ -9,7 +9,11 @@ use kaya_client::KayaClient;
 use kaya_core::KayaError;
 use kaya_sim::Op;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
+
+fn thread_std_rng() -> StdRng {
+    StdRng::from_rng(&mut rand::rng())
+}
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -193,10 +197,10 @@ async fn run_client(run: ClientRun) {
         verify_max_ops,
         bank_layout,
     } = run;
-    let mut rng = StdRng::from_entropy();
+    let mut rng = thread_std_rng();
     let start = std::time::Instant::now();
 
-    let initial_node = nodes[rng.gen_range(0..nodes.len())];
+    let initial_node = nodes[rng.random_range(0..nodes.len())];
     let mut client = match timeout(Duration::from_secs(2), KayaClient::connect(initial_node)).await
     {
         Ok(Ok(mut c)) => {
@@ -281,8 +285,8 @@ async fn run_client(run: ClientRun) {
             }
         }
 
-        if workload_type != WorkloadType::Register && rng.gen_bool(0.1) {
-            let new_node = nodes[rng.gen_range(0..nodes.len())];
+        if workload_type != WorkloadType::Register && rng.random_bool(0.1) {
+            let new_node = nodes[rng.random_range(0..nodes.len())];
             if let Ok(Ok(mut new_client)) =
                 timeout(Duration::from_millis(500), KayaClient::connect(new_node)).await
             {
@@ -416,7 +420,7 @@ async fn run_register_op<R: Rng>(
     let wgl = verify_max_ops.is_some();
     // WGL gate: PUT-only on shared register key — concurrent PUT intervals linearize;
     // GET under kill/partition nemesis flakes when cap races with confirmation windows.
-    let do_get = if wgl { false } else { rng.gen_bool(0.7) };
+    let do_get = if wgl { false } else { rng.random_bool(0.7) };
 
     if do_get {
         let op = Op::Get { key: key.clone() };
@@ -442,9 +446,9 @@ async fn run_register_op<R: Rng>(
         // Wider window under kill/membership chaos (T6) so clients recover into
         // overlapping open intervals rather than serial post-election bursts.
         if wgl {
-            sleep(Duration::from_millis(rng.gen_range(40..160))).await;
+            sleep(Duration::from_millis(rng.random_range(40..160))).await;
         }
-        let value: [u8; 8] = rng.gen();
+        let value: [u8; 8] = rng.random();
         let op = Op::Put {
             key: key.clone(),
             value: value.to_vec(),
@@ -485,7 +489,7 @@ async fn run_counter_op<R: Rng>(
 ) {
     let key = b"counter";
 
-    if rng.gen_bool(0.5) {
+    if rng.random_bool(0.5) {
         let op = Op::Get { key: key.to_vec() };
         match timeout(CLIENT_OP_TIMEOUT, client.get(key)).await {
             Ok(Ok(value)) => {
@@ -578,9 +582,9 @@ async fn run_set_op<R: Rng>(
     verify_max_ops: Option<usize>,
     op_start: Instant,
 ) {
-    let do_put = verify_max_ops.is_some() || rng.gen_bool(0.6);
+    let do_put = verify_max_ops.is_some() || rng.random_bool(0.6);
     if do_put {
-        let unique_id: u64 = rng.gen();
+        let unique_id: u64 = rng.random();
         let key = format!("set:{}:{}", client_id, unique_id);
         let value = unique_id.to_le_bytes().to_vec();
 
@@ -654,11 +658,11 @@ async fn run_map_op<R: Rng>(
     verify_max_ops: Option<usize>,
     op_start: Instant,
 ) {
-    let key_id: u32 = rng.gen_range(0..10);
+    let key_id: u32 = rng.random_range(0..10);
     let key = format!("map:{}", key_id);
 
-    if rng.gen_bool(0.5) {
-        let value: [u8; 8] = rng.gen();
+    if rng.random_bool(0.5) {
+        let value: [u8; 8] = rng.random();
         let op = Op::Put {
             key: key.as_bytes().to_vec(),
             value: value.to_vec(),
@@ -729,12 +733,12 @@ async fn run_bank_op<R: Rng>(
     op_start: Instant,
     bank_layout: BankLayout,
 ) {
-    let from = rng.gen_range(0..BANK_NUM_ACCOUNTS);
-    let mut to = rng.gen_range(0..BANK_NUM_ACCOUNTS);
+    let from = rng.random_range(0..BANK_NUM_ACCOUNTS);
+    let mut to = rng.random_range(0..BANK_NUM_ACCOUNTS);
     if to == from {
         to = (from + 1) % BANK_NUM_ACCOUNTS;
     }
-    let amount: i64 = rng.gen_range(1..=20);
+    let amount: i64 = rng.random_range(1..=20);
     let from_key = bank_account_key_for(bank_layout, from);
     // Record as Put on debit key; verification uses sum invariant, not WGL.
     let meta = format!("xfer:{from}->{to}:{amount}").into_bytes();

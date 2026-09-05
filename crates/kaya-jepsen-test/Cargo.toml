@@ -17,7 +17,7 @@ kaya-raft = { path = "../kaya-raft", version = "0.1.113" }
 kaya-server = { path = "../kaya-server" }
 kaya-sim.workspace = true
 tokio.workspace = true
-rand = "0.8"
+rand = "0.10.2"
 
 [dev-dependencies]
 tempfile = "3"
