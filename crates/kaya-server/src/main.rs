@@ -150,7 +150,10 @@ fn run() -> Result<(), String> {
         )
     };
 
-    // Optional read-only JSON dashboard (M22). Example: --dashboard-addr 127.0.0.1:7380
+    // Optional read-only JSON dashboard (M22 v1 + #31 Phase A).
+    // Example: --dashboard-addr 127.0.0.1:7380
+    // Serves GET /health, /v1/cluster, /v1/ranges, /v1/raft, /v1/leadership, /v1/errors.
+    // Not authenticated; bind loopback or a private admin network. See docs/runbooks/dashboard.md.
     let dashboard_addr: Option<SocketAddr> = take_value(&mut args, "--dashboard-addr")
         .map(|s| s.parse().map_err(|e| format!("--dashboard-addr: {e}")))
         .transpose()?;

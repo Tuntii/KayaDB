@@ -16,7 +16,7 @@
 | Ranges | Single group / early multi-raft | LIST / SPLIT / MERGE / MOVE range ops; shared-engine routing (cutover moves ownership, not bytes) |
 | Transactions | Point KV | Single-group SI multi-key + cross-range 2PC (client-transparent) |
 | Security | Client/operator tokens, optional TLS, audit | Engine AES-GCM at rest, per-prefix ACL file |
-| Observability | Prometheus `/metrics` | Read-only JSON dashboard (`/health`, `/v1/ranges`, `/v1/raft`) |
+| Observability | Prometheus `/metrics` | Read-only JSON dashboard (`/health`, `/v1/cluster`, `/v1/ranges`, `/v1/raft`, `/v1/leadership`, `/v1/errors`) |
 
 Docker Compose and Kubernetes examples under `deploy/` remain the reference layouts. Wire the flags below into the same images or StatefulSet command lines.
 
@@ -42,19 +42,22 @@ Drain is a **marker + placement guard**, not full “never lead”. Safe decommi
 
 Full procedure: [runbooks/decommission-node.md](runbooks/decommission-node.md).
 
-### 2.2 Dashboard v1 (M22)
+### 2.2 Dashboard (M22 v1 + #31 Phase A)
 
 | Flag / env | Purpose |
 |---|---|
 | `--dashboard-addr HOST:PORT` | Bind read-only HTTP JSON dashboard (optional; no default bind) |
 
-Endpoints:
+Endpoints (full table and examples: [runbooks/dashboard.md](runbooks/dashboard.md)):
 
 | Path | Body (summary) |
 |---|---|
-| `GET /health` | `{"ok":true}` |
-| `GET /v1/ranges` | `meta_epoch` + range descriptors |
+| `GET /health` | `{"ok":true}` (unchanged) |
+| `GET /v1/cluster` | `node_id`, `drain`, `range_count`, `leader_group_ids`, `meta_epoch` |
+| `GET /v1/ranges` | `meta_epoch` + range descriptors + per-range `healthy` |
 | `GET /v1/raft` | Per-group leader / term / commit |
+| `GET /v1/leadership` | Map of group_id → `{leader_id, term, role, is_leader}` |
+| `GET /v1/errors` | Recent error ring (cap 50) |
 
 Bind rules match client/Raft/metrics: public binds require the same allow-public policy as other listeners. Prefer loopback or a private admin network.
 
@@ -65,11 +68,12 @@ Bind rules match client/Raft/metrics: public binds require the same allow-public
   --peer 2=127.0.0.1:7482,127.0.0.1:7380 \
   --peer 3=127.0.0.1:7483,127.0.0.1:7381
 
+curl -s http://127.0.0.1:7380/v1/cluster | jq .
 curl -s http://127.0.0.1:7380/v1/ranges | jq .
-curl -s http://127.0.0.1:7380/v1/raft | jq .
+curl -s http://127.0.0.1:7380/v1/leadership | jq .
 ```
 
-Dashboard v1 is **not** authenticated. Do not expose it on the public internet.
+The dashboard is **not** authenticated. Do not expose it on the public internet. Phase B (eBPF/fsync attribution) and Phase C (profiling CI) are deferred pending a Linux perf/capability runner.
 
 ### 2.3 Encryption at rest (M24)
 
@@ -231,8 +235,9 @@ kayactl --server HOST:7379 health
 # Prometheus
 curl -s http://127.0.0.1:9090/metrics | head
 
-# Dashboard
+# Dashboard (see runbooks/dashboard.md)
 curl -s http://127.0.0.1:7380/health
+curl -s http://127.0.0.1:7380/v1/cluster | jq .
 ```
 
 Operating limits and correctness SLOs: [slo-envelope.md](slo-envelope.md).  
@@ -246,7 +251,7 @@ CI perf envelope (put/get + multi-key txn + multi-range 2PC smoke budgets): [BEN
 - Parallel-commit 2PC stretch and durable global decision log
 - Background re-encrypt after a key rotation (#28 ships an online dual-key read window; old files upgrade lazily on next write — see `docs/security.md` §7.1)
 - Full multi-tenancy beyond per-prefix ACL
-- Dashboard v2 (trace timeline, eBPF, range health UI)
+- Dashboard v2 Phase B/C (eBPF/fsync attribution, profiling CI; Phase A HTTP JSON shipped, #31)
 - Contractual latency SLA or north-star production claim before M25 exit proof
 
 ---
@@ -255,6 +260,7 @@ CI perf envelope (put/get + multi-key txn + multi-range 2PC smoke budgets): [BEN
 
 - [deployment.md](deployment.md) — Docker Compose + Kubernetes
 - [security.md](security.md) — network model, tokens, encryption, accepted risks
+- [runbooks/dashboard.md](runbooks/dashboard.md) — Dashboard v2 Phase A HTTP JSON
 - [runbooks/decommission-node.md](runbooks/decommission-node.md) — drain workflow
 - [runbooks/move-range.md](runbooks/move-range.md) — live range migrate
 - [runbooks/rolling-restart.md](runbooks/rolling-restart.md) — rolling restart + transfer note

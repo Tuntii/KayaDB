@@ -20,8 +20,8 @@ use std::path::PathBuf;
 
 use kaya_engine::CdcOp;
 use kaya_net::{
-    decode_cdc_checkpoint_request, decode_cdc_poll_request, decode_hello_request,
-    decode_key_payload, decode_member_payload, decode_merge_range_request,
+    decode_cdc_checkpoint_request, decode_cdc_poll_request, decode_error_payload,
+    decode_hello_request, decode_key_payload, decode_member_payload, decode_merge_range_request,
     decode_meta_epoch_payload, decode_move_range_request, decode_promote_learner_payload,
     decode_put_payload, decode_remove_member_payload, decode_scan_payload,
     decode_split_range_request, decode_transfer_leader_request, decode_txn_id_payload,
@@ -54,6 +54,7 @@ use crate::acl::PrefixAcl;
 use crate::audit::AuditLog;
 use crate::client_auth::{decode_client_auth_payload, CLIENT_AUTH_PREFIX};
 use crate::command::RaftCommand;
+use crate::dashboard::{record_error, DashboardErrors};
 use crate::membership::{members_for_add, members_for_promote, members_for_remove, SharedRoster};
 use crate::operator_auth::{
     decode_admin_payload, ADD_MEMBER_OPCODE, ADMIN_AUTH_PREFIX, PROMOTE_LEARNER_OPCODE,
@@ -149,6 +150,7 @@ pub(crate) async fn client_accept_loop(
     network_partitioned: Option<Arc<AtomicBool>>,
     max_connections: usize,
     drain: bool,
+    dashboard_errors: DashboardErrors,
 ) {
     // Backpressure: stop accepting when `max_connections` handlers are live;
     // further connections queue in the OS backlog until a permit frees up.
@@ -182,6 +184,7 @@ pub(crate) async fn client_accept_loop(
         let cli_tok = client_token.clone();
         let acl_rules = acl.clone();
         let audit = audit_log.clone();
+        let dash_errors = dashboard_errors.clone();
         tokio::spawn(async move {
             let _permit = permit;
             handle_connection(
@@ -205,6 +208,7 @@ pub(crate) async fn client_accept_loop(
                 acl_rules,
                 audit,
                 drain,
+                dash_errors,
             )
             .await;
         });
@@ -233,6 +237,7 @@ async fn handle_connection<S>(
     acl: Option<PrefixAcl>,
     audit_log: SharedAuditLog,
     drain: bool,
+    dashboard_errors: DashboardErrors,
 ) where
     S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin,
 {
@@ -261,6 +266,16 @@ async fn handle_connection<S>(
             drain,
         )
         .await;
+        if result.status == STATUS_ERROR {
+            let message =
+                decode_error_payload(&result.body).unwrap_or_else(|_| "status_error".to_owned());
+            let kind = if message.contains("acl denied") || message.contains("credential") {
+                "auth_deny"
+            } else {
+                "status_error"
+            };
+            record_error(&dashboard_errors, kind, message);
+        }
         if let Some(audit) = audit_log.as_ref() {
             audit.record(
                 peer,

@@ -111,7 +111,8 @@ pub struct ClusterConfig {
     /// When `Some`, expose Prometheus metrics at this listen address (`GET /metrics`).
     pub metrics_addr: Option<SocketAddr>,
     /// When `Some`, expose the read-only JSON dashboard (`GET /health`,
-    /// `/v1/ranges`, `/v1/raft`) at this listen address.
+    /// `/v1/cluster`, `/v1/ranges`, `/v1/raft`, `/v1/leadership`, `/v1/errors`)
+    /// at this listen address.
     pub dashboard_addr: Option<SocketAddr>,
     /// Maximum concurrent client connections. Further connections are not
     /// accepted until an active one closes (TCP backlog backpressure).
@@ -777,14 +778,22 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         None
     };
 
+    // Recent-error ring shared by the dashboard (`GET /v1/errors`) and client
+    // STATUS_ERROR / auth-deny recording in `client_ops`.
+    let dashboard_errors = crate::dashboard::new_error_ring();
+
     // Read-only dashboard: spawned so it does not explode the select! matrix.
     // Dropped when the process shuts down via the runtime.
     if let Some(dashboard_addr) = config.dashboard_addr {
         let raft = shared_raft.clone();
         let ranges = shared_range_table.clone();
+        let errors = dashboard_errors.clone();
         let node_id = config.node_id.0;
+        let drain = config.drain;
         tokio::spawn(async move {
-            if let Err(e) = crate::dashboard::serve(dashboard_addr, node_id, raft, ranges).await {
+            if let Err(e) =
+                crate::dashboard::serve(dashboard_addr, node_id, drain, raft, ranges, errors).await
+            {
                 eprintln!("[node {node_id}] dashboard listener error: {e}");
             }
         });
@@ -876,6 +885,7 @@ async fn run_cluster_node(config: ClusterConfig) -> std::io::Result<()> {
         config.network_partitioned.clone(),
         config.max_client_connections,
         drain,
+        dashboard_errors,
     );
     // Load persisted Raft snapshot once at startup (before the event loop applies entries).
     snapshot::install_persisted_snapshot_at_startup(
