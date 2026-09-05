@@ -1,38 +1,55 @@
 # Releases & Versioning
 
-KayaDB uses [Semantic Versioning](https://semver.org/) while in `0.1.x` pre-1.0 development. Breaking storage-format or wire-protocol changes bump the minor segment; patch releases add features and fixes within a milestone.
+KayaDB uses [Semantic Versioning](https://semver.org/). Pre-1.0, the minor segment (`0.2.0`) marks a coordinated feature cut; patch releases add fixes within that line. Breaking storage-format or wire-protocol changes still bump the minor segment.
 
 **Changelog:** [CHANGELOG.md](CHANGELOG.md)  
 **Roadmap:** [ROADMAP.md](ROADMAP.md)
 
 ---
 
-## Current release — v0.1.113
+## Current release — v0.2.0
+
+| Item | Detail |
+|---|---|
+| **Tag** | [`v0.2.0`](https://github.com/Tuntii/KayaDB/releases/tag/v0.2.0) |
+| **Date** | 2026-09-05 |
+| **Milestone** | First 0.2 line · M16–M25 production path + post-candidate residuals |
+| **Workspace version** | `0.2.0` in root `Cargo.toml` |
+| **crates.io** | Core crates + `kaya-ebpf`, `kaya-server`, `kayactl` at `0.2.0` |
+| **Notes** | [release-notes/v0.2.0.md](release-notes/v0.2.0.md) |
+
+### Highlights
+
+- **Range migrate:** live `MOVE_RANGE` (21), durable range meta, orphan group reclaim
+- **Transactions:** parallel 2PC + durable decision log, HLC uncertainty clamp
+- **Security:** online key rotation, named tenant isolation (`--tenant-file`)
+- **Ops:** Dashboard v2 Phase A (`/v1/cluster`, `/v1/leadership`, `/v1/errors`)
+- **Clients / correctness:** TypeScript TXN + retries; `kaya-wgl` MUS explorer
+- **Honest residuals:** physical key copy on migrate, 2PC TLS forwarding, quotas/RBAC, Dashboard B/C, Zig client. See [ROADMAP](ROADMAP.md)
+
+### Install this version
+
+```bash
+cargo install kayactl --version 0.2.0
+cargo install kaya-server --bin kayadb-server --version 0.2.0
+```
+
+Or build from `main` / download binaries from the latest [GitHub Release](https://github.com/Tuntii/KayaDB/releases).
+
+---
+
+## Previous release — v0.1.113
 
 | Item | Detail |
 |---|---|
 | **Tag** | [`v0.1.113`](https://github.com/Tuntii/KayaDB/releases/tag/v0.1.113) |
 | **Date** | 2026-07-17 |
-| **Milestone** | M21 polish + M22–M25 production path ✅ · **v0.2.0 candidate** |
-| **Workspace version** | `0.1.113` in root `Cargo.toml` |
-| **crates.io** | Core crates + `kaya-ebpf`, `kaya-server`, `kayactl` at `0.1.113` |
-
-### Highlights
-
-- **Range routing:** `LIST_RANGES` / `SPLIT_RANGE` / `MERGE_RANGE`, advisory rebalance plan, drain/decommission
-- **Cross-shard TXN:** sequential 2PC over multi-raft groups; SI single-group atomic commit
-- **Hardening:** AES-GCM encryption-at-rest, per-prefix ACL, Dashboard v1
-- **Ecosystem:** Go TXN + retries, TypeScript client, Python client, conformance v3, deployment guide v2
-- **Honest residuals:** no live `MOVE_RANGE`, no key rotation — range meta is now Raft-replicated + disk-backed (#25). See [ROADMAP](ROADMAP.md) north-star re-eval
-
-### Install this version
+| **Milestone** | M21 polish + M22–M25 production path · v0.2.0 candidate |
 
 ```bash
 cargo install kayactl --version 0.1.113
 cargo install kaya-server --bin kayadb-server --version 0.1.113
 ```
-
-Or build from `main` / download binaries from the latest [GitHub Release](https://github.com/Tuntii/KayaDB/releases).
 
 ---
 
@@ -82,7 +99,7 @@ Jepsen full gate (`T1–T7`) runs on tag pushes and nightly — see [jepsen-desi
 
 | Source | Rule |
 |---|---|
-| **Tagged releases** | Explicit `v0.1.N` tags (e.g. `v0.1.113`) |
+| **Tagged releases** | Explicit `v0.Y.Z` tags (e.g. `v0.2.0`) |
 | **crates.io publish helper** | `scripts/smart_publish.ps1` / `ci_publish_crates.sh` can skip versions already on the registry |
 | **Development** | `main` may be ahead of the latest tag; see [CHANGELOG](CHANGELOG.md) |
 
@@ -92,7 +109,8 @@ Jepsen full gate (`T1–T7`) runs on tag pushes and nightly — see [jepsen-desi
 
 | Tag | Summary |
 |---|---|
-| `v0.1.113` | M21–M25 production path; v0.2.0 candidate (**current**) |
+| `v0.2.0` | First 0.2 line: M16–M25 path + post-candidate residuals (**current**) |
+| `v0.1.113` | M21–M25 production path; v0.2.0 candidate |
 | `v0.1.110` | M16–M20 transactional KV foundation |
 | `v0.1.46` | M15: client auth, audit, Go client, Prometheus, Docker/K8s, watch |
 | `v0.1.45` | Post-M14: ZSTD/prefix/cache stats, rich nemesis, eBPF stub, manifest TLA+ |

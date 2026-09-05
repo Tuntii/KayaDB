@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.2.0] - 2026-09-05
+
+**Release theme:** First 0.2 line. M16–M25 production path plus post-candidate residuals (live range migrate, parallel 2PC, tenant isolation, Dashboard v2 Phase A, TypeScript TXN, WGL explorer). Honest residuals remain; not an unqualified production-SLA claim.
+
 ### Added
 - **WGL MUS explorer (`kaya-wgl`, #34):** `LinearizabilityChecker::minimal_unsatisfiable_subsets` enumerates inclusion-minimal failing subsets under an op cap (default 14); `kaya-wgl` reads a JSONL history (file or stdin) and prints the greedy counterexample plus optional MUS list (`--mus`, `--mus-cap`, `--json`)
 - **Named-tenant isolation (#29):** `TenantAcl` + `kayadb-server --tenant-file` / `KAYA_TENANT_FILE` (JSON `{ "tenants": [ { "id", "token", "prefix" } ] }`); exclusive prefixes (load-time reject overlap); keyed ops hard-deny keys outside the token's tenant prefix; keyless ops require a known tenant token; AND with PrefixAcl when both files are set; audit JSONL optional `"tenant"` field; spec `spec/docs/tenant-isolation-spec.md`; IT `cross_tenant_access_denied`. Quotas / RBAC / billing still residual.
@@ -29,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **crates.io publish order:** publish `kaya-ebpf` (and `kaya-server`) before `kayactl` so optional/path deps resolve on the registry
 
 ### Changed
+- **Workspace version 0.1.113 → 0.2.0:** `workspace.package` and path crate versions; docs/README/install pins; GitHub Release notes path
 - **README Quick start (#44):** lead with crates.io `kayactl` 60-second put/get/inspect; keep the from-source workspace/cluster walkthrough as step 2
 - **Release hygiene:** align `workspace.dependencies` path crate versions with `workspace.package` (`0.1.113`); refresh README/docs install pins and release pages to the current line
 - **Dependencies:** `io-uring` 0.6 → 0.7.13 (Linux `io_uring` Disk); OpenTelemetry 0.28 → 0.32 (`opentelemetry` 0.32.0, `opentelemetry_sdk` 0.32.1, `opentelemetry-stdout` 0.32.0); `rand` 0.8 → 0.10.2 in `kaya-jepsen-test` (`gen*` → `random*`, `from_entropy` → `from_os_rng`)
