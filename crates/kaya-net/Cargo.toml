@@ -17,7 +17,7 @@ kaya-core.workspace = true
 kaya-raft.workspace = true
 tokio.workspace = true
 tokio-rustls = { version = "0.26", optional = true }
-rustls = { version = "0.23", default-features = false, features = ["std", "ring"], optional = true }
+rustls = { version = "0.23.45", default-features = false, features = ["std", "ring"], optional = true }
 rustls-pemfile = { version = "2", optional = true }
 
 [features]

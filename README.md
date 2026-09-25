@@ -9,7 +9,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](Cargo.toml)
 [![crates.io: kaya-engine](https://img.shields.io/crates/v/kaya-engine.svg?label=kaya-engine)](https://crates.io/crates/kaya-engine)
 [![crates.io: kayactl](https://img.shields.io/crates/v/kayactl.svg?label=kayactl)](https://crates.io/crates/kayactl)
-[![Status](https://img.shields.io/badge/status-v0.2.0-brightgreen.svg)](https://tuntii.github.io/KayaDB/#/ROADMAP.md)
+[![Status](https://img.shields.io/badge/status-v0.2.1-brightgreen.svg)](https://tuntii.github.io/KayaDB/#/ROADMAP.md)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://tuntii.github.io/KayaDB/)
 
 **A correctness-first, embeddable distributed key-value database built in Rust.**
@@ -70,8 +70,8 @@ cargo install kaya-server --bin kayadb-server
 
 After `cargo install kayactl`, you can `put` / `get` / `inspect` without cloning — [try it in 60 seconds](#try-it-in-60-seconds).
 
-Pre-built binaries: [GitHub Releases](https://github.com/Tuntii/KayaDB/releases) (`v0.2.0` and later).  
-Rust library: `kaya-engine = "0.2.0"` — see [installation guide](docs/installation.md).
+Pre-built binaries: [GitHub Releases](https://github.com/Tuntii/KayaDB/releases) (`v0.2.1` and later).  
+Rust library: `kaya-engine = "0.2.1"` — see [installation guide](docs/installation.md).
 
 ---
 
@@ -92,7 +92,7 @@ Rust library: `kaya-engine = "0.2.0"` — see [installation guide](docs/installa
 | Production hardening | ✅ M13–M24 | TLS, tokens, ACL, encryption-at-rest, runbooks, chaos gates |
 | Distributed TXN KV | ✅ M16–M25 | MVCC, SI, 2PC, indexes, CDC, range split/merge (`v0.2.0`) |
 
-> **v0.2.0** is the first 0.2 line: M16–M25 production path plus post-candidate residuals (`MOVE_RANGE`, parallel 2PC, tenant isolation, Dashboard v2 Phase A, TypeScript TXN, WGL explorer). It is not an unqualified production-SLA claim — remaining residuals are listed in [ROADMAP.md](ROADMAP.md). See [security](docs/security.md) §7 before any production-like deployment.
+> **v0.2.0** is the first 0.2 line: M16–M25 production path plus post-candidate residuals (`MOVE_RANGE`, parallel 2PC, tenant isolation, Dashboard v2 Phase A, TypeScript TXN, WGL explorer). **v0.2.1** is the current patch (rustls 0.23.45). It is not an unqualified production-SLA claim. Remaining residuals are listed in [ROADMAP.md](ROADMAP.md). See [security](docs/security.md) §7 before any production-like deployment.
 
 ---
 
@@ -308,7 +308,7 @@ Detailed numbers and methodology live in [BENCHMARKS.md](BENCHMARKS.md).
 
 See the **[full status and roadmap](ROADMAP.md)** and the tracked **[productization north star](docs/productization.md)** (M13 exit gates — prototype → deployable product).
 
-**Current line:** `v0.2.0` (M16–M25 production path plus post-candidate residuals). Earlier milestones: M13 productization, M14 algorithms + Jepsen full gate, M15 auth/ops/clients/deploy. Honest residuals and next cut priorities: [ROADMAP.md](ROADMAP.md). Accepted risks: [security.md §7](docs/security.md#7-accepted-risks-and-future-hardening-m15-exit).
+**Current line:** `v0.2.1` (rustls 0.23.45 on the v0.2.0 feature set: M16–M25 production path plus post-candidate residuals). Earlier milestones: M13 productization, M14 algorithms + Jepsen full gate, M15 auth/ops/clients/deploy. Honest residuals and next cut priorities: [ROADMAP.md](ROADMAP.md). Accepted risks: [security.md §7](docs/security.md#7-accepted-risks-and-future-hardening-m15-exit).
 
 For the complete picture, use the **[official documentation](https://tuntii.github.io/KayaDB/)** or [docs/README.md](docs/README.md).
 
