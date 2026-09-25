@@ -14,7 +14,7 @@ categories.workspace = true
 
 [dependencies]
 kaya-core.workspace = true
-lz4_flex = "0.11"
+lz4_flex = "0.14"
 zstd = "0.13"
 
 [lib]
