@@ -39,7 +39,7 @@ jobs:
         run: bash scripts/prepare_docs_site.sh /tmp/site
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: '/tmp/site'
 
