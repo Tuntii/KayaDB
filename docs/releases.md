@@ -7,34 +7,46 @@ KayaDB uses [Semantic Versioning](https://semver.org/). Pre-1.0, the minor segme
 
 ---
 
-## Current release — v0.2.0
+## Current release — v0.2.1
+
+| Item | Detail |
+|---|---|
+| **Tag** | [`v0.2.1`](https://github.com/Tuntii/KayaDB/releases/tag/v0.2.1) |
+| **Date** | 2026-09-25 |
+| **Milestone** | Patch on the 0.2 line · rustls 0.23.45 |
+| **Workspace version** | `0.2.1` in root `Cargo.toml` |
+| **crates.io** | Workspace publish set at `0.2.1` after the tag's Publish Crates run |
+| **Notes** | [release-notes/v0.2.1.md](release-notes/v0.2.1.md) |
+
+### Highlights
+
+- **Security:** `kaya-net` `tls` requires rustls `0.23.45` ([RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285))
+- **Protocol / storage:** unchanged from v0.2.0
+
+### Install this version
+
+```bash
+cargo install kayactl --version 0.2.1
+cargo install kaya-server --bin kayadb-server --version 0.2.1
+```
+
+Or build from `main` / download binaries from the latest [GitHub Release](https://github.com/Tuntii/KayaDB/releases).
+
+---
+
+## Previous release — v0.2.0
 
 | Item | Detail |
 |---|---|
 | **Tag** | [`v0.2.0`](https://github.com/Tuntii/KayaDB/releases/tag/v0.2.0) |
 | **Date** | 2026-09-05 |
 | **Milestone** | First 0.2 line · M16–M25 production path + post-candidate residuals |
-| **Workspace version** | `0.2.0` in root `Cargo.toml` |
-| **crates.io** | Core crates + `kaya-ebpf`, `kaya-server`, `kayactl` at `0.2.0` |
 | **Notes** | [release-notes/v0.2.0.md](release-notes/v0.2.0.md) |
-
-### Highlights
-
-- **Range migrate:** live `MOVE_RANGE` (21), durable range meta, orphan group reclaim
-- **Transactions:** parallel 2PC + durable decision log, HLC uncertainty clamp
-- **Security:** online key rotation, named tenant isolation (`--tenant-file`)
-- **Ops:** Dashboard v2 Phase A (`/v1/cluster`, `/v1/leadership`, `/v1/errors`)
-- **Clients / correctness:** TypeScript TXN + retries; `kaya-wgl` MUS explorer
-- **Honest residuals:** physical key copy on migrate, 2PC TLS forwarding, quotas/RBAC, Dashboard B/C, Zig client. See [ROADMAP](ROADMAP.md)
-
-### Install this version
 
 ```bash
 cargo install kayactl --version 0.2.0
 cargo install kaya-server --bin kayadb-server --version 0.2.0
 ```
-
-Or build from `main` / download binaries from the latest [GitHub Release](https://github.com/Tuntii/KayaDB/releases).
 
 ---
 
@@ -109,7 +121,8 @@ Jepsen full gate (`T1–T7`) runs on tag pushes and nightly — see [jepsen-desi
 
 | Tag | Summary |
 |---|---|
-| `v0.2.0` | First 0.2 line: M16–M25 path + post-candidate residuals (**current**) |
+| `v0.2.1` | rustls 0.23.45 (RUSTSEC-2026-0285) on the 0.2 line (**current**) |
+| `v0.2.0` | First 0.2 line: M16–M25 path + post-candidate residuals |
 | `v0.1.113` | M21–M25 production path; v0.2.0 candidate |
 | `v0.1.110` | M16–M20 transactional KV foundation |
 | `v0.1.46` | M15: client auth, audit, Go client, Prometheus, Docker/K8s, watch |

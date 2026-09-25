@@ -9,8 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.2.1] - 2026-09-25
+
+**Release theme:** Patch on the 0.2 line. Closes the rustls TLS 1.3 handshake advisory. No storage-format or wire-protocol change.
+
+### Security
+- **rustls 0.23.40 → 0.23.45** on the `kaya-net` `tls` feature ([RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285)). Affected range was `>=0.23.13, <0.23.45`: rustls accepted a TLS 1.3 handshake message at the wrong encryption level when it shared a record with a key change. The crate requirement is now `0.23.45` (`^0.23.45`, still the 0.23 line). Lockfile follows that floor: `rustls-webpki` 0.103.13 → 0.103.15, and rustls's optional `aws-lc-rs` 1.17.0 → 1.18.1 (`aws-lc-sys` 0.41.0 → 0.45.0). The `ring` feature flag is unchanged. `rustls-pemfile` remains the allowed unmaintained warning (RUSTSEC-2025-0134).
+
 ### Fixed
-- **crates.io publish order:** publish `kaya-sim` before `kaya-client`. The v0.2.0 upload stopped at `kaya-client` because its optional `trace` feature requires `kaya-sim` 0.2.0, which was not in the publish list. `kaya-ebpf`, `kaya-server`, and `kayactl` never uploaded. Retry is the same 0.2.0 versions, not a new release.
+- **crates.io publish order:** publish `kaya-sim` before `kaya-client`. The v0.2.0 upload stopped at `kaya-client` because its optional `trace` feature requires `kaya-sim`, which was missing from the publish list, so `kaya-ebpf`, `kaya-server`, and `kayactl` stayed on 0.1.113. Those 0.2.0 crates were uploaded on 2026-09-25 before this patch. The order fix ships in this tag.
+
+### Changed
+- **Workspace version 0.2.0 → 0.2.1:** `workspace.package`, path crate versions, docs/README/install pins, GitHub Release notes path.
 
 ---
 
