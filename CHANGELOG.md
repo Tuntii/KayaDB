@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **crates.io publish order:** publish `kaya-sim` before `kaya-client`. The v0.2.0 upload stopped at `kaya-client` because its optional `trace` feature requires `kaya-sim` 0.2.0, which was not in the publish list. `kaya-ebpf`, `kaya-server`, and `kayactl` never uploaded. Retry is the same 0.2.0 versions, not a new release.
+
 ---
 
 ## [0.2.0] - 2026-09-05

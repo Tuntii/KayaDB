@@ -13,11 +13,14 @@ kaya-wal = { path = "crates/kaya-wal" }
 kaya-lsm = { path = "crates/kaya-lsm" }
 kaya-engine = { path = "crates/kaya-engine" }
 kaya-net = { path = "crates/kaya-net" }
+kaya-sim = { path = "crates/kaya-sim" }
 kaya-client = { path = "crates/kaya-client" }
 kaya-ebpf = { path = "crates/kaya-ebpf" }
 kaya-server = { path = "crates/kaya-server" }
 EOF
 
+cargo package --no-verify -p kaya-sim
 cargo package --no-verify -p kaya-engine
+cargo package --no-verify -p kaya-client
 cargo package --no-verify -p kaya-server
 cargo package --no-verify -p kayactl
