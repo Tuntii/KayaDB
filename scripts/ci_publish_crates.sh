@@ -10,6 +10,8 @@ ORDER=(
   kaya-lsm
   kaya-engine
   kaya-net
+  # kaya-client's optional `trace` feature resolves kaya-sim from crates.io.
+  kaya-sim
   kaya-client
   # Optional kayactl/kaya-server dep; must land on crates.io before those packages.
   kaya-ebpf
